@@ -1,7 +1,9 @@
 # OpenResty Authz Gateway 配置模板
 # 由 docker-entrypoint.sh 用 envsubst 生成 nginx.conf
 # 变量: HTTP_LISTEN HTTP_SERVER_DIRECTIVE HTTPS_PORT CERT_FILE CERT_KEY
+#       AGENT_API_KEY_LINE (透传 AUTHZ_AGENT_API_KEY 给 worker 的 env 指令行)
 
+${AGENT_API_KEY_LINE}
 worker_processes ${WORKER_PROCESSES};
 # 容器内以 root 运行 worker, 保证挂载卷中的 SQLite 可写
 user root;

@@ -423,7 +423,7 @@ ac = columns("api_keys")
 schema = connection.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'api_keys'").fetchone()[0]
 policy = connection.execute("""SELECT 1 FROM policies
     WHERE ptype = 'p' AND v0 = 'role:api' AND v1 = '/*' AND v2 = '*'""").fetchone()
-api_valid = ac == {"id", "name", "token_hash", "role", "enabled", "created_at", "updated_at"}
+api_valid = ac == {"id", "name", "token_hash", "role", "loopback_only", "enabled", "created_at", "updated_at"}
 print("api_keys=" + ("yes" if api_valid and policy and "CHECK" not in schema.upper() else "no"))
 
 # legacy policy migrated to local identity
@@ -446,7 +446,7 @@ assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only"
 
 cookie_header() {
     awk '
@@ -1646,6 +1646,22 @@ sleep 1
 login "$ADMIN_HOST" admin reset123 "$RESET_COOKIE"
 request GET "$ADMIN_HOST" /_authz/api/session "$RESET_COOKIE"
 assert_eq "reset admin password is immediately usable" "$STATUS" "200"
+# ── Agent 专用 API Key（仅本机可用）────────────────────────────
+AGENT_CSRF=$(jq -er '.data.csrf' "$TMP_DIR/body")
+STATUS=$(curl -sS --max-time 5 --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1" \
+    -H "Cookie: $(cookie_header "$RESET_COOKIE")" \
+    -H "X-CSRF-Token: $AGENT_CSRF" -H 'Content-Type: application/json' \
+    -o "$TMP_DIR/body" -w '%{http_code}' \
+    -X POST "http://$ADMIN_HOST:$HTTP_PORT/_authz/api/api-keys" \
+    -d '{"name":"agent-loopback","role":"admin"}')
+assert_eq "create loopback-only api key" "$STATUS" "201"
+AGENT_LOOPBACK_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+STATUS=$(curl -sS --max-time 5 --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1" \
+    -o "$TMP_DIR/body" -w '%{http_code}' \
+    "http://$ADMIN_HOST:$HTTP_PORT/_authz/api/session" \
+    -H "x-authz-key: $AGENT_LOOPBACK_TOKEN")
+assert_eq "loopback api key works from loopback" "$STATUS" "200"
+
 docker exec "$CONTAINER_NAME" env AUTHZ_ADMIN_PASSWORD=admin123 admin_password_reset >/dev/null
 sleep 1
 login "$ADMIN_HOST" admin admin123 "$ADMIN_COOKIE"

@@ -57,6 +57,23 @@ X-Authz-Identity: api-key:<id>
 如果请求显式携带无效或已禁用的 `x-authz-key`，网关返回 `401 invalid_api_key`，不会回退到同时携带的
 浏览器 Cookie。
 
+### 2.3 Agent 专用 API Key（仅限本机）
+
+设置环境变量 `AUTHZ_AGENT_API_KEY`（值为 `ak_<64 位小写 hex>`）后，网关启动时会自动创建或更新名为
+`agent-default` 的 API Key：角色 `admin`、`loopback_only=1`。该 Key **只能从网关宿主机本机调用**，
+非回环来源一律 401，适合本机运行的自动化程序（Agent）安全使用控制面。
+
+```bash
+curl -H "x-authz-key: $AUTHZ_AGENT_API_KEY" http://127.0.0.1:6080/_authz/api/session
+```
+
+要求与约束：
+
+- 只能通过本机地址访问网关控制面端口，不要把控制面暴露到公网或跨机调用；
+- 值只保存在部署环境（如 `.env`），不入库明文、不进 git；轮换时更换环境变量并重建容器；
+- 该 Key 具备 admin 权限，自动化脚本应只调用任务所需的最小接口集合；
+- 管理界面创建的普通 API Key 不受 loopback 限制，如需限制来源请使用本节方式。
+
 ## 3. 权限矩阵
 
 | 接口能力 | 普通用户/Key | `admin` 用户/Key | `api` Key |

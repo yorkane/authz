@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS api_keys(
   name TEXT UNIQUE NOT NULL,
   token_hash TEXT UNIQUE NOT NULL,
   role TEXT NOT NULL DEFAULT 'api',
+  loopback_only INTEGER NOT NULL DEFAULT 0,
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL

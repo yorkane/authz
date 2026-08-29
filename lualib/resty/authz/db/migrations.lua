@@ -228,6 +228,17 @@ _M.list = {
             end
         end,
     },
+    {
+        version = 8,
+        name = "api_keys_loopback_only",
+        up = function(db)
+            local cols = db.query("PRAGMA table_info(api_keys)") or {}
+            for _, c in ipairs(cols) do
+                if c.name == "loopback_only" then return end
+            end
+            must(db.exec("ALTER TABLE api_keys ADD COLUMN loopback_only INTEGER NOT NULL DEFAULT 0"))
+        end,
+    },
 }
 
 function _M.run(db)

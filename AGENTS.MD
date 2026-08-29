@@ -228,6 +228,63 @@ lualib/tracker/
 - 新增 vendored Lua 库时同步检查 Dockerfile COPY 路径和容器内 `require`。
 - 阻塞式外部 IO 不放入高频请求路径。
 
+## Authz Gateway 的 API 控制（Agent 接入要求）
+
+本仓库自身就是一个 Authz Gateway。Agent（自动化程序）在本机对网关控制面的访问必须遵守以下约定，
+不得为绕过认证而修改代码或数据库。
+
+### 认证方式（三选一，按优先级）
+
+1. **Agent 专用 API Key（推荐）**：环境变量 `AUTHZ_AGENT_API_KEY` 指定一个 `ak_<64 hex>` token，
+   启动时 seed 为 `agent-default` key（角色 admin、`loopback_only=1`）。使用方式：
+
+   ```bash
+   curl -H "x-authz-key: $AUTHZ_AGENT_API_KEY" http://127.0.0.1:6080/_authz/api/...
+   ```
+
+   该 key **只能从本机回环地址调用**，非回环来源一律 401。值保存在部署目录（如 `/data/app/.env`），
+   不入库、不进 git；轮换时改环境变量并重建容器。
+
+2. **普通 API Key**：管理员通过 `POST /_authz/api/api-keys` 创建，角色决定控制面与代理权限，
+   不限来源但无 CSRF 豁免差异（API key 本身免 CSRF）。
+3. **浏览器会话**：人用，修改请求需 `X-CSRF-Token`。Agent 不应使用会话方式，避免 CSRF 与 Cookie 管理。
+
+### 控制面路径（全部在 `/_authz` 下）
+
+- 会话：`GET|DELETE /_authz/api/session`
+- 用户：`GET|POST /_authz/api/users`、`PATCH|DELETE /_authz/api/users/:id`、`PUT /_authz/api/users/:id/password`
+- 绑定（应用）：`GET|POST /_authz/api/applications`、`PATCH|DELETE /_authz/api/applications/:id`
+- 策略：`GET /_authz/api/authorization`、`POST /_authz/api/policies`、`PATCH|DELETE /_authz/api/policies/:id`
+- API Key：`GET|POST /_authz/api/api-keys`、`PATCH|DELETE /_authz/api/api-keys/:id`
+- 菜单树：`GET /_authz/api/menu-tree`（渲染用）；`GET|POST /_authz/api/menu-entries`、
+  `PUT /_authz/api/menu-entries/reorder`、`PATCH|DELETE /_authz/api/menu-entries/:id`（编辑用）
+
+完整字段与示例见 `docs/core-api.md`。
+
+### 硬性要求
+
+- **只走本机**：Agent 必须在网关宿主机上运行，通过 `127.0.0.1:<AUTHZ_HTTP_PORT>` 访问；
+  禁止把控制面端口暴露到公网或跨机访问。
+- **请求头**：修改类请求必须带 `Content-Type: application/json`；API key 放在 `x-authz-key`，
+  不用 Cookie、不用 `Authorization: Bearer`。
+- **响应契约**：成功 `{"data": ...}`，失败 `{"error":{"code","message"}}`，JSON 为 UTF-8。
+  状态码语义：401 未认证/Key 无效、403 无权限或 CSRF 失败、404 不存在、409 冲突、422 参数校验失败。
+- **最小权限**：Agent 用 `AUTHZ_AGENT_API_KEY` 时拥有 admin 权限，只应调用其任务所需的最小接口集合；
+  不要把该 key 写入日志、代码或 git。
+- **登录防护**：控制面登录有失败延迟与 `账户名+IP` 锁定（默认 5 次 → 30 分钟）。Agent 不应使用
+  用户名密码登录，避免触发锁定。
+- **验证义务**：任何依赖这些接口的自动化脚本，必须在真实实例上先做一次 smoke（读 session、列 applications）
+  再执行变更；变更类操作后必须复核结果。
+
+### 实现侧要求（修改网关代码时）
+
+- API Key 认证逻辑在 `lualib/resty/authz/api_key.lua`（含 `loopback_only` 强制），
+  种子逻辑在 `lualib/resty/authz/db/seed.lua`；改动后必须在真实实例上同时验证
+  “回环可用 + 非回环拒绝”两个方向，并更新 `test/test_authz_gateway.sh`。
+- 新增控制面接口时保持：guard 顺序（会话/API key → admin/roles → CSRF）不变、
+  错误结构不变、并同步 `docs/core-api.md` 与本节路径清单。
+
+
 ## 本地回归测试
 
 执行：

@@ -4,6 +4,8 @@
 local repository = require "resty.authz.repository.api_keys"
 local util = require "resty.authz.util"
 
+local target = require "resty.authz.target"
+
 local _M = {}
 
 local TOKEN_PATTERN = [[^ak_[0-9a-f]{64}$]]
@@ -28,6 +30,12 @@ function _M.authenticate(token)
     local row = repository.by_hash(token_hash)
     local role = row and _M.valid_role(row.role)
     if not role then return nil end
+    -- loopback_only 密钥仅接受本机回环来源；非回环访问一律拒绝。
+    if row.loopback_only == 1 and not target.is_loopback(ngx.var.remote_addr) then
+        ngx.log(ngx.WARN, "authz: loopback-only API key rejected from ",
+            tostring(ngx.var.remote_addr))
+        return nil
+    end
     return {
         kind = "api_key",
         id = row.id,
@@ -36,6 +44,7 @@ function _M.authenticate(token)
         source = "api-key",
         role = role,
         roles = { role },
+        loopback_only = row.loopback_only == 1,
         identity = _M.principal(row.id),
         created_at = row.created_at,
         updated_at = row.updated_at,

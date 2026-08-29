@@ -2,7 +2,7 @@ local db = require "resty.authz.db"
 
 local _M = {}
 
-local META = "id, name, role, enabled, created_at, updated_at"
+local META = "id, name, role, loopback_only, enabled, created_at, updated_at"
 
 function _M.by_id(id)
     local rows = db.query("SELECT " .. META .. " FROM api_keys WHERE id = ?", id)
@@ -10,7 +10,7 @@ function _M.by_id(id)
 end
 
 function _M.by_hash(token_hash)
-    local rows = db.query([[SELECT id, name, role, created_at, updated_at FROM api_keys
+    local rows = db.query([[SELECT id, name, role, loopback_only, created_at, updated_at FROM api_keys
         WHERE token_hash = ? AND enabled = 1]], token_hash)
     return rows and rows[1]
 end
@@ -39,8 +39,8 @@ function _M.name_exists(name, excluded_id)
 end
 
 function _M.insert(name, token_hash, role, now)
-    return db.exec([[INSERT INTO api_keys(name, token_hash, role, enabled, created_at, updated_at)
-        VALUES(?, ?, ?, 1, ?, ?)]], name, token_hash, role, now, now)
+    return db.exec([[INSERT INTO api_keys(name, token_hash, role, loopback_only, enabled, created_at, updated_at)
+        VALUES(?, ?, ?, 0, 1, ?, ?)]], name, token_hash, role, now, now)
 end
 
 function _M.update(id, fields, values)
