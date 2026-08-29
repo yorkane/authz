@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Admin</title>
+  <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
+  <link rel="stylesheet" href="./app-page.css?v=10">
+</head>
+<body>
+  <div id="q-app">
+    <main class="workspace-page">
+      <header class="page-heading">
+        <div><h1>{{ t.title }}</h1><p>{{ t.description }}</p></div>
+        <div v-if="isAdmin" class="heading-actions"><q-btn outline no-caps icon="mdi-folder-plus-outline" :label="t.addGroup" class="secondary-button" @click="openCreateGroup"></q-btn><q-btn unelevated no-caps icon="mdi-plus" :label="t.addEntry" class="primary-button" @click="openCreate"></q-btn></div>
+      </header>
+
+      <q-banner v-if="error" rounded class="error-banner q-mb-lg"><template v-slot:avatar><q-icon name="mdi-alert-circle-outline"></q-icon></template>{{ error }}<template v-slot:action><q-btn flat dense no-caps :label="t.retry" @click="load"></q-btn></template></q-banner>
+
+      <div v-if="!loading && !groups.length" class="surface-card q-pa-xl row flex-center empty-state"><q-icon name="mdi-menu-open" size="30px"></q-icon><span>{{ t.noEntries }}</span></div>
+
+      <q-card v-for="group in groups" :key="group.id" flat class="surface-card q-mb-md">
+        <q-card-section class="surface-heading">
+          <div class="row items-center no-wrap q-gutter-sm">
+            <q-icon :name="group.icon || 'mdi-folder'" size="22px" color="blue-3"></q-icon>
+            <div><div class="surface-title">{{ group.label }}</div><div class="surface-subtitle">{{ t.groupKind }} · {{ group.children.length }}</div></div>
+          </div>
+          <div class="row items-center no-wrap q-gutter-xs">
+            <q-btn flat round dense icon="mdi-arrow-up" size="sm" @click="moveGroup(group, -1)"><q-tooltip>{{ t.moveUp }}</q-tooltip></q-btn>
+            <q-btn flat round dense icon="mdi-arrow-down" size="sm" @click="moveGroup(group, 1)"><q-tooltip>{{ t.moveDown }}</q-tooltip></q-btn>
+            <q-toggle :model-value="group.enabled === 1" color="teal-4" @update:model-value="toggleEnabled(group)"><q-tooltip>{{ group.enabled === 1 ? t.enableToggle : t.disableToggle }}</q-tooltip></q-toggle>
+            <q-btn flat round dense icon="mdi-pencil-outline" @click="openEditGroup(group)"><q-tooltip>{{ t.editGroupTitle }}</q-tooltip></q-btn>
+            <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeGroup(group)"><q-tooltip>{{ t.deleteGroupTitle }}</q-tooltip></q-btn>
+          </div>
+        </q-card-section>
+        <q-separator dark></q-separator>
+        <q-card-section class="menu-tree-body">
+          <div v-if="group.builtin === 'local'" class="tree-hint"><q-icon name="mdi-information-outline" size="16px"></q-icon><span>{{ t.dynamicGroupHint }}</span></div>
+          <q-list separator>
+            <q-item v-for="(child, idx) in group.children" :key="child.id" class="tree-row">
+              <q-item-section avatar><q-icon :name="child.icon || 'mdi-link-variant'" size="18px" color="blue-3"></q-icon></q-item-section>
+              <q-item-section>
+                <q-item-label>{{ child.label }}<q-badge v-if="child.builtin" outline color="blue-3" class="q-ml-sm">{{ t.builtinHint }}</q-badge></q-item-label>
+                <q-item-label caption><code class="code-pill">{{ child.url || child.builtin || '' }}</code></q-item-label>
+              </q-item-section>
+              <q-item-section side class="row items-center no-wrap q-gutter-xs">
+                <q-btn flat round dense icon="mdi-arrow-up" size="sm" :disable="idx === 0" @click="moveChild(group, child, -1)"><q-tooltip>{{ t.moveUp }}</q-tooltip></q-btn>
+                <q-btn flat round dense icon="mdi-arrow-down" size="sm" :disable="idx === group.children.length - 1" @click="moveChild(group, child, 1)"><q-tooltip>{{ t.moveDown }}</q-tooltip></q-btn>
+                <q-toggle :model-value="child.enabled === 1" color="teal-4" dense @update:model-value="toggleEnabled(child)"><q-tooltip>{{ child.enabled === 1 ? t.enableToggle : t.disableToggle }}</q-tooltip></q-toggle>
+                <q-btn flat round dense icon="mdi-pencil-outline" @click="openEdit(child, group)"><q-tooltip>{{ t.editTitle }}</q-tooltip></q-btn>
+                <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="remove(child)"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
+              </q-item-section>
+            </q-item>
+            <q-item v-if="!group.children.length" class="empty-state row flex-center"><span>{{ t.noEntries }}</span></q-item>
+          </q-list>
+        </q-card-section>
+      </q-card>
+
+      <q-dialog v-model="formOpen" persistent>
+        <q-card class="dialog-card">
+          <q-card-section><div class="dialog-title">{{ formTitle }}</div><div class="dialog-copy">{{ formCopy }}</div></q-card-section>
+          <q-separator dark></q-separator>
+          <q-card-section class="q-gutter-md">
+            <q-input v-model="form.label" outlined dense dark :label="t.label" :placeholder="t.labelPlaceholder" :rules="[v => !!v || t.required]"></q-input>
+            <q-select v-if="isItemForm" v-model="form.parent" outlined dense dark :label="t.parentGroup" :options="groupOptions" option-label="label" emit-value map-options></q-select>
+            <q-input v-if="isItemForm" v-model="form.url" outlined dense dark :label="t.url" :placeholder="t.urlPlaceholder" :rules="[v => !!v || t.required, v => urlValid(v) || t.urlRule]"></q-input>
+            <q-input v-model="form.icon" outlined dense dark :label="t.icon" :placeholder="t.iconPlaceholder" :hint="t.iconHint">
+              <template v-slot:append><q-icon :name="form.icon || 'mdi-link-variant'" size="20px"></q-icon></template>
+            </q-input>
+            <div class="icon-picker">
+              <div v-for="opt in iconOptions" :key="opt" class="icon-option" :class="{ 'icon-option-selected': form.icon === opt }" @click="pickIcon(opt)">
+                <q-icon :name="opt" size="18px"></q-icon>
+                <q-tooltip>{{ opt }}</q-tooltip>
+              </div>
+            </div>
+          </q-card-section>
+          <q-card-actions align="right" class="dialog-actions">
+            <q-btn flat no-caps :label="t.cancel" :disable="saving" v-close-popup></q-btn>
+            <q-btn unelevated no-caps color="deep-purple-7" :label="editingId ? t.save : t.create" :loading="saving" @click="saveForm"></q-btn>
+          </q-card-actions>
+        </q-card>
+      </q-dialog>
+    </main>
+  </div>
+
+  <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./api.js?v=9"></script>
+  <script src="./i18n.js?v=21"></script>
+  <script>
+    const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
+
+    const app = createApp({
+      setup () {
+        const locale = ref(window.adminI18n.getLocale())
+        const t = computed(() => window.adminI18n.messages[locale.value].menuEditor)
+        const groups = ref([])
+        const loading = ref(false)
+        const saving = ref(false)
+        const error = ref('')
+        const isAdmin = ref(false)
+        const csrf = ref('')
+        const formOpen = ref(false)
+        const editingId = ref(null)
+        const isGroupForm = ref(false)
+        const form = reactive({ label: '', url: '', icon: '', parent: null })
+        let unsubscribeLocale
+
+        const isItemForm = computed(() => !isGroupForm.value)
+        const formTitle = computed(() => isGroupForm.value
+          ? (editingId.value ? t.value.editGroupTitle : t.value.createGroupTitle)
+          : (editingId.value ? t.value.editTitle : t.value.createTitle))
+        const formCopy = computed(() => isGroupForm.value ? t.value.createGroupCopy : t.value.createCopy)
+        const groupOptions = computed(() => groups.value.map(g => ({ label: g.label, value: g.id })))
+
+        const iconOptions = [
+          'mdi-link-variant', 'mdi-web', 'mdi-monitor', 'mdi-server', 'mdi-application-outline',
+          'mdi-lan-connect', 'mdi-database', 'mdi-chart-line', 'mdi-shield-check', 'mdi-cog',
+          'mdi-console', 'mdi-code-braces', 'mdi-rocket-launch', 'mdi-book-open-variant', 'mdi-video', 'mdi-folder'
+        ]
+        function pickIcon (opt) { form.icon = opt }
+
+        function urlValid (value) {
+          const text = String(value || '')
+          return /^(https?:\/\/|\/)[^\/]/.test(text) && !/^\/\//.test(text)
+        }
+
+        async function load () {
+          loading.value = true
+          error.value = ''
+          try {
+            const [session, rows] = await Promise.all([window.adminApi.session(), window.adminApi.menuEntries()])
+            isAdmin.value = Boolean(session.admin)
+            csrf.value = session.csrf || ''
+            const all = rows || []
+            const byGroup = {}
+            const groupList = all.filter(r => r.kind === 'group')
+            groupList.forEach(g => { byGroup[g.id] = { ...g, children: [] } })
+            all.filter(r => r.kind !== 'group').forEach(item => {
+              if (byGroup[item.parent_id]) byGroup[item.parent_id].children.push(item)
+            })
+            groupList.forEach(g => byGroup[g.id].children.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)))
+            groups.value = groupList.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)).map(g => byGroup[g.id])
+          } catch (err) {
+            if (err?.status === 401) return window.location.replace('/_authz/login?next=%2F_authz%2Fapps%2F')
+            error.value = err?.message || '加载失败'
+          } finally {
+            loading.value = false
+          }
+        }
+
+        function resetForm () { form.label = ''; form.url = ''; form.icon = ''; form.parent = null }
+
+        function openCreate () {
+          isGroupForm.value = false
+          editingId.value = null
+          resetForm()
+          form.parent = groups.value.length ? groups.value[0].id : null
+          formOpen.value = true
+        }
+
+        function openCreateGroup () {
+          isGroupForm.value = true
+          editingId.value = null
+          resetForm()
+          formOpen.value = true
+        }
+
+        function openEdit (row, group) {
+          isGroupForm.value = false
+          editingId.value = row.id
+          resetForm()
+          form.label = row.label
+          form.url = row.url || ''
+          form.icon = row.icon || ''
+          form.parent = row.parent_id || (group && group.id)
+          formOpen.value = true
+        }
+
+        function openEditGroup (group) {
+          isGroupForm.value = true
+          editingId.value = group.id
+          resetForm()
+          form.label = group.label
+          form.icon = group.icon || ''
+          formOpen.value = true
+        }
+
+        async function mutate (action, successMessage) {
+          saving.value = true
+          error.value = ''
+          try {
+            await action
+            Quasar.Notify.create({ type: 'positive', message: successMessage, position: 'bottom' })
+            await load()
+            return true
+          } catch (err) {
+            error.value = err?.message || '操作失败'
+            return false
+          } finally {
+            saving.value = false
+          }
+        }
+
+        async function saveForm () {
+          if (!form.label.trim()) return
+          if (isGroupForm.value) {
+            if (editingId.value) {
+              const ok = await mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'edit', id: editingId.value, label: form.label, icon: form.icon }), t.value.updated)
+              if (ok) formOpen.value = false
+            } else {
+              const ok = await mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'create', kind: 'group', label: form.label, icon: form.icon }), t.value.created)
+              if (ok) formOpen.value = false
+            }
+          } else {
+            if (!form.url.trim() || !urlValid(form.url) || !form.parent) return
+            if (editingId.value) {
+              const ok = await mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'edit', id: editingId.value, label: form.label, url: form.url, icon: form.icon, parent_id: form.parent }), t.value.updated)
+              if (ok) formOpen.value = false
+            } else {
+              const ok = await mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'create', kind: 'item', parent_id: form.parent, label: form.label, url: form.url, icon: form.icon }), t.value.created)
+              if (ok) formOpen.value = false
+            }
+          }
+        }
+
+        function moveGroup (group, delta) {
+          const idx = groups.value.findIndex(g => g.id === group.id)
+          const target = idx + delta
+          if (target < 0 || target >= groups.value.length) return
+          const list = groups.value.slice()
+          const [g] = list.splice(idx, 1)
+          list.splice(target, 0, g)
+          groups.value = list
+          const order = list.map((g, i) => ({ id: g.id, sort_order: i + 1 }))
+          mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'reorder', order }), t.value.reordered)
+        }
+
+        function moveChild (group, child, delta) {
+          const idx = group.children.findIndex(c => c.id === child.id)
+          const target = idx + delta
+          if (target < 0 || target >= group.children.length) return
+          const list = group.children.slice()
+          const [c] = list.splice(idx, 1)
+          list.splice(target, 0, c)
+          group.children = list
+          const order = list.map((c, i) => ({ id: c.id, parent_id: group.id, sort_order: i + 1 }))
+          mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'reorder', order }), t.value.reordered)
+        }
+
+        async function toggleEnabled (row) {
+          const enable = row.enabled !== 1
+          await mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'edit', id: row.id, enabled: enable }), enable ? t.value.enableDone : t.value.disableDone)
+        }
+
+        function remove (row) {
+          Quasar.Dialog.create({ title: t.value.deleteTitle, message: row.label + ' · ' + t.value.deleteConfirm, cancel: true, persistent: true, ok: { label: t.value.deleteAction, color: 'negative', flat: true } })
+            .onOk(() => mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'delete', id: row.id }), t.value.deleted))
+        }
+
+        function removeGroup (group) {
+          if (group.children.length) {
+            Quasar.Notify.create({ type: 'warning', message: t.value.cannotDeleteGroup, position: 'bottom' })
+            return
+          }
+          Quasar.Dialog.create({ title: t.value.deleteGroupTitle, message: group.label + ' · ' + t.value.deleteGroupConfirm, cancel: true, persistent: true, ok: { label: t.value.deleteAction, color: 'negative', flat: true } })
+            .onOk(() => mutate(window.adminApi.saveMenuEntry({ _csrf: csrf.value, action: 'delete', id: group.id }), t.value.deleted))
+        }
+
+        function applyLocale (nextLocale) {
+          locale.value = nextLocale
+          document.documentElement.lang = nextLocale
+          document.title = t.value.title
+          Quasar.Lang.set(nextLocale === 'zh-CN' ? Quasar.Lang.zhCN : Quasar.Lang.enUS)
+        }
+
+        onMounted(() => {
+          applyLocale(locale.value)
+          unsubscribeLocale = window.adminI18n.subscribe(applyLocale)
+          load()
+        })
+
+        onBeforeUnmount(() => unsubscribeLocale?.())
+
+        return { form, formCopy, formOpen, formTitle, groupOptions, groups, isAdmin, isItemForm, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, iconOptions, remove, removeGroup, saveForm, saving, t, toggleEnabled, urlValid, error }
+      }
+    })
+
+    app.use(Quasar, { config: { dark: true } })
+    Quasar.Dark.set(true)
+    Quasar.Lang.set(window.adminI18n.getLocale() === 'en-US' ? Quasar.Lang.enUS : Quasar.Lang.zhCN)
+    Quasar.IconSet.set(Quasar.IconSet.mdiV7)
+    app.mount('#q-app')
+  </script>
+</body>
+</html>
+

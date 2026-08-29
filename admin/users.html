@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Admin</title>
+  <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
+  <link rel="stylesheet" href="./app-page.css?v=5">
+</head>
+<body>
+  <div id="q-app">
+    <main class="workspace-page">
+      <header class="page-heading">
+        <div>
+          <h1>{{ t.title }}</h1>
+          <p>{{ t.description }}</p>
+        </div>
+        <q-btn v-if="isAdmin" unelevated no-caps icon="mdi-account-plus-outline" :label="t.create" class="primary-button" @click="createOpen = true"></q-btn>
+      </header>
+
+      <q-banner v-if="error" rounded class="error-banner q-mb-lg">
+        <template v-slot:avatar><q-icon name="mdi-alert-circle-outline"></q-icon></template>
+        {{ error }}
+        <template v-slot:action><q-btn flat dense no-caps :label="t.retry" @click="load"></q-btn></template>
+      </q-banner>
+
+      <section class="stat-grid">
+        <q-card flat class="stat-card"><q-card-section><q-icon name="mdi-account-multiple-outline" class="stat-icon purple"></q-icon><div class="stat-label">{{ t.accounts }}</div><div class="stat-value">{{ users.length }}</div><div class="stat-note">{{ t.accountsNote }}</div></q-card-section></q-card>
+        <q-card flat class="stat-card"><q-card-section><q-icon name="mdi-account-check-outline" class="stat-icon teal"></q-icon><div class="stat-label">{{ t.enabled }}</div><div class="stat-value">{{ enabledCount }}</div><div class="stat-note">{{ t.enabledNote }}</div></q-card-section></q-card>
+        <q-card flat class="stat-card"><q-card-section><q-icon name="mdi-shield-account-outline" class="stat-icon blue"></q-icon><div class="stat-label">{{ t.roles }}</div><div class="stat-value">{{ roleCount }}</div><div class="stat-note">{{ t.rolesNote }}</div></q-card-section></q-card>
+      </section>
+
+      <q-card flat class="surface-card q-mt-lg">
+        <q-card-section class="surface-heading">
+          <div><div class="surface-title">{{ listTitle }}</div><div class="surface-subtitle">{{ listNote }}</div></div>
+          <q-input v-model="filter" dense outlined dark debounce="250" :placeholder="t.search" class="search-input">
+            <template v-slot:prepend><q-icon name="mdi-magnify"></q-icon></template>
+          </q-input>
+        </q-card-section>
+        <q-separator dark></q-separator>
+        <q-table
+          flat
+          dark
+          :rows="users"
+          :columns="columns"
+          row-key="_key"
+          :filter="filter"
+          :loading="loading"
+          :rows-per-page-options="[10, 20, 0]"
+          class="linear-table"
+        >
+          <template v-slot:body-cell-username="props">
+            <q-td :props="props"><div class="identity-cell"><q-avatar size="32px" color="deep-purple-5" text-color="white">{{ props.row.username.slice(0, 1).toUpperCase() }}</q-avatar><div><strong>{{ props.row.username }}</strong><span>{{ props.row.source === 'local' && props.row.id ? `#${props.row.id}` : (props.row.subject || props.row.identity) }}</span></div></div></q-td>
+          </template>
+          <template v-slot:body-cell-source="props"><q-td :props="props"><q-badge outline :color="props.row.source === 'local' ? 'blue-4' : 'deep-purple-3'" :label="sourceLabel(props.row.source)"></q-badge></q-td></template>
+          <template v-slot:body-cell-roles="props"><q-td :props="props"><q-chip v-for="role in roleList(props.row.roles)" :key="role" dense class="role-chip">{{ role }}</q-chip></q-td></template>
+          <template v-slot:body-cell-enabled="props"><q-td :props="props"><q-toggle v-if="isAdmin" :model-value="props.row.enabled === 1" :label="props.row.enabled === 1 ? t.enabled : t.disabled" color="teal-4" :disable="props.row.source === 'local' && props.row.username === 'admin'" @update:model-value="toggleUser(props.row, $event)"></q-toggle><q-badge v-else outline :color="props.row.enabled === 1 ? 'teal-4' : 'grey-5'" :label="props.row.enabled === 1 ? t.enabled : t.disabled"></q-badge></q-td></template>
+          <template v-slot:body-cell-actions="props">
+            <q-td :props="props">
+              <div v-if="isAdmin && !(props.row.source === 'local' && props.row.username === 'admin')" class="row-actions">
+                <q-btn flat round dense icon="mdi-account-key-outline" @click="openRoles(props.row)"><q-tooltip>{{ t.rolesTitle }}</q-tooltip></q-btn>
+                <q-btn v-if="props.row.source !== 'local' && props.row.roles_overridden === 1" flat round dense icon="mdi-restore" @click="restoreRemoteRoles(props.row)"><q-tooltip>{{ t.restoreRemote }}</q-tooltip></q-btn>
+                <q-btn v-if="props.row.source === 'local'" flat round dense icon="mdi-lock-reset" @click="openReset(props.row)"><q-tooltip>{{ t.resetTitle }}</q-tooltip></q-btn>
+                <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeUser(props.row)"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
+              </div>
+              <q-badge v-else-if="isAdmin" outline color="deep-purple-3" :label="t.builtIn"></q-badge>
+            </q-td>
+          </template>
+          <template v-slot:no-data><div class="full-width row flex-center q-pa-xl empty-state"><q-icon name="mdi-account-search-outline" size="28px"></q-icon><span>{{ t.noData }}</span></div></template>
+        </q-table>
+      </q-card>
+
+      <q-card v-if="canChangePassword" flat class="surface-card password-card q-mt-lg">
+        <q-card-section class="surface-heading"><div><div class="surface-title">{{ t.myPassword }}</div><div class="surface-subtitle">{{ t.passwordNote }}</div></div><q-btn outline no-caps icon="mdi-lock-outline" :label="t.changePassword" class="secondary-button" @click="passwordOpen = true"></q-btn></q-card-section>
+      </q-card>
+
+      <q-dialog v-model="createOpen">
+        <q-card class="dialog-card"><q-form @submit="createUser"><q-card-section><div class="dialog-title">{{ t.createTitle }}</div><div class="dialog-copy">{{ t.createCopy }}</div></q-card-section><q-card-section class="dialog-fields"><q-input v-model="createForm.username" dark outlined :label="t.username" :rules="[required, validUsername]"></q-input><q-input v-model="createForm.password" dark outlined type="password" :label="t.initialPassword" :rules="[required, validPassword]"></q-input><q-select v-model="createForm.roles" dark outlined multiple use-chips emit-value map-options :options="roleOptions" :label="t.role" :hint="t.roleHint" :rules="[validRoles]"></q-select></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.createAction" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card>
+      </q-dialog>
+
+      <q-dialog v-model="rolesOpen"><q-card class="dialog-card"><q-form @submit="saveRoles"><q-card-section><div class="dialog-title">{{ t.rolesTitle }}</div><div class="dialog-copy">{{ selectedUser?.username }} · {{ sourceLabel(selectedUser?.source) }}</div><div v-if="selectedUser?.source !== 'local'" class="dialog-copy">{{ t.remoteRoles }}: {{ selectedUser?.remote_roles || '—' }}</div></q-card-section><q-card-section><q-select v-model="rolesValue" dark outlined autofocus multiple use-chips emit-value map-options :options="roleOptions" :label="t.role" :hint="selectedUser?.source === 'local' ? t.rolesHint : t.remoteRolesHint" :rules="[validRoles]"></q-select></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.save" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
+
+      <q-dialog v-model="resetOpen"><q-card class="dialog-card"><q-form @submit="resetPassword"><q-card-section><div class="dialog-title">{{ t.resetTitle }}</div><div class="dialog-copy">{{ t.resetCopy }} · {{ selectedUser?.username }}</div></q-card-section><q-card-section><q-input v-model="resetValue" dark outlined autofocus type="password" :label="t.newPassword" :rules="[required, validPassword]"></q-input></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.reset" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
+
+      <q-dialog v-model="passwordOpen"><q-card class="dialog-card"><q-form @submit="changeMyPassword"><q-card-section><div class="dialog-title">{{ t.myPasswordTitle }}</div><div class="dialog-copy">{{ t.myPasswordCopy }}</div></q-card-section><q-card-section class="dialog-fields"><q-input v-model="passwordForm.oldpw" dark outlined type="password" :label="t.currentPassword" :rules="[required]"></q-input><q-input v-model="passwordForm.newpw" dark outlined type="password" :label="t.newPassword" :rules="[required, validPassword]"></q-input><q-input v-model="passwordForm.newpw_confirm" dark outlined type="password" :label="t.confirmNewPassword" :rules="[required, matchingPassword]"></q-input></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.updatePassword" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
+    </main>
+  </div>
+  <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./api.js?v=10"></script>
+  <script src="./i18n.js?v=21"></script>
+  <script>
+    const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
+    
+    const app = createApp({
+      setup () {
+      const users = ref([])
+      const availableRoles = ref(['admin', 'staff', 'user', 'viewer'])
+      const locale = ref(window.adminI18n.getLocale())
+      const t = computed(() => window.adminI18n.messages[locale.value].users)
+      let unsubscribeLocale
+        const csrf = ref('')
+        const isAdmin = ref(false)
+        const currentSource = ref('local')
+        const loading = ref(false)
+        const saving = ref(false)
+        const error = ref('')
+        const filter = ref('')
+        const createOpen = ref(false)
+        const rolesOpen = ref(false)
+        const resetOpen = ref(false)
+        const passwordOpen = ref(false)
+        const selectedUser = ref(null)
+        const rolesValue = ref([])
+        const resetValue = ref('')
+        const createForm = reactive({ username: '', password: '', roles: ['user'] })
+        const passwordForm = reactive({ oldpw: '', newpw: '', newpw_confirm: '' })
+      const columns = computed(() => [
+        { name: 'username', label: t.value.user, field: 'username', align: 'left', sortable: true },
+        { name: 'source', label: t.value.source, field: 'source', align: 'left', sortable: true },
+        { name: 'roles', label: t.value.role, field: 'roles', align: 'left', sortable: true },
+        { name: 'enabled', label: t.value.status, field: 'enabled', align: 'left', sortable: true },
+        { name: 'created_at', label: t.value.createdAt, field: 'created_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
+        { name: 'last_login_at', label: t.value.lastLoginAt, field: 'last_login_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
+        { name: 'updated_at', label: t.value.updatedAt, field: 'updated_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
+        { name: 'actions', label: '', field: 'actions', align: 'right' }
+      ])
+    
+        const enabledCount = computed(() => users.value.filter(user => user.enabled === 1).length)
+        const canChangePassword = computed(() => currentSource.value === 'local')
+        const roleCount = computed(() => availableRoles.value.length)
+        const roleOptions = computed(() => availableRoles.value.map(role => ({ label: role, value: role })))
+        const listTitle = computed(() => isAdmin.value ? t.value.allUsers : t.value.myProfile)
+        const listNote = computed(() => isAdmin.value ? t.value.protectedAdmin : t.value.myProfileNote)
+    
+        function roleList (value) {
+          return String(value || '').split(',').map(role => role.trim()).filter(Boolean)
+        }
+    
+        function formatDate (timestamp) {
+          if (!timestamp) return '—'
+          return new Intl.DateTimeFormat(locale.value, {
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+          }).format(new Date(timestamp * 1000))
+        }
+
+        function sourceLabel (source) {
+          if (!source) return ''
+          return source === 'local' ? t.value.local : source === 'nocobase' ? 'NocoBase' : source === 'google' ? 'Google' : source === 'dingtalk' ? t.value.dingtalk : source === 'wechat' ? t.value.wechat : source
+        }
+    
+      function required (value) {
+        return Boolean(value) || t.value.required
+        }
+    
+        function validUsername (value) {
+        return /^[a-z0-9_-]{2,32}$/.test(value || '') || t.value.usernameRule
+        }
+    
+        function validPassword (value) {
+        return String(value || '').length >= 6 || t.value.passwordRule
+        }
+
+        function matchingPassword (value) {
+          return String(value || '') === String(passwordForm.newpw || '') || t.value.passwordMismatch
+        }
+
+        function validRoles (value) {
+          const roles = Array.isArray(value) ? value : roleList(value)
+          return roles.length > 0 && roles.every(role => availableRoles.value.includes(role)) || t.value.roleRule
+        }
+    
+        function notify (message, type = 'positive') {
+          Quasar.Notify.create({ message, type, position: 'top-right', timeout: 2200 })
+        }
+    
+        async function load () {
+          loading.value = true
+          error.value = ''
+          try {
+            const current = await window.adminApi.session()
+            csrf.value = current.csrf || ''
+            isAdmin.value = Boolean(current.admin)
+            currentSource.value = current.source || 'local'
+            if (!current.admin) {
+              const roles = current.roles || []
+              users.value = [{
+                username: current.username,
+                source: current.source || 'local',
+                identity: current.identity,
+                roles: roles.join(','),
+                enabled: 1,
+                created_at: current.created_at,
+                last_login_at: current.last_login_at,
+                updated_at: current.updated_at,
+                _key: current.identity
+              }]
+              availableRoles.value = roles
+              return
+            }
+            const data = await window.adminApi.users()
+            const localUsers = (data.users || []).map(user => ({ ...user, source: user.source || 'local', _key: user.identity || `local:${user.id}` }))
+            const remoteUsers = (data.remote_users || []).map(user => ({ ...user, source: user.source || user.provider, _key: user.identity || `${user.provider}:${user.subject}` }))
+            users.value = [...localUsers, ...remoteUsers]
+            availableRoles.value = data.available_roles || ['admin', 'staff', 'user', 'viewer']
+            csrf.value = data.csrf || ''
+            isAdmin.value = Boolean(data.admin)
+            currentSource.value = data.source || 'local'
+          } catch (loadError) {
+            error.value = loadError.message
+          } finally {
+            loading.value = false
+          }
+        }
+    
+        async function mutate (action, successMessage) {
+          saving.value = true
+          try {
+            await action()
+            notify(successMessage)
+            await load()
+            return true
+          } catch (mutationError) {
+            notify(mutationError.message, 'negative')
+            return false
+          } finally {
+            saving.value = false
+          }
+        }
+    
+        async function createUser () {
+        const ok = await mutate(() => window.adminApi.saveUser({ _csrf: csrf.value, action: 'create', ...createForm }), t.value.created)
+          if (ok) {
+            createOpen.value = false
+            Object.assign(createForm, { username: '', password: '', roles: ['user'] })
+          }
+        }
+    
+        function openRoles (user) {
+          selectedUser.value = user
+          rolesValue.value = roleList(user.roles || 'user')
+          rolesOpen.value = true
+        }
+    
+        async function saveRoles () {
+          const values = { _csrf: csrf.value, roles: rolesValue.value }
+          const action = selectedUser.value.source === 'local'
+            ? () => window.adminApi.saveUser({ ...values, action: 'setroles', id: selectedUser.value.id })
+            : () => window.adminApi.saveRemoteUser({ ...values, provider: selectedUser.value.provider, subject: selectedUser.value.subject })
+          const ok = await mutate(action, selectedUser.value.source === 'local' ? t.value.rolesUpdated : t.value.remoteRolesUpdated)
+          if (ok) rolesOpen.value = false
+        }
+
+        function restoreRemoteRoles (user) {
+          const execute = () => mutate(() => window.adminApi.saveRemoteUser({ _csrf: csrf.value, provider: user.provider, subject: user.subject, use_remote_roles: true }), t.value.remoteRolesRestored)
+          Quasar.Dialog.create({ title: t.value.restoreRemote, message: `${user.username} · ${t.value.restoreRemoteConfirm}`, cancel: true, persistent: true }).onOk(execute)
+        }
+    
+        function openReset (user) {
+          selectedUser.value = user
+          resetValue.value = ''
+          resetOpen.value = true
+        }
+    
+        async function resetPassword () {
+        const ok = await mutate(() => window.adminApi.saveUser({ _csrf: csrf.value, action: 'resetpw', id: selectedUser.value.id, newpw: resetValue.value }), t.value.passwordReset)
+          if (ok) resetOpen.value = false
+        }
+    
+        function toggleUser (user, enabled) {
+        const values = { _csrf: csrf.value, action: enabled ? 'enable' : 'disable' }
+        const action = user.source === 'local'
+          ? () => window.adminApi.saveUser({ ...values, id: user.id })
+          : () => window.adminApi.saveRemoteUser({ ...values, provider: user.provider, subject: user.subject, enabled })
+        const execute = () => mutate(action, enabled ? t.value.enabledDone : t.value.disabledDone)
+        if (enabled) return execute()
+        Quasar.Dialog.create({ title: t.value.disableTitle, message: `${user.username} · ${t.value.disableConfirm}`, cancel: true, persistent: true }).onOk(execute)
+        }
+    
+        function removeUser (user) {
+        const action = user.source === 'local'
+          ? () => window.adminApi.saveUser({ _csrf: csrf.value, action: 'delete', id: user.id })
+          : () => window.adminApi.saveRemoteUser({ _csrf: csrf.value, action: 'delete', provider: user.provider, subject: user.subject })
+        Quasar.Dialog.create({ title: t.value.deleteTitle, message: `${user.username} · ${user.source === 'local' ? t.value.deleteConfirm : t.value.deleteRemoteConfirm}`, cancel: true, persistent: true, ok: { label: t.value.deleteAction, color: 'negative', flat: true } })
+          .onOk(() => mutate(action, t.value.deleted))
+        }
+    
+        async function changeMyPassword () {
+        const ok = await mutate(() => window.adminApi.changePassword({ _csrf: csrf.value, ...passwordForm }), t.value.passwordUpdated)
+          if (ok) {
+            passwordOpen.value = false
+            Object.assign(passwordForm, { oldpw: '', newpw: '', newpw_confirm: '' })
+          }
+        }
+    
+      function applyLocale (nextLocale) {
+        locale.value = nextLocale
+        document.documentElement.lang = nextLocale
+        document.title = t.value.title
+        Quasar.Lang.set(nextLocale === 'zh-CN' ? Quasar.Lang.zhCN : Quasar.Lang.enUS)
+      }
+
+      onMounted(() => {
+        applyLocale(locale.value)
+        unsubscribeLocale = window.adminI18n.subscribe(applyLocale)
+        load()
+      })
+
+      onBeforeUnmount(() => unsubscribeLocale?.())
+    
+      return { canChangePassword, columns, createForm, createOpen, createUser, enabledCount, error, filter, isAdmin, listNote, listTitle, load, loading, matchingPassword, openReset, openRoles, passwordForm, passwordOpen, changeMyPassword, removeUser, required, resetOpen, resetPassword, resetValue, restoreRemoteRoles, roleCount, roleList, roleOptions, rolesOpen, rolesValue, saveRoles, saving, selectedUser, sourceLabel, t, toggleUser, users, validPassword, validRoles, validUsername }
+      }
+    })
+    
+    app.use(Quasar, { config: { dark: true } })
+    Quasar.Dark.set(true)
+    Quasar.Lang.set(window.adminI18n.getLocale() === 'en-US' ? Quasar.Lang.enUS : Quasar.Lang.zhCN)
+    Quasar.IconSet.set(Quasar.IconSet.mdiV7)
+    app.mount('#q-app')
+  </script>
+</body>
+</html>

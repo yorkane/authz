@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Authz Admin</title>
+  <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
+  <link rel="stylesheet" href="./app.css?v=9">
+</head>
+<body>
+  <div id="q-app">
+    <q-layout view="lHh Lpr lFf" class="admin-layout">
+      <q-drawer
+        v-model="drawerVisible"
+        :width="220"
+        :mini-width="40"
+        :mini="drawerMini"
+        :breakpoint="0"
+        show-if-above
+        class="admin-drawer"
+        :class="{ 'admin-drawer-mini': drawerMini }"
+      >
+        <!--# include virtual="/_authz/apps/menu.html" -->
+      </q-drawer>
+
+      <q-page-container class="admin-content">
+        <q-page class="content-page">
+          <iframe
+            :src="activeApp"
+            :title="activeTitle"
+            class="app-frame"
+          ></iframe>
+        </q-page>
+      </q-page-container>
+    </q-layout>
+  </div>
+
+  <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./api.js?v=10"></script>
+  <script src="./i18n.js?v=21"></script>
+  <script src="./app.js?v=17"></script>
+</body>
+</html>

@@ -1,0 +1,1254 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>OmniScript</title>
+  <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
+  <link rel="stylesheet" href="./omniscript.css?v=4">
+</head>
+<body>
+  <div id="q-app">
+    <div class="os-app">
+
+      <header class="os-header">
+        <div><h1>{{ t.brand }}</h1></div>
+        <span class="subtitle">{{ t.subtitle }}</span>
+        <div class="os-header-actions">
+          <q-btn outline dense no-caps icon="mdi-eye-outline" :label="t.preview" class="os-action-btn" :disable="!currentVideoId" @click="openPreview"><q-tooltip>{{ t.previewTitle }}</q-tooltip></q-btn>
+          <q-btn outline dense no-caps icon="mdi-content-copy" :label="t.copyAction" class="os-action-btn" :disable="!currentVideoId" @click="openCopy"><q-tooltip>{{ t.copyTitle }}</q-tooltip></q-btn>
+          <q-btn outline dense no-caps icon="mdi-pencil-outline" :label="t.edit" class="os-action-btn" :disable="!isCopySelected" @click="openEditor"><q-tooltip>{{ isCopySelected ? t.editTitle : t.editCopyOnly }}</q-tooltip></q-btn>
+          <q-btn outline dense no-caps icon="mdi-trash-can-outline" :label="t.deleteAction" class="os-action-btn danger" :disable="!isCopySelected" @click="removeCopy"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
+          <q-btn
+            flat no-caps class="os-auto-scroll-btn"
+            :class="{ 'on': autoScrollEnabled }"
+            :aria-pressed="autoScrollEnabled ? 'true' : 'false'"
+            @click="toggleAutoScroll"
+          >
+            <span class="os-auto-scroll-switch" aria-hidden="true"></span>
+            <span>{{ t.autoScroll }}</span>
+            <q-tooltip>{{ t.autoScrollHint }}</q-tooltip>
+          </q-btn>
+        </div>
+      </header>
+
+      <div class="os-main">
+
+        <!-- Video list panel -->
+        <div class="os-panel-list" ref="panelListRef">
+          <div class="os-source-box">
+            <div class="os-source-label">{{ t.dataSource }}</div>
+            <q-select
+              v-model="dataSource"
+              :options="dataSourceOptions"
+              dense outlined dark options-dense
+              emit-value map-options
+              class="os-source-select"
+              :loading="datasetsLoading"
+            ></q-select>
+            <q-banner v-if="datasetsError" dense rounded class="os-source-error q-mt-sm">
+              <template v-slot:avatar><q-icon name="mdi-alert-circle-outline" size="16px"></q-icon></template>
+              <span style="font-size:12px">{{ datasetsError }}</span>
+              <template v-slot:action><q-btn flat dense no-caps size="sm" :label="t.retry" @click="loadDatasets"></q-btn></template>
+            </q-banner>
+          </div>
+          <div class="os-video-list-section">
+            <q-inner-loading :showing="datasetsLoading" dark color="blue-4"></q-inner-loading>
+            <div v-if="!viewGroups.length && !datasetsLoading" class="os-empty-state" style="height:120px">
+              <div class="icon">📭</div>
+              <div>{{ t.datasetsEmpty }}</div>
+            </div>
+            <template v-for="cat in viewGroups" :key="cat.category">
+              <div class="os-category-label">{{ cat.category }}</div>
+              <div v-for="group in cat.groups" :key="group.label" class="os-duration-group">
+                <div class="os-duration-label">{{ group.label }}</div>
+                <div
+                  v-for="id in group.ids" :key="id"
+                  class="os-video-item"
+                  :class="{ 'active': currentVideoId === id }"
+                  @click="selectVideo(id)"
+                >
+                  <span class="v-name" :title="videoMeta(id).title || id">{{ videoDisplay(id) }}</span>
+                  <span class="v-dur">{{ videoMeta(id).duration || group.label }}</span>
+                </div>
+              </div>
+            </template>
+            <template v-if="copies.length">
+              <div class="os-category-label">{{ t.localCopies }}</div>
+              <div class="os-duration-group">
+                <div class="os-duration-label">{{ copies.length }} {{ t.copiesUnit }}</div>
+                <div
+                  v-for="copy in copies" :key="copy.id"
+                  class="os-video-item os-copy-item"
+                  :class="{ 'active': currentVideoId === copy.id }"
+                  @click="selectVideo(copy.id)"
+                >
+                  <span class="v-name" :title="copy.entry.script?.meta?.title || copy.name">{{ copy.name }}</span>
+                  <q-icon name="mdi-file-document-edit-outline" size="14px" color="grey-6"></q-icon>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <div class="os-resize-handle" ref="resizeHandleListRef"></div>
+
+        <!-- Player panel -->
+        <div class="os-panel-player" ref="panelPlayerRef">
+          <div class="os-player-section">
+            <div v-if="!currentVideoId" class="os-video-placeholder">
+              <div class="icon">🎬</div>
+              <div>{{ t.selectVideoHint }}</div>
+            </div>
+            <video ref="playerRef" class="os-player" controls preload="auto" v-show="currentVideoId"></video>
+            <q-linear-progress v-if="videoLoading" indeterminate color="blue-5" track-color="grey-9" class="os-video-progress q-mt-sm"></q-linear-progress>
+            <div v-if="currentVideoId && (metaTitle || metaCharacters.length)" class="os-video-meta">
+              <div class="title">{{ metaTitle }}</div>
+              <div class="chars">
+                <span
+                  v-for="c in metaCharacters" :key="c"
+                  class="os-char-tag"
+                  :style="{ color: charColor(c), borderColor: charColor(c), background: charColor(c) + '18' }"
+                >{{ c }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="os-resize-handle" ref="resizeHandleRef"></div>
+
+        <!-- Right panel -->
+        <div class="os-panel-right">
+          <div class="os-tabs">
+            <button class="os-tab-btn" :class="{ 'active': activeTab === 'thinking' }" @click="switchTab('thinking')">
+              {{ t.tabThinking }} <span class="badge">{{ badgeThinking }}</span>
+            </button>
+            <button class="os-tab-btn" :class="{ 'active': activeTab === 'script' }" @click="switchTab('script')">
+              {{ t.tabScript }} <span class="badge">{{ badgeScript }}</span>
+            </button>
+            <button class="os-tab-btn" :class="{ 'active': activeTab === 'highpoints' }" @click="switchTab('highpoints')">
+              {{ t.tabHighPoints }} <span class="badge">{{ badgeHp }}</span>
+            </button>
+          </div>
+
+          <div class="os-tab-content" ref="tabContentRef">
+
+            <!-- Thinking / Segplot -->
+            <div class="os-tab-pane" :class="{ 'active': activeTab === 'thinking' }">
+              <div v-if="!segplot.length" class="os-empty-state">
+                <div class="icon">📖</div>
+                <div>{{ t.thinkingEmpty }}</div>
+              </div>
+              <div v-for="(seg, i) in segplot" :key="'seg-' + i" class="os-seg-card os-fade-in" :class="{ 'collapsed': collapsedSegs[i] }">
+                <div class="os-seg-card-header" @click="toggleSeg(i)">
+                  <div class="os-seg-idx">{{ i + 1 }}</div>
+                  <span v-if="seg.time" class="os-seg-time-range" @click.stop="seekTo(seg.time.start || '')">{{ segTimeRange(seg) }}</span>
+                  <div class="os-seg-chars-inline">
+                    <span v-for="c in seg.character" :key="c" class="os-seg-char-tag">{{ c }}</span>
+                  </div>
+                  <span class="os-seg-chevron">▾</span>
+                </div>
+                <div class="os-seg-card-body">
+                  <template v-if="seg.plot">
+                    <h4 class="os-seg-sub-title">{{ t.plotLabel }}</h4>
+                    <div class="os-plot-card">{{ seg.plot }}</div>
+                  </template>
+                  <template v-if="seg.relationship && seg.relationship.length">
+                    <h4 class="os-seg-sub-title">{{ t.relationLabel }}</h4>
+                    <div class="os-relation-list">
+                      <div v-for="(rel, ri) in seg.relationship" :key="ri" class="os-relation-item">
+                        <div class="rel-num">{{ ri + 1 }}</div>
+                        <div>
+                          <div v-if="parseRelation(rel).names" class="rel-people">
+                            <span v-for="(n, ni) in parseRelation(rel).names" :key="ni">
+                              <span :style="{ color: charColor(n) }">{{ n }}</span><span v-if="ni < parseRelation(rel).names.length - 1"> · </span>
+                            </span>
+                          </div>
+                          <div class="rel-desc" v-html="linkifyTimestamps(parseRelation(rel).desc)"></div>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <!-- Script -->
+            <div class="os-tab-pane" :class="{ 'active': activeTab === 'script' }">
+              <div v-if="!scenes.length" class="os-empty-state">
+                <div class="icon">📋</div>
+                <div>{{ t.scriptEmpty }}</div>
+              </div>
+              <div v-for="(scene, i) in scenes" :key="'scene-' + i" class="os-scene-card os-fade-in" :class="{ 'collapsed': collapsedScenes[i] }">
+                <div class="os-scene-header" @click="toggleScene(i)">
+                  <span class="os-scene-num">{{ t.sceneLabel }} {{ scene.scene_id || i + 1 }}</span>
+                  <span class="os-scene-location">{{ scene.location }}</span>
+                  <div class="os-scene-tags">
+                    <span v-if="scene.type" class="os-scene-tag">{{ scene.type }}</span>
+                    <span v-if="scene.time" class="os-scene-tag">{{ scene.time }}</span>
+                  </div>
+                  <span class="os-scene-chevron">▾</span>
+                </div>
+                <div v-if="scene.environment || scene.mood" class="os-scene-env">
+                  {{ scene.environment }}
+                  <span v-if="scene.mood" class="os-scene-mood">🎭 {{ scene.mood }}</span>
+                </div>
+                <div class="os-scene-body">
+                  <div class="os-events-list">
+                    <div
+                      v-for="(ev, ei) in scene.events" :key="ei"
+                      class="os-event-row"
+                      :data-sec="tsToSec(ev.timestamp)"
+                    >
+                      <button class="os-ts-btn" @click="seekTo(ev.timestamp)" :title="t.jumpTo + ' ' + ev.timestamp">{{ ev.timestamp }}</button>
+                      <div class="os-event-body">
+                        <div>
+                          <span v-if="ev.character" class="os-char-name" :style="{ color: charColor(ev.character) }">{{ ev.character }}</span>
+                          <span v-if="ev.voice_type" class="os-voice-type">{{ ev.voice_type }}</span>
+                          <span v-if="ev.action" class="os-event-action">{{ ev.action }}</span>
+                          <span v-if="ev.expression" class="os-event-expression">😶 {{ ev.expression }}</span>
+                        </div>
+                        <div v-if="ev.dialogue" class="os-event-dialogue">「{{ ev.dialogue }}」</div>
+                        <div v-if="ev.subtext" class="os-event-subtext">{{ ev.subtext }}</div>
+                        <div v-if="ev.audio_cue" class="os-audio-cue">🎵 {{ ev.audio_cue }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- High points -->
+            <div class="os-tab-pane" :class="{ 'active': activeTab === 'highpoints' }">
+              <div v-if="!highPoints.length" class="os-empty-state">
+                <div class="icon">⭐</div>
+                <div>{{ t.hpEmpty }}</div>
+              </div>
+              <div v-for="(hp, i) in highPoints" :key="'hp-' + i" class="os-hp-card os-fade-in" :class="{ 'collapsed': collapsedHps[i] }">
+                <template v-if="typeof hp === 'string'">
+                  <div class="os-hp-header"><span class="os-hp-desc">{{ hp }}</span></div>
+                </template>
+                <template v-else>
+                  <div class="os-hp-header" @click="toggleHp(i)">
+                    <span class="os-hp-score">★ {{ hpScore(hp) }}</span>
+                    <span class="os-hp-type">{{ hp.type }}</span>
+                    <span class="os-hp-desc">{{ hp.description }}</span>
+                    <div class="os-hp-range">
+                      <template v-if="hp.time_range && hp.time_range[0] && hp.time_range[1]">
+                        <button class="os-ts-btn" @click.stop="seekTo(hp.time_range[0])" :title="t.jumpTo + ' ' + hp.time_range[0]">{{ hp.time_range[0] }}</button>
+                        <span style="color: var(--muted); font-size: 12px;">→</span>
+                        <button class="os-ts-btn" @click.stop="seekTo(hp.time_range[1])" :title="t.jumpTo + ' ' + hp.time_range[1]">{{ hp.time_range[1] }}</button>
+                      </template>
+                    </div>
+                    <span v-if="hpHasReasoning(hp)" class="os-hp-chevron">▾</span>
+                  </div>
+                  <div v-if="hpHasReasoning(hp)" class="os-hp-body">
+                    <div class="os-hp-reasoning-grid">
+                      <div v-if="hp.reasoning && hp.reasoning.visual" class="os-hp-reasoning-item">
+                        <div class="os-hp-reasoning-label">{{ t.hpVisual }}</div>
+                        <div class="os-hp-reasoning-text">{{ hp.reasoning.visual }}</div>
+                      </div>
+                      <div v-if="hp.reasoning && hp.reasoning.audio" class="os-hp-reasoning-item">
+                        <div class="os-hp-reasoning-label">{{ t.hpAudio }}</div>
+                        <div class="os-hp-reasoning-text">{{ hp.reasoning.audio }}</div>
+                      </div>
+                      <div v-if="hp.reasoning && hp.reasoning.text" class="os-hp-reasoning-item">
+                        <div class="os-hp-reasoning-label">{{ t.hpText }}</div>
+                        <div class="os-hp-reasoning-text">{{ hp.reasoning.text }}</div>
+                      </div>
+                      <div v-if="hp.reasoning && hp.reasoning.psychology" class="os-hp-reasoning-item">
+                        <div class="os-hp-reasoning-label">{{ t.hpPsychology }}</div>
+                        <div class="os-hp-reasoning-text">{{ hp.reasoning.psychology }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+      <!-- Preview dialog -->
+      <q-dialog v-model="previewOpen" persistent>
+        <q-card class="os-dialog os-dialog-wide">
+          <div class="os-dialog-heading">
+            <q-icon name="mdi-eye-outline" color="blue-4"></q-icon>
+            <span class="title">{{ t.previewTitle }} · {{ currentLabel }}</span>
+            <span class="spacer"></span>
+            <q-btn flat dense round icon="mdi-close" @click="previewOpen = false"></q-btn>
+          </div>
+          <div class="os-dialog-body">
+            <pre class="os-json-pre">{{ currentJson }}</pre>
+          </div>
+          <div class="os-dialog-footer">
+            <q-btn flat dense no-caps icon="mdi-content-copy" :label="t.copyJson" @click="copyCurrentJson"></q-btn>
+            <q-btn flat dense no-caps icon="mdi-download-outline" :label="t.saveAsJson" @click="downloadCurrentJson"></q-btn>
+            <q-btn flat dense no-caps :label="t.close" @click="previewOpen = false"></q-btn>
+          </div>
+        </q-card>
+      </q-dialog>
+      <!-- Copy dialog -->
+      <q-dialog v-model="copyOpen" persistent>
+        <q-card class="os-dialog">
+          <div class="os-dialog-heading">
+            <q-icon name="mdi-content-copy" color="blue-4"></q-icon>
+            <span class="title">{{ t.copyTitle }}</span>
+            <span class="spacer"></span>
+            <q-btn flat dense round icon="mdi-close" @click="copyOpen = false"></q-btn>
+          </div>
+          <div class="os-dialog-body">
+            <q-form @submit.prevent="createCopy" class="q-gutter-md">
+              <q-input v-model="copyName" outlined dense dark :label="t.copyName" :hint="t.copyNameHint" :rules="[v => !!String(v).trim() || t.required]" autofocus></q-input>
+            </q-form>
+          </div>
+          <div class="os-dialog-footer">
+            <q-btn flat dense no-caps :label="t.cancelDialog" @click="copyOpen = false"></q-btn>
+            <q-btn unelevated dense no-caps icon="mdi-content-copy" color="blue-7" :label="t.copyAction" @click="createCopy"></q-btn>
+          </div>
+        </q-card>
+      </q-dialog>
+      <!-- Editor dialog -->
+      <q-dialog v-model="editorOpen" persistent maximized transition-show="fade" transition-hide="fade">
+        <q-card class="os-dialog os-dialog-wide" style="max-width: 1000px;">
+          <div class="os-dialog-heading">
+            <q-icon name="mdi-pencil-outline" color="blue-4"></q-icon>
+            <span class="title">{{ t.editTitle }}</span>
+            <span class="spacer"></span>
+            <q-btn flat dense round icon="mdi-close" @click="editorOpen = false"></q-btn>
+          </div>
+          <div class="os-dialog-body">
+            <template v-if="draft">
+              <div class="os-editor-section">
+                <div class="os-editor-section-head">
+                  <span class="os-editor-section-title">{{ t.editorBasic }}</span>
+                </div>
+                <div class="os-editor-section-body os-grid-3">
+                  <q-input v-model="draft.name" outlined dense dark :label="t.copyNameField"></q-input>
+                  <q-input v-model="draft.entry.video_file" outlined dense dark :label="t.videoFile"></q-input>
+                  <q-input v-model.number="draft.entry.duration" outlined dense dark type="number" :label="t.durationField"></q-input>
+                  <q-input v-model="draft.entry.display_name" outlined dense dark :label="t.displayNameField" class="os-full-row"></q-input>
+                </div>
+              </div>
+              <div class="os-editor-section">
+                <div class="os-editor-section-head">
+                  <span class="os-editor-section-title">{{ t.metaSection }}</span>
+                </div>
+                <div class="os-editor-section-body os-grid-2">
+                  <q-input v-model="draft.entry.script.meta.title" outlined dense dark :label="t.metaTitleField"></q-input>
+                  <q-input v-model="draft.entry.script.meta.duration" outlined dense dark :label="t.metaDurationField"></q-input>
+                  <q-input v-model="metaCharactersText" outlined dense dark :label="t.charactersField" :hint="t.charactersHint" class="os-full-row"></q-input>
+                  <q-input v-model="draft.entry.thinking" outlined dense dark type="textarea" autogrow :label="t.thinkingField" class="os-full-row"></q-input>
+                </div>
+              </div>
+              <div class="os-editor-section">
+                <div class="os-editor-section-head">
+                  <span class="os-editor-section-title">{{ t.segplotSection }}</span>
+                  <span class="os-editor-count">{{ draft.entry.segplot.length }}</span>
+                  <span class="spacer"></span>
+                  <q-btn flat dense no-caps size="sm" icon="mdi-plus" color="blue-4" :label="t.addSegment" @click="addSegment"></q-btn>
+                </div>
+                <div class="os-editor-section-body">
+                  <div v-for="(seg, si) in draft.entry.segplot" :key="si" class="os-sub-card">
+                    <div class="os-sub-card-head">
+                      <span class="os-sub-card-title">#{{ si + 1 }}</span>
+                      <span class="spacer"></span>
+                      <q-btn flat dense round size="sm" icon="mdi-delete-outline" color="red-4" @click="draft.entry.segplot.splice(si, 1)"><q-tooltip>{{ t.removeSegment }}</q-tooltip></q-btn>
+                    </div>
+                    <div class="os-grid-2">
+                      <q-input :model-value="segTime(seg).start" @update:model-value="value => { segTime(seg).start = value }" outlined dense dark :label="t.segStart"></q-input>
+                      <q-input :model-value="segTime(seg).end" @update:model-value="value => { segTime(seg).end = value }" outlined dense dark :label="t.segEnd"></q-input>
+                      <q-input :model-value="segCharsText(seg)" @update:model-value="value => setSegChars(seg, value)" outlined dense dark :label="t.segCharacters" :hint="t.charactersHint" class="os-full-row"></q-input>
+                      <q-input v-model="seg.plot" outlined dense dark type="textarea" autogrow :label="t.segPlot" class="os-full-row"></q-input>
+                      <div class="os-full-row">
+                        <div class="os-sub-card-head">
+                          <span class="os-sub-card-title" style="font-size:11px;color:var(--muted)">{{ t.segRelationships }}</span>
+                          <span class="spacer"></span>
+                          <q-btn flat dense no-caps size="sm" icon="mdi-plus" color="blue-4" :label="t.addRelation" @click="addRelation(seg)"></q-btn>
+                        </div>
+                        <q-input v-for="(rel, ri) in seg.relationship" :key="ri" v-model="seg.relationship[ri]" outlined dense dark type="textarea" autogrow class="q-mb-sm">
+                          <template v-slot:append>
+                            <q-btn flat dense round size="sm" icon="mdi-close" color="red-4" @click="seg.relationship.splice(ri, 1)"></q-btn>
+                          </template>
+                        </q-input>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="os-editor-section">
+                <div class="os-editor-section-head">
+                  <span class="os-editor-section-title">{{ t.scriptSection }}</span>
+                  <span class="os-editor-count">{{ draft.entry.script.script.length }}</span>
+                  <span class="spacer"></span>
+                  <q-btn flat dense no-caps size="sm" icon="mdi-plus" color="blue-4" :label="t.addScene" @click="addScene"></q-btn>
+                </div>
+                <div class="os-editor-section-body">
+                  <div v-for="(scene, sci) in draft.entry.script.script" :key="sci" class="os-sub-card">
+                    <div class="os-sub-card-head">
+                      <span class="os-sub-card-title">{{ t.sceneIdField }} {{ scene.scene_id || sci + 1 }} · {{ scene.location }}</span>
+                      <span class="spacer"></span>
+                      <q-btn flat dense round size="sm" icon="mdi-delete-outline" color="red-4" @click="draft.entry.script.script.splice(sci, 1)"><q-tooltip>{{ t.removeScene }}</q-tooltip></q-btn>
+                    </div>
+                    <div class="os-grid-3">
+                      <q-input v-model.number="scene.scene_id" outlined dense dark type="number" :label="t.sceneIdField"></q-input>
+                      <q-input v-model="scene.location" outlined dense dark :label="t.sceneLocationField"></q-input>
+                      <q-input v-model="scene.type" outlined dense dark :label="t.sceneTypeField"></q-input>
+                      <q-input v-model="scene.time" outlined dense dark :label="t.sceneTimeField"></q-input>
+                      <q-input v-model="scene.mood" outlined dense dark :label="t.sceneMoodField"></q-input>
+                      <q-input v-model="scene.environment" outlined dense dark :label="t.sceneEnvironmentField" class="os-full-row"></q-input>
+                    </div>
+                    <div class="os-sub-card-head q-mt-md">
+                      <span class="os-sub-card-title" style="font-size:11px;color:var(--muted)">{{ t.eventsField }} ({{ (scene.events || []).length }})</span>
+                      <span class="spacer"></span>
+                      <q-btn flat dense no-caps size="sm" icon="mdi-plus" color="blue-4" :label="t.addEvent" @click="addEvent(scene)"></q-btn>
+                    </div>
+                    <div v-for="(ev, ei) in scene.events" :key="ei" class="os-sub-card" style="background:var(--surf)">
+                      <div class="os-sub-card-head">
+                        <span class="os-sub-card-title" style="font-size:11px;color:var(--accent)">{{ ev.timestamp }} · {{ ev.character }}</span>
+                        <span class="spacer"></span>
+                        <q-btn flat dense round size="sm" icon="mdi-delete-outline" color="red-4" @click="scene.events.splice(ei, 1)"><q-tooltip>{{ t.removeEvent }}</q-tooltip></q-btn>
+                      </div>
+                      <div class="os-grid-3">
+                        <q-input v-model="ev.timestamp" outlined dense dark :label="t.evTimestamp"></q-input>
+                        <q-input v-model="ev.character" outlined dense dark :label="t.evCharacter"></q-input>
+                        <q-input v-model="ev.voice_type" outlined dense dark :label="t.evVoiceType"></q-input>
+                        <q-input v-model="ev.action" outlined dense dark :label="t.evAction" class="os-full-row"></q-input>
+                        <q-input v-model="ev.dialogue" outlined dense dark :label="t.evDialogue" class="os-full-row"></q-input>
+                        <q-input v-model="ev.expression" outlined dense dark :label="t.evExpression"></q-input>
+                        <q-input v-model="ev.audio_cue" outlined dense dark :label="t.evAudioCue"></q-input>
+                        <q-input v-model="ev.subtext" outlined dense dark type="textarea" autogrow :label="t.evSubtext" class="os-full-row"></q-input>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="os-editor-section">
+                <div class="os-editor-section-head">
+                  <span class="os-editor-section-title">{{ t.hpSection }}</span>
+                  <span class="os-editor-count">{{ (draft.entry.script.high_points || []).length }}</span>
+                  <span class="spacer"></span>
+                  <q-btn flat dense no-caps size="sm" icon="mdi-plus" color="blue-4" :label="t.addHighPoint" @click="addHighPoint"></q-btn>
+                </div>
+                <div class="os-editor-section-body">
+                  <div v-for="(hp, hi) in draft.entry.script.high_points" :key="hi" class="os-sub-card">
+                    <div class="os-sub-card-head">
+                      <span class="os-sub-card-title">#{{ hi + 1 }} · {{ hp.type }}</span>
+                      <span class="spacer"></span>
+                      <q-btn flat dense round size="sm" icon="mdi-delete-outline" color="red-4" @click="draft.entry.script.high_points.splice(hi, 1)"><q-tooltip>{{ t.removeHighPoint }}</q-tooltip></q-btn>
+                    </div>
+                    <div class="os-grid-2">
+                      <q-input v-model="hp.type" outlined dense dark :label="t.hpTypeField"></q-input>
+                      <q-input v-model.number="hp.score" outlined dense dark type="number" step="0.1" :label="t.hpScoreField"></q-input>
+                      <q-input :model-value="hpRange(hp).start" @update:model-value="value => { hpRange(hp).start = value }" outlined dense dark :label="t.hpStart"></q-input>
+                      <q-input :model-value="hpRange(hp).end" @update:model-value="value => { hpRange(hp).end = value }" outlined dense dark :label="t.hpEnd"></q-input>
+                      <q-input v-model="hp.description" outlined dense dark type="textarea" autogrow :label="t.hpDescriptionField" class="os-full-row"></q-input>
+                      <q-input :model-value="hpReasoning(hp).visual" @update:model-value="value => { hpReasoning(hp).visual = value }" outlined dense dark type="textarea" autogrow :label="t.hpReasoningField + ' · ' + t.hpVisual" class="os-full-row"></q-input>
+                      <q-input :model-value="hpReasoning(hp).audio" @update:model-value="value => { hpReasoning(hp).audio = value }" outlined dense dark type="textarea" autogrow :label="t.hpReasoningField + ' · ' + t.hpAudio" class="os-full-row"></q-input>
+                      <q-input :model-value="hpReasoning(hp).text" @update:model-value="value => { hpReasoning(hp).text = value }" outlined dense dark type="textarea" autogrow :label="t.hpReasoningField + ' · ' + t.hpText" class="os-full-row"></q-input>
+                      <q-input :model-value="hpReasoning(hp).psychology" @update:model-value="value => { hpReasoning(hp).psychology = value }" outlined dense dark type="textarea" autogrow :label="t.hpReasoningField + ' · ' + t.hpPsychology" class="os-full-row"></q-input>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+          <div class="os-dialog-footer">
+            <q-btn flat dense no-caps icon="mdi-download-outline" :label="t.saveAsJson" @click="downloadDraftJson"></q-btn>
+            <q-btn flat dense no-caps :label="t.cancelDialog" @click="editorOpen = false"></q-btn>
+            <q-btn unelevated dense no-caps icon="mdi-content-save-outline" color="blue-7" :label="t.save" @click="saveDraft"></q-btn>
+          </div>
+        </q-card>
+      </q-dialog>
+  </div>
+
+
+  <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./api.js?v=10"></script>
+  <script src="./i18n.js?v=21"></script>
+  <script src="./omniscript-data.js?v=2"></script>
+  <script>
+    const { createApp, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } = Vue
+
+    const CHAR_COLORS = ['#ff7b72', '#d2a8ff', '#79c0ff', '#56d364', '#e3b341', '#f0883e', '#ff9bce', '#b3f0ff']
+
+    const app = createApp({
+      setup () {
+        const locale = ref(window.adminI18n.getLocale())
+        const t = computed(() => window.adminI18n.messages[locale.value].omniscript)
+        let unsubscribeLocale
+
+        const builtinData = window.OMNISCRIPT_DATA || {}
+        const builtinGroups = window.OMNISCRIPT_GROUPS || []
+
+        const dataSource = ref('builtin')
+        const datasets = ref([])
+        const datasetsLoading = ref(false)
+        const datasetsError = ref('')
+        const datasetEntry = ref(null)
+        const COPIES_KEY = 'omniscript_copies'
+        const copies = ref(loadCopies())
+        const previewOpen = ref(false)
+        const copyOpen = ref(false)
+        const editorOpen = ref(false)
+        const copyName = ref('')
+        const draft = ref(null)
+
+        const dataSourceOptions = computed(() => [
+          { label: t.value.builtinSource, value: 'builtin' },
+          ...datasets.value.map(name => ({ label: name.replace(/\.json$/, ''), value: name }))
+        ])
+        const datasetKey = computed(() => 'ds:' + String(dataSource.value || '').replace(/\.json$/, ''))
+        const DATA = computed(() => {
+          if (dataSource.value === 'builtin') return builtinData
+          if (datasetEntry.value) return { [datasetKey.value]: datasetEntry.value }
+          return {}
+        })
+        const viewData = computed(() => {
+          const map = { ...DATA.value }
+          copies.value.forEach(copy => { map[copy.id] = copy.entry })
+          return map
+        })
+        const viewGroups = computed(() => {
+          if (dataSource.value === 'builtin') return builtinGroups
+          if (!datasetEntry.value) return []
+          const label = datasetEntry.value.script?.meta?.duration || String(dataSource.value).replace(/\.json$/, '')
+          return [{ category: t.value.datasetCategory, groups: [{ label, ids: [datasetKey.value] }] }]
+        })
+
+        const currentVideoId = ref(null)
+        const activeTab = ref('thinking')
+        const autoScrollEnabled = ref(false)
+
+        const collapsedSegs = reactive({})
+        const collapsedScenes = reactive({})
+        const collapsedHps = reactive({})
+        const videoLoading = ref(false)
+
+        const playerRef = ref(null)
+        const tabContentRef = ref(null)
+        const panelListRef = ref(null)
+        const panelPlayerRef = ref(null)
+        const resizeHandleRef = ref(null)
+        const resizeHandleListRef = ref(null)
+
+        let charColors = {}
+        let charIndex = 0
+        let scriptTimeline = []
+        let activeEventEl = null
+        let playerBlobUrl = null
+
+        const currentData = computed(() => viewData.value[currentVideoId.value] || null)
+        const currentCopy = computed(() => copies.value.find(copy => copy.id === currentVideoId.value) || null)
+        const isCopySelected = computed(() => !!currentCopy.value)
+        const currentLabel = computed(() => {
+          if (currentCopy.value) return currentCopy.value.name
+          return videoDisplay(currentVideoId.value)
+        })
+        const currentJson = computed(() => JSON.stringify(currentData.value, null, 2))
+        const metaCharactersText = computed({
+          get: () => (draft.value?.entry?.script?.meta?.characters || []).join(', '),
+          set: value => {
+            if (!draft.value) return
+            draft.value.entry.script.meta.characters = String(value || '')
+              .split(/[,，]/).map(name => name.trim()).filter(Boolean)
+          }
+        })
+        const segplot = computed(() => currentData.value?.segplot || [])
+        const scenes = computed(() => currentData.value?.script?.script || [])
+        const highPoints = computed(() => currentData.value?.script?.high_points || [])
+        const metaTitle = computed(() => {
+          const meta = currentData.value?.script?.meta || {}
+          return meta.title ? meta.title + (meta.duration ? '  ·  ' + meta.duration : '') : ''
+        })
+        const metaCharacters = computed(() => currentData.value?.script?.meta?.characters || [])
+
+        const badgeThinking = computed(() => segplot.value.length ? String(segplot.value.length) : '—')
+        const badgeScript = computed(() => scenes.value.length ? String(scenes.value.length) : '—')
+        const badgeHp = computed(() => highPoints.value.length ? String(highPoints.value.length) : '—')
+
+        function videoMeta (id) {
+          const d = viewData.value[id]
+          return d?.script?.meta || {}
+        }
+
+        function videoDisplay (id) {
+          const d = viewData.value[id]
+          if (d?.display_name) return d.display_name
+          if (String(id).startsWith('ds:')) return datasetLabel(id)
+          const copy = copies.value.find(item => item.id === id)
+          if (copy) return copy.name
+          return id.split('_')[0]
+        }
+
+        function datasetLabel (id) {
+          const meta = viewData.value[id]?.script?.meta || {}
+          return meta.title || String(id).slice(3)
+        }
+
+        function charColor (name) {
+          if (!charColors[name]) {
+            charColors[name] = CHAR_COLORS[charIndex % CHAR_COLORS.length]
+            charIndex++
+          }
+          return charColors[name]
+        }
+
+        function tsToSec (ts) {
+          if (!ts) return -1
+          const parts = ts.split(':').map(Number)
+          if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+          return parts[0] * 60 + (parts[1] || 0)
+        }
+
+        function segTimeRange (seg) {
+          if (!seg.time) return ''
+          return (seg.time.start || '') + ' → ' + (seg.time.end || '')
+        }
+
+        function parseRelation (rel) {
+          const m = String(rel).match(/^\[([^\]]+)\]\s*(.*)/s)
+          if (m) {
+            const names = m[1].split(/[，,&]/).map(n => n.trim()).filter(Boolean)
+            return { names, desc: m[2].trim().replace(/^[：:]\s*/, '') }
+          }
+          return { names: null, desc: String(rel) }
+        }
+
+        function linkifyTimestamps (text) {
+          if (!text) return ''
+          const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+          return esc(text).replace(/\((\d{1,2}:\d{2}(?::\d{2})?)\)/g, (match, ts) =>
+            '(<button class="os-ts-btn os-ts-inline" data-ts="' + ts + '">' + ts + '</button>)'
+          )
+        }
+
+        function handleTsClick (event) {
+          const btn = event.target.closest('.os-ts-btn[data-ts]')
+          if (btn) seekTo(btn.dataset.ts)
+        }
+
+        function seekTo (ts) {
+          const v = playerRef.value
+          if (!v || !v.src || !ts) return
+          const sec = tsToSec(ts)
+          let retries = 0
+          function doSeek () {
+            v.pause()
+            v.currentTime = sec
+            function onSeeked () {
+              v.removeEventListener('seeked', onSeeked)
+              v.play().catch(() => {})
+            }
+            v.addEventListener('seeked', onSeeked)
+            setTimeout(() => {
+              if (Math.abs(v.currentTime - sec) > 2 && retries < 5) {
+                retries++
+                v.removeEventListener('seeked', onSeeked)
+                doSeek()
+              }
+            }, 600)
+          }
+          if (v.readyState >= 1) {
+            doSeek()
+          } else {
+            let polls = 0
+            function waitReady () {
+              if (v.readyState >= 1) { doSeek(); return }
+              if (polls++ < 25) setTimeout(waitReady, 200)
+            }
+            waitReady()
+          }
+        }
+
+        function switchTab (tab) {
+          activeTab.value = tab
+          if (autoScrollEnabled.value && tab === 'script') {
+            nextTick(() => {
+              const v = playerRef.value
+              if (v) syncScriptToTime(v.currentTime || 0, true)
+            })
+          }
+        }
+
+        function toggleAutoScroll () {
+          autoScrollEnabled.value = !autoScrollEnabled.value
+          if (autoScrollEnabled.value) {
+            switchTab('script')
+            nextTick(() => {
+              const v = playerRef.value
+              if (v) syncScriptToTime(v.currentTime || 0, true)
+            })
+          } else {
+            clearActiveEvent()
+          }
+        }
+
+        function toggleSeg (i) { collapsedSegs[i] = !collapsedSegs[i] }
+        function toggleScene (i) { collapsedScenes[i] = !collapsedScenes[i] }
+        function toggleHp (i) { collapsedHps[i] = !collapsedHps[i] }
+
+        function hpScore (hp) {
+          return typeof hp.score === 'number' ? hp.score.toFixed(1) : '—'
+        }
+
+        function hpHasReasoning (hp) {
+          const r = hp.reasoning || {}
+          return !!(r.visual || r.audio || r.text || r.psychology)
+        }
+
+        function selectVideo (videoId) {
+          currentVideoId.value = videoId
+          charColors = {}
+          charIndex = 0
+          Object.keys(collapsedSegs).forEach(k => delete collapsedSegs[k])
+          Object.keys(collapsedScenes).forEach(k => delete collapsedScenes[k])
+          Object.keys(collapsedHps).forEach(k => delete collapsedHps[k])
+
+          const d = DATA.value[videoId]
+          if (!d) return
+
+          const player = playerRef.value
+          if (playerBlobUrl) { URL.revokeObjectURL(playerBlobUrl); playerBlobUrl = null }
+          player.removeAttribute('src')
+          player.load()
+          const videoUrl = 'videos/' + encodeURIComponent(d.video_file.replace(/_anno\.mp4$/, '.mp4'))
+          videoLoading.value = true
+          fetch(videoUrl).then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status)
+            return r.blob()
+          }).then(blob => {
+            if (currentVideoId.value !== videoId) return
+            playerBlobUrl = URL.createObjectURL(blob)
+            player.src = playerBlobUrl
+            player.load()
+          }).catch(error => {
+            console.error('Video fetch failed, falling back to direct playback:', error)
+            player.src = videoUrl
+            player.load()
+          }).finally(() => { videoLoading.value = false })
+
+          if (d.thinking || (d.segplot && d.segplot.length)) {
+            switchTab('thinking')
+          } else {
+            switchTab('script')
+          }
+
+          nextTick(rebuildScriptTimeline)
+        }
+
+        function clearActiveEvent () {
+          if (activeEventEl) {
+            activeEventEl.classList.remove('active-sync')
+            activeEventEl = null
+          }
+        }
+
+        function rebuildScriptTimeline () {
+          clearActiveEvent()
+          const container = tabContentRef.value
+          if (!container) { scriptTimeline = []; return }
+          scriptTimeline = Array.from(container.querySelectorAll('.os-event-row[data-sec]'))
+            .map(el => ({ sec: parseFloat(el.dataset.sec), el }))
+            .filter(x => Number.isFinite(x.sec) && x.sec >= 0)
+            .sort((a, b) => a.sec - b.sec)
+        }
+
+        function findActiveEvent (t) {
+          let best = null
+          for (const item of scriptTimeline) {
+            if (item.sec <= t + 0.05) best = item
+            else break
+          }
+          return best
+        }
+
+        function scrollEventToSecondRow (el) {
+          if (activeTab.value !== 'script') return
+          const container = tabContentRef.value
+          if (!container) return
+          const rows = Array.from(container.querySelectorAll('.os-event-row'))
+          const idx = rows.indexOf(el)
+          const ref = idx > 0 ? rows[idx - 1] : el
+          const topPad = idx > 0 ? 8 : 12
+          const target = ref.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - topPad
+          container.scrollTo({ top: Math.max(0, target), behavior: 'smooth' })
+        }
+
+        function syncScriptToTime (t, forceScroll) {
+          if (!scriptTimeline.length) return
+          const item = findActiveEvent(t)
+          if (!item) return
+
+          const changed = activeEventEl !== item.el
+          if (changed) {
+            if (activeEventEl) activeEventEl.classList.remove('active-sync')
+            activeEventEl = item.el
+            activeEventEl.classList.add('active-sync')
+            const scene = activeEventEl.closest('.os-scene-card')
+            if (scene && scene.classList.contains('collapsed')) {
+              const i = Array.from(scene.parentElement.children).indexOf(scene)
+              if (collapsedScenes[i]) collapsedScenes[i] = false
+            }
+          }
+
+          if ((changed || forceScroll) && autoScrollEnabled.value) {
+            requestAnimationFrame(() => scrollEventToSecondRow(item.el))
+          }
+        }
+
+        function loadCopies () {
+          try {
+            const raw = window.localStorage.getItem(COPIES_KEY)
+            const parsed = raw ? JSON.parse(raw) : []
+            return Array.isArray(parsed) ? parsed : []
+          } catch (error) {
+            console.error('Failed to load local copies:', error)
+            return []
+          }
+        }
+
+        function persistCopies () {
+          try {
+            window.localStorage.setItem(COPIES_KEY, JSON.stringify(copies.value))
+          } catch (error) {
+            console.error('Failed to persist local copies:', error)
+            Quasar.Notify.create({ message: t.value.clipboardFailed, type: 'negative', position: 'top-right', timeout: 2500 })
+          }
+        }
+
+        function notify (message, type) {
+          Quasar.Notify.create({ message, type: type || 'positive', position: 'top-right', timeout: 2200 })
+        }
+
+        function sanitizeEntry (entry) {
+          const clone = JSON.parse(JSON.stringify(entry || {}))
+          if (!clone.script || typeof clone.script !== 'object') clone.script = {}
+          if (!clone.script.meta || typeof clone.script.meta !== 'object') clone.script.meta = {}
+          if (!Array.isArray(clone.script.meta.characters)) clone.script.meta.characters = []
+          if (!Array.isArray(clone.script.script)) clone.script.script = []
+          clone.script.script.forEach(scene => {
+            if (!Array.isArray(scene.events)) scene.events = []
+            scene.events.forEach(event => {
+              Object.keys(event).forEach(key => {
+                if (event[key] === '' || event[key] === null || event[key] === undefined) delete event[key]
+              })
+            })
+          })
+          if (!Array.isArray(clone.script.high_points)) clone.script.high_points = []
+          clone.script.high_points.forEach(hp => {
+            if (hp && hp.reasoning) {
+              Object.keys(hp.reasoning).forEach(key => {
+                if (!hp.reasoning[key]) delete hp.reasoning[key]
+              })
+              if (!Object.keys(hp.reasoning).length) delete hp.reasoning
+            }
+          })
+          if (!Array.isArray(clone.segplot)) clone.segplot = []
+          return clone
+        }
+
+        function openPreview () {
+          if (!currentVideoId.value) return
+          previewOpen.value = true
+        }
+
+        async function copyText (text) {
+          try {
+            if (navigator.clipboard?.writeText) {
+              await navigator.clipboard.writeText(text)
+            } else {
+              const area = document.createElement('textarea')
+              area.value = text
+              document.body.appendChild(area)
+              area.select()
+              document.execCommand('copy')
+              area.remove()
+            }
+            notify(t.value.clipboardOk)
+          } catch (error) {
+            notify(t.value.clipboardFailed, 'negative')
+          }
+        }
+
+        function copyCurrentJson () {
+          copyText(currentJson.value)
+        }
+
+        function downloadJson (payload, filename) {
+          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const link = document.createElement('a')
+          link.href = url
+          link.download = filename
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          setTimeout(() => URL.revokeObjectURL(url), 5000)
+          notify(t.value.jsonDownloaded)
+        }
+
+        function entryFilename (name) {
+          const safe = String(name || 'omniscript').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 80) || 'omniscript'
+          return safe + '.json'
+        }
+
+        function downloadCurrentJson () {
+          downloadJson(currentData.value, entryFilename(currentLabel.value))
+        }
+
+        function openCopy () {
+          if (!currentVideoId.value) return
+          copyName.value = currentLabel.value + ' copy'
+          copyOpen.value = true
+        }
+
+        function createCopy () {
+          const name = String(copyName.value || '').trim()
+          if (!name || !currentData.value) return
+          const entry = sanitizeEntry(currentData.value)
+          entry.display_name = name
+          const copy = {
+            id: 'copy:' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            name,
+            createdAt: new Date().toISOString(),
+            sourceLabel: currentLabel.value,
+            entry
+          }
+          copies.value.push(copy)
+          persistCopies()
+          copyOpen.value = false
+          notify(t.value.copyCreated)
+          selectVideo(copy.id)
+        }
+
+        function removeCopy () {
+          const copy = currentCopy.value
+          if (!copy) return
+          Quasar.Dialog.create({
+            title: t.value.deleteTitle,
+            message: copy.name + ' · ' + t.value.deleteConfirm,
+            cancel: true,
+            persistent: true,
+            dark: true,
+            ok: { label: t.value.deleteAction, color: 'negative', flat: true }
+          }).onOk(() => {
+            copies.value = copies.value.filter(item => item.id !== copy.id)
+            persistCopies()
+            currentVideoId.value = null
+            notify(t.value.deletedNotify)
+          })
+        }
+
+        function openEditor () {
+          const copy = currentCopy.value
+          if (!copy) {
+            notify(t.value.editCopyOnly, 'warning')
+            return
+          }
+          draft.value = {
+            id: copy.id,
+            name: copy.name,
+            entry: sanitizeEntry(copy.entry)
+          }
+          editorOpen.value = true
+        }
+
+        function segTime (seg) {
+          if (!seg.time || typeof seg.time !== 'object') seg.time = { start: '', end: '' }
+          return seg.time
+        }
+
+        function segCharsText (seg) {
+          return (seg.character || []).join(', ')
+        }
+
+        function setSegChars (seg, value) {
+          seg.character = String(value || '').split(/[,，]/).map(name => name.trim()).filter(Boolean)
+        }
+
+        function addRelation (seg) {
+          if (!Array.isArray(seg.relationship)) seg.relationship = []
+          seg.relationship.push('')
+        }
+
+        function addSegment () {
+          draft.value.entry.segplot.push({
+            time: { start: '', end: '' },
+            character: [],
+            relationship: [],
+            plot: ''
+          })
+        }
+
+        function addScene () {
+          const scenes = draft.value.entry.script.script
+          scenes.push({
+            scene_id: scenes.length + 1,
+            location: '',
+            time: '',
+            events: []
+          })
+        }
+
+        function addEvent (scene) {
+          if (!Array.isArray(scene.events)) scene.events = []
+          scene.events.push({ timestamp: '', character: '' })
+        }
+
+        function hpRange (hp) {
+          if (!Array.isArray(hp.time_range) || hp.time_range.length !== 2) hp.time_range = ['', '']
+          return {
+            get start () { return hp.time_range[0] },
+            set start (value) { hp.time_range[0] = value },
+            get end () { return hp.time_range[1] },
+            set end (value) { hp.time_range[1] = value }
+          }
+        }
+
+        function hpReasoning (hp) {
+          if (!hp.reasoning || typeof hp.reasoning !== 'object') hp.reasoning = {}
+          return hp.reasoning
+        }
+
+        function addHighPoint () {
+          if (!Array.isArray(draft.value.entry.script.high_points)) draft.value.entry.script.high_points = []
+          draft.value.entry.script.high_points.push({
+            id: draft.value.entry.script.high_points.length + 1,
+            type: '',
+            time_range: ['', ''],
+            description: ''
+          })
+        }
+
+        function downloadDraftJson () {
+          if (!draft.value) return
+          downloadJson(draft.value.entry, entryFilename(draft.value.name))
+        }
+
+        function saveDraft () {
+          if (!draft.value) return
+          const name = String(draft.value.name || '').trim() || currentLabel.value
+          const entry = sanitizeEntry(draft.value.entry)
+          entry.display_name = name
+          const index = copies.value.findIndex(item => item.id === draft.value.id)
+          if (index === -1) return
+          copies.value[index] = { ...copies.value[index], name, entry }
+          persistCopies()
+          editorOpen.value = false
+          notify(t.value.savedNotify)
+          if (currentVideoId.value === draft.value.id) {
+            const selectedId = currentVideoId.value
+            currentVideoId.value = null
+            nextTick(() => selectVideo(selectedId))
+          }
+        }
+
+
+        async function loadDatasets () {
+          datasetsLoading.value = true
+          datasetsError.value = ''
+          try {
+            const manifest = await window.adminApi.fetchJson('./datasets/manifest.json')
+            datasets.value = Array.isArray(manifest.files) ? manifest.files : []
+          } catch (error) {
+            datasetsError.value = t.value.datasetsLoadFailed + ' (' + error.message + ')'
+          } finally {
+            datasetsLoading.value = false
+          }
+        }
+
+        async function applyDataSource (source) {
+          if (source === 'builtin') {
+            datasetEntry.value = null
+            autoSelectFirst()
+            return
+          }
+          datasetsLoading.value = true
+          datasetsError.value = ''
+          try {
+            const entry = await window.adminApi.fetchJson('./datasets/' + encodeURIComponent(source))
+            datasetEntry.value = entry
+            currentVideoId.value = null
+            await nextTick()
+            selectVideo(datasetKey.value)
+          } catch (error) {
+            datasetsError.value = t.value.datasetsLoadFailed + ' (' + error.message + ')'
+          } finally {
+            datasetsLoading.value = false
+          }
+        }
+
+        function autoSelectFirst () {
+          const groups = viewGroups.value
+          const firstGroup = groups[0]?.groups?.[0]
+          if (firstGroup?.ids?.length) selectVideo(firstGroup.ids[0])
+        }
+
+        function setupResizeHandles () {
+          function makeResizable (handle, panel, minW, maxWRatio) {
+            if (!handle || !panel) return
+            let dragging = false, startX = 0, startW = 0
+            handle.addEventListener('mousedown', e => {
+              dragging = true
+              startX = e.clientX
+              startW = panel.getBoundingClientRect().width
+              handle.classList.add('dragging')
+              document.body.style.cursor = 'col-resize'
+              document.body.style.userSelect = 'none'
+              e.preventDefault()
+            })
+            document.addEventListener('mousemove', e => {
+              if (!dragging) return
+              const delta = e.clientX - startX
+              panel.style.width = Math.max(minW, Math.min(window.innerWidth * maxWRatio, startW + delta)) + 'px'
+            })
+            document.addEventListener('mouseup', () => {
+              if (!dragging) return
+              dragging = false
+              handle.classList.remove('dragging')
+              document.body.style.cursor = ''
+              document.body.style.userSelect = ''
+            })
+          }
+          makeResizable(resizeHandleListRef.value, panelListRef.value, 120, 0.3)
+          makeResizable(resizeHandleRef.value, panelPlayerRef.value, 260, 0.5)
+        }
+
+        function setupPlayerEvents () {
+          const player = playerRef.value
+          if (!player) return
+          player.addEventListener('error', () => {
+            if (!player.src) return
+            videoLoading.value = false
+            Quasar.Notify.create({ message: t.value.videoLoadFailed, type: 'negative', position: 'top-right', timeout: 2500 })
+          })
+          player.addEventListener('timeupdate', () => {
+            if (!autoScrollEnabled.value) return
+            syncScriptToTime(player.currentTime || 0, false)
+          })
+          player.addEventListener('seeked', () => {
+            if (!autoScrollEnabled.value) return
+            syncScriptToTime(player.currentTime || 0, true)
+          })
+        }
+
+        watch(scenes, () => {
+          nextTick(rebuildScriptTimeline)
+        })
+
+        watch(dataSource, source => {
+          applyDataSource(source)
+        })
+
+        onMounted(() => {
+          unsubscribeLocale = window.adminI18n.subscribe(nextLocale => {
+            locale.value = nextLocale
+            Quasar.Lang.set(nextLocale === 'zh-CN' ? Quasar.Lang.zhCN : Quasar.Lang.enUS)
+          })
+          setupResizeHandles()
+          setupPlayerEvents()
+          if (tabContentRef.value) {
+            tabContentRef.value.addEventListener('click', handleTsClick)
+          }
+          loadDatasets()
+          autoSelectFirst()
+        })
+
+        onBeforeUnmount(() => {
+          unsubscribeLocale?.()
+          if (playerBlobUrl) URL.revokeObjectURL(playerBlobUrl)
+          if (tabContentRef.value) tabContentRef.value.removeEventListener('click', handleTsClick)
+        })
+
+        return {
+          activeTab,
+          autoScrollEnabled,
+          badgeHp,
+          badgeScript,
+          badgeThinking,
+          charColor,
+          collapsedHps,
+          collapsedScenes,
+          collapsedSegs,
+          copies,
+          copyCurrentJson,
+          copyName,
+          copyOpen,
+          createCopy,
+          currentCopy,
+          currentJson,
+          currentLabel,
+          currentVideoId,
+          dataSource,
+          dataSourceOptions,
+          datasetsError,
+          datasetsLoading,
+          downloadCurrentJson,
+          downloadDraftJson,
+          draft,
+          editorOpen,
+          hpRange,
+          hpReasoning,
+          isCopySelected,
+          metaCharactersText,
+          openCopy,
+          openEditor,
+          openPreview,
+          previewOpen,
+          removeCopy,
+          saveDraft,
+          addEvent,
+          addHighPoint,
+          addRelation,
+          addScene,
+          addSegment,
+          segCharsText,
+          segTime,
+          highPoints,
+          hpHasReasoning,
+          hpScore,
+          loadDatasets,
+          linkifyTimestamps,
+          metaCharacters,
+          metaTitle,
+          panelListRef,
+          panelPlayerRef,
+          parseRelation,
+          playerRef,
+          resizeHandleListRef,
+          resizeHandleRef,
+          scenes,
+          seekTo,
+          segTimeRange,
+          segplot,
+          selectVideo,
+          setSegChars,
+          switchTab,
+          t,
+          tabContentRef,
+          toggleAutoScroll,
+          toggleHp,
+          toggleScene,
+          toggleSeg,
+          tsToSec,
+          videoDisplay,
+          videoLoading,
+          videoMeta,
+          viewGroups
+        }
+      }
+    })
+
+    app.use(Quasar)
+    Quasar.Lang.set(window.adminI18n.getLocale() === 'en-US' ? Quasar.Lang.enUS : Quasar.Lang.zhCN)
+    Quasar.IconSet.set(Quasar.IconSet.mdiV7)
+    app.mount('#q-app')
+  </script>
+</body>
+</html>

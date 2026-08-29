@@ -1,0 +1,101 @@
+# OpenResty Authz Gateway 配置模板
+# 由 docker-entrypoint.sh 用 envsubst 生成 nginx.conf
+# 变量: HTTP_LISTEN HTTP_SERVER_DIRECTIVE HTTPS_PORT CERT_FILE CERT_KEY
+
+worker_processes ${WORKER_PROCESSES};
+# 容器内以 root 运行 worker, 保证挂载卷中的 SQLite 可写
+user root;
+error_log /usr/local/openresty/nginx/logs/error.log warn;
+pid       logs/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+    keepalive_timeout 65;
+
+    # Default response compression. Static files with a sibling .br file use
+    # Brotli directly; other responses fall back to dynamic Brotli/Gzip.
+    brotli on;
+    brotli_comp_level 5;
+    brotli_static on;
+    brotli_types
+        application/javascript
+        application/json
+        application/manifest+json
+        application/xml
+        image/svg+xml
+        text/css
+        text/javascript
+        text/plain
+        text/xml;
+    gzip on;
+    gzip_comp_level 5;
+    gzip_vary on;
+    gzip_min_length 256;
+    gzip_types
+        application/javascript
+        application/json
+        application/manifest+json
+        application/xml
+        image/svg+xml
+        text/css
+        text/javascript
+        text/plain
+        text/xml;
+
+    # resty.authz 库路径 (LUA_PATH 已含, 此处显式兜底)
+    lua_package_path "/usr/local/openresty/site/lualib/?.lua;/usr/local/openresty/site/lualib/?/init.lua;/usr/local/openresty/lualib/?.lua;/usr/local/openresty/lualib/?/init.lua;;";
+
+    lua_shared_dict authz_cache 5m;
+    lua_shared_dict authz_db_cache 10m;
+    lua_shared_dict authz_login_limit 1m;
+    lua_shared_dict authz_oauth_state 5m;
+    resolver ${DNS_RESOLVER} ipv6=off valid=300s;
+    resolver_timeout 5s;
+    lua_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+    lua_ssl_verify_depth 5;
+
+    init_by_lua_block {
+        require("resty.authz").init()
+    }
+
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    map $http_x_forwarded_host $authz_request_host {
+        default $http_x_forwarded_host;
+        ""      $http_host;
+    }
+
+    # Some outer proxies preserve the hostname but replace the public port.
+    # Restore the Origin authority only when its hostname matches the request
+    # hostname; a genuinely cross-origin hostname keeps the request Host.
+    map "$http_origin|$authz_request_host" $authz_forwarded_host {
+        default $authz_request_host;
+        ~*^https?://([^/:]+)(:\d+)?\|\1(?::\d+)?$ $1$2;
+    }
+
+    server {
+        listen ${HTTP_LISTEN};
+        server_name _;
+        ${HTTP_SERVER_DIRECTIVE}
+    }
+
+    server {
+        listen ${HTTPS_PORT} ssl;
+        server_name _;
+
+        ssl_certificate     ${CERT_FILE};
+        ssl_certificate_key ${CERT_KEY};
+        ssl_protocols TLSv1.2 TLSv1.3;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        include server.conf;
+    }
+}

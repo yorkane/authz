@@ -1,0 +1,5 @@
+# 测试运行时产物（不提交）
+logs/*.log
+logs/nginx.pid
+dav/*
+!dav/.gitkeep

@@ -1,0 +1,34 @@
+<div id="admin-menu">
+  <aside class="menu-shell">
+    <div class="brand-row">
+      <q-avatar rounded size="32px" class="brand-mark"><q-icon name="mdi-shield-lock-outline" size="20px"></q-icon></q-avatar>
+      <strong class="menu-copy brand-label">{{ displayName }}</strong>
+      <q-btn flat round dense :icon="toggleIcon" class="collapse-button" :aria-label="toggleLabel" @click="toggleDrawer"><q-tooltip>{{ toggleLabel }}</q-tooltip></q-btn>
+    </div>
+
+    <q-list class="menu-list">
+      <q-expansion-item v-for="group in groups" :key="group.id" v-model="groupOpen[group.id]" hide-expand-icon class="menu-expansion menu-group" dense>
+        <template #header>
+          <q-tooltip v-if="group.children && group.children.length" anchor="top right" self="top left" :offset="[8, 0]">{{ group.label }}</q-tooltip>
+          <q-item-section avatar><q-icon :name="group.icon || 'mdi-folder'" size="18px"></q-icon></q-item-section>
+          <q-item-section class="menu-copy"><span class="menu-item-label">{{ group.label }}</span><span class="menu-item-note">{{ group.children ? group.children.length : 0 }}</span></q-item-section>
+          <q-item-section side class="menu-copy"><q-icon name="mdi-chevron-down" :class="{ 'menu-expansion-rotated': groupOpen[group.id] }" size="16px"></q-icon></q-item-section>
+        </template>
+        <q-list class="menu-local-list">
+          <q-item v-for="child in (group.children || [])" :key="(child.id || '') + nodeUrl(child)" clickable :active="activeApp === nodeUrl(child)" active-class="menu-item-active" class="menu-item menu-item-local" @click="navigate(child, $event)">
+            <q-tooltip v-if="nodeUrl(child)" anchor="top right" self="top left" :offset="[8, 0]">{{ nodeUrl(child) }}</q-tooltip>
+            <q-item-section avatar><q-icon :name="child.icon || 'mdi-link-variant'" size="16px"></q-icon></q-item-section>
+            <q-item-section class="menu-copy"><span class="menu-item-label">{{ child.label }}</span><span v-if="child.note" class="menu-item-note">{{ child.note }}</span></q-item-section>
+            <q-item-section v-if="activeApp === nodeUrl(child)" side class="menu-copy"><span class="active-dot"></span></q-item-section>
+          </q-item>
+        </q-list>
+      </q-expansion-item>
+    </q-list>
+
+    <div class="menu-footer-actions">
+      <q-btn v-if="authenticated" flat dense stack no-caps icon="mdi-logout-variant" class="footer-action" :aria-label="i18n.logout" @click="logout"><span class="menu-copy footer-label">{{ i18n.logout }}</span></q-btn>
+      <q-btn v-if="authenticated" flat dense stack no-caps icon="mdi-translate" class="footer-action" :aria-label="i18n.language" @click="toggleLocale"><span class="menu-copy footer-label">{{ i18n.language }}</span></q-btn>
+    </div>
+  </aside>
+</div>
+

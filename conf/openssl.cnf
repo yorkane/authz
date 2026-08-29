@@ -1,0 +1,4 @@
+# 最小 openssl 配置 (供 entrypoint 生成自签证书)
+[req]
+distinguished_name = dn
+[dn]

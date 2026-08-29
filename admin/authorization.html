@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Admin</title>
+  <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
+  <link rel="stylesheet" href="./app-page.css?v=9">
+</head>
+<body>
+  <div id="q-app">
+    <main class="workspace-page">
+      <header class="page-heading">
+        <div><h1>{{ t.title }}</h1><p>{{ t.description }}</p></div>
+        <div v-if="isAdmin" class="heading-actions"><q-btn outline no-caps icon="mdi-lan-connect" :label="t.addBinding" class="secondary-button" @click="openCreateBinding"></q-btn><q-btn unelevated no-caps icon="mdi-shield-plus-outline" :label="t.addPolicy" class="primary-button" @click="openPolicyDialog"></q-btn></div>
+      </header>
+
+      <q-banner v-if="error" rounded class="error-banner q-mb-lg"><template v-slot:avatar><q-icon name="mdi-alert-circle-outline"></q-icon></template>{{ error }}<template v-slot:action><q-btn flat dense no-caps :label="t.retry" @click="load"></q-btn></template></q-banner>
+
+      <section class="stat-grid">
+        <q-card flat class="stat-card"><q-card-section><q-icon name="mdi-web" class="stat-icon purple"></q-icon><div class="stat-label">{{ t.bindings }}</div><div class="stat-value">{{ bindings.length }}</div><div class="stat-note">{{ t.bindingsNote }}</div></q-card-section></q-card>
+        <q-card flat class="stat-card"><q-card-section><q-icon name="mdi-shield-check-outline" class="stat-icon teal"></q-icon><div class="stat-label">{{ t.allowPolicies }}</div><div class="stat-value">{{ allowCount }}</div><div class="stat-note">{{ t.allowNote }}</div></q-card-section></q-card>
+        <q-card flat class="stat-card"><q-card-section><q-icon name="mdi-shield-off-outline" class="stat-icon red"></q-icon><div class="stat-label">{{ t.denyPolicies }}</div><div class="stat-value">{{ denyCount }}</div><div class="stat-note">{{ t.denyNote }}</div></q-card-section></q-card>
+      </section>
+
+      <q-card flat class="surface-card q-mt-lg">
+        <q-card-section class="surface-heading"><div><div class="surface-title">{{ t.routesTitle }}</div><div class="surface-subtitle">{{ t.routesCopy }} · {{ portMin }}–{{ portMax }}</div></div><q-badge outline color="blue-3" :label="`${bindings.length} ${t.routeCount}`"></q-badge></q-card-section>
+        <q-separator dark></q-separator>
+        <q-table flat dark :rows="bindings" :columns="bindingColumns" row-key="id" :loading="loading" :rows-per-page-options="[8, 16, 0]" class="linear-table">
+          <template v-slot:body-cell-domain="props"><q-td :props="props"><div class="route-cell"><q-icon name="mdi-earth" size="18px"></q-icon><strong>{{ props.row.domain }}</strong></div></q-td></template>
+          <template v-slot:body-cell-target_ip="props"><q-td :props="props"><code class="code-pill">{{ props.row.target_ip || '127.0.0.1' }}</code></q-td></template>
+          <template v-slot:body-cell-port="props"><q-td :props="props"><code class="code-pill">:{{ props.row.port }}</code></q-td></template>
+          <template v-slot:body-cell-proxy="props"><q-td :props="props"><q-chip dense :class="props.row.simulate_local === 1 ? 'effect-allow' : (hasCustomProxy(props.row) ? 'role-chip' : '')" :icon="props.row.simulate_local === 1 ? 'mdi-laptop' : (hasCustomProxy(props.row) ? 'mdi-tune-variant' : 'mdi-arrow-right')">{{ proxySummary(props.row) }}</q-chip><q-tooltip><div v-for="line in proxyDetails(props.row)" :key="line">{{ line }}</div></q-tooltip></q-td></template>
+          <template v-slot:body-cell-enabled="props"><q-td :props="props"><q-toggle :model-value="props.row.enabled === 1" color="teal-4" :disable="!isAdmin" @update:model-value="toggleBinding(props.row)"></q-toggle></q-td></template>
+          <template v-slot:body-cell-actions="props"><q-td :props="props"><q-btn v-if="isAdmin" flat round dense icon="mdi-pencil-outline" @click="openEditBinding(props.row)"><q-tooltip>{{ t.editBinding }}</q-tooltip></q-btn><q-btn v-if="isAdmin" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeBinding(props.row)"><q-tooltip>{{ t.deleteBinding }}</q-tooltip></q-btn></q-td></template>
+          <template v-slot:no-data><div class="full-width row flex-center q-pa-xl empty-state"><q-icon name="mdi-lan-disconnect" size="28px"></q-icon><span>{{ t.noBindings }}</span></div></template>
+        </q-table>
+      </q-card>
+
+      <q-card flat class="surface-card q-mt-lg">
+        <q-card-section class="surface-heading"><div><div class="surface-title">{{ t.policiesTitle }}</div><div class="surface-subtitle">{{ t.policiesCopy }}</div></div><q-input v-model="policyFilter" dense outlined dark debounce="250" :placeholder="t.search" class="search-input"><template v-slot:prepend><q-icon name="mdi-magnify"></q-icon></template></q-input></q-card-section>
+        <q-separator dark></q-separator>
+        <q-table flat dark :rows="policies" :columns="policyColumns" row-key="id" :filter="policyFilter" :loading="loading" :rows-per-page-options="[10, 20, 0]" class="linear-table">
+          <template v-slot:body-cell-ptype="props"><q-td :props="props"><q-badge :color="props.row.ptype === 'p' ? 'deep-purple-4' : 'blue-5'" :label="props.row.ptype.toUpperCase()"></q-badge></q-td></template>
+          <template v-slot:body-cell-v0="props"><q-td :props="props"><code class="code-pill">{{ props.row.subject_label }}</code><q-tooltip>{{ props.row.v0 }}</q-tooltip></q-td></template>
+          <template v-slot:body-cell-v1="props"><q-td :props="props">
+            <div v-if="props.row.ptype === 'p'" class="policy-object-cell">
+              <div class="policy-object-title"><q-icon :name="policyObjectIcon(props.row)" size="17px"></q-icon><strong>{{ policyObjectTitle(props.row) }}</strong><q-badge v-if="props.row.object_kind === 'shared'" outline color="amber-5" :label="`${policyBindings(props.row).length} ${t.sharedBindings}`"></q-badge><q-badge v-else-if="props.row.object_kind === 'unbound' || props.row.object_kind === 'invalid'" outline color="red-4" :label="props.row.object_kind === 'invalid' ? t.invalidObject : t.unboundObject"></q-badge></div>
+              <div v-if="policyPrimaryBinding(props.row)" class="policy-object-target"><span>{{ policyPrimaryBinding(props.row).domain }}</span><code>{{ policyPrimaryBinding(props.row).target_ip || '127.0.0.1' }}:{{ policyPrimaryBinding(props.row).port }}</code></div>
+              <div class="policy-object-path"><span>{{ t.objectPath }}</span><code>{{ props.row.object_path || props.row.v1 }}</code></div>
+              <q-tooltip v-if="policyBindings(props.row).length > 1"><div v-for="binding in policyBindings(props.row)" :key="binding.id">{{ binding.domain }} → {{ binding.target_ip || '127.0.0.1' }}:{{ binding.port }}</div></q-tooltip>
+            </div>
+            <q-chip v-else dense class="role-chip" icon="mdi-account-key-outline">{{ props.row.v1 }}</q-chip>
+          </q-td></template>
+          <template v-slot:body-cell-action="props"><q-td :props="props"><q-chip v-for="method in actionList(props.row.action)" :key="method" dense class="role-chip">{{ method }}</q-chip></q-td></template>
+          <template v-slot:body-cell-effect="props"><q-td :props="props"><q-chip dense :class="props.row.effect === 'deny' ? 'effect-deny' : 'effect-allow'" :icon="props.row.effect === 'deny' ? 'mdi-close-circle-outline' : 'mdi-check-circle-outline'">{{ props.row.ptype === 'g' ? t.assigned : (props.row.effect === 'deny' ? t.deny : t.allow) }}</q-chip></q-td></template>
+          <template v-slot:body-cell-actions="props"><q-td :props="props"><q-btn v-if="isAdmin && props.row.ptype === 'p'" flat round dense icon="mdi-pencil-outline" @click="openEditPolicy(props.row)"><q-tooltip>{{ t.editPolicy }}</q-tooltip></q-btn><q-btn v-if="isAdmin" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removePolicy(props.row)"><q-tooltip>{{ t.deletePolicy }}</q-tooltip></q-btn></q-td></template>
+        </q-table>
+      </q-card>
+
+      <q-dialog v-model="bindingOpen">
+        <q-card class="dialog-card binding-dialog-card">
+          <q-form @submit="saveBindingForm">
+            <q-card-section class="binding-dialog-heading"><div class="dialog-title">{{ bindingEditingId ? t.editBindingTitle : t.bindingTitle }}</div><div class="dialog-copy">{{ t.bindingCopy }}</div></q-card-section>
+            <q-separator dark></q-separator>
+            <q-card-section class="dialog-fields binding-dialog-fields">
+              <div class="binding-grid">
+                <q-input v-model="bindingForm.domain" dark dense outlined hide-bottom-space :label="t.domain" :placeholder="t.domainPlaceholder" :rules="[required]"></q-input>
+                <q-input v-model="bindingForm.menu_name" dark dense outlined hide-bottom-space maxlength="128" :label="t.menuName" :hint="t.menuNameHint"></q-input>
+                <q-input v-model.trim="bindingForm.target_ip" dark dense outlined hide-bottom-space maxlength="45" :label="t.targetIp" :placeholder="t.targetIpPlaceholder" :rules="[required]"></q-input>
+                <q-input v-model.number="bindingForm.port" dark dense outlined hide-bottom-space type="number" :label="t.port" :min="portMin" :max="portMax" :rules="[required]"></q-input>
+                <q-input v-model="bindingForm.note" dark dense outlined hide-bottom-space maxlength="256" :label="t.note" class="binding-grid-full"></q-input>
+              </div>
+
+              <div class="binding-status-row"><q-icon name="mdi-websocket" color="blue-3" size="18px"></q-icon><span>{{ t.websocketEnabled }}</span><span class="binding-status-copy">{{ t.websocketHint }}</span></div>
+
+              <q-expansion-item v-model="bindingAdvancedOpen" dense dense-toggle switch-toggle-side icon="mdi-tune-variant" :label="t.advancedProxy" :caption="t.advancedProxyHint" class="proxy-expansion">
+                <div class="proxy-grid">
+                  <q-select v-model="bindingForm.upstream_scheme" dark dense outlined emit-value map-options :options="upstreamSchemeOptions" :label="t.upstreamScheme"></q-select>
+                  <div class="proxy-toggle-field"><q-toggle v-model="bindingForm.upstream_ssl_verify" dense color="teal-4" :disable="bindingForm.upstream_scheme !== 'https'" :label="t.sslVerify"></q-toggle><div class="simulate-copy">{{ t.sslVerifyHint }}</div></div>
+                  <q-input v-model.trim="bindingForm.upstream_path" dark dense outlined hide-bottom-space :label="t.upstreamPath" :placeholder="t.upstreamPathPlaceholder" :hint="t.upstreamPathHint" class="binding-grid-full"></q-input>
+                  <q-input v-model.trim="bindingForm.upstream_host" dark dense outlined hide-bottom-space :label="t.upstreamHost" :placeholder="t.upstreamHostPlaceholder" :hint="t.upstreamHostHint"></q-input>
+                  <q-input v-model.trim="bindingForm.forwarded_host" dark dense outlined hide-bottom-space :label="t.forwardedHost" :placeholder="t.forwardedHostPlaceholder" :hint="t.forwardedHostHint"></q-input>
+                  <q-select v-model="bindingForm.forwarded_proto" dark dense outlined emit-value map-options :options="forwardedProtoOptions" :label="t.forwardedProto"></q-select>
+                  <q-input v-model.number="bindingForm.forwarded_port" dark dense outlined type="number" min="1" max="65535" :label="t.forwardedPort" :placeholder="t.autoValue"></q-input>
+                  <q-select v-model="bindingForm.origin_mode" dark dense outlined emit-value map-options :options="originModeOptions" :label="t.originMode"></q-select>
+                  <q-input v-if="bindingForm.origin_mode === 'custom'" v-model.trim="bindingForm.custom_origin" dark dense outlined hide-bottom-space :label="t.customOrigin" placeholder="https://app.example.com:99" :rules="[required]"></q-input>
+                </div>
+                <div class="simulate-row">
+                  <div><q-toggle v-model="bindingForm.simulate_local" dense color="teal-4" :label="t.simulateLocal"></q-toggle><div class="simulate-copy">{{ t.simulateLocalHint }}</div></div>
+                  <q-input v-if="bindingForm.simulate_local" v-model.trim="bindingForm.local_ip" dark dense outlined hide-bottom-space maxlength="45" :label="t.localIp" :hint="t.localIpHint" :rules="[required]"></q-input>
+                </div>
+              </q-expansion-item>
+
+              <q-toggle v-model="bindingForm.enabled" dense color="teal-4" :label="t.enabledNow"></q-toggle>
+            </q-card-section>
+            <q-separator dark></q-separator>
+            <q-card-actions align="right"><q-btn flat dense no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated dense no-caps type="submit" :label="bindingEditingId ? t.saveBinding : t.createBinding" class="primary-button" :loading="saving"></q-btn></q-card-actions>
+          </q-form>
+        </q-card>
+      </q-dialog>
+
+      <q-dialog v-model="policyOpen">
+        <q-card class="dialog-card">
+          <q-form @submit="savePolicyForm">
+            <q-card-section><div class="dialog-title">{{ policyEditingId ? t.editPolicyTitle : t.policyTitle }}</div><div class="dialog-copy">{{ t.policyCopy }}</div></q-card-section>
+            <q-card-section class="dialog-fields">
+              <q-select v-model="policyForm.v0" dark outlined emit-value map-options :options="policySubjectOptions" :label="t.subject" :hint="t.subjectHint" :rules="[required]"></q-select>
+              <div class="policy-object-grid">
+                <q-select v-model="policyForm.objectTarget" dark dense outlined options-dense emit-value map-options :options="policyObjectOptions" :label="t.objectAddress" :hint="t.objectHint" :rules="[policyObjectTargetRule]" :class="{ 'policy-object-grid-full': policyForm.objectTarget === 'global' }">
+                  <template v-slot:option="scope"><q-item v-bind="scope.itemProps"><q-item-section avatar><q-icon :name="scope.opt.icon"></q-icon></q-item-section><q-item-section><q-item-label>{{ scope.opt.label }}</q-item-label><q-item-label caption>{{ scope.opt.detail }}</q-item-label></q-item-section></q-item></template>
+                  <template v-slot:selected-item="scope"><div class="policy-target-selected">{{ scope.opt.label }}</div></template>
+                </q-select>
+                <q-input v-if="policyForm.objectTarget !== 'global'" v-model.trim="policyForm.objectPath" dark dense outlined :label="t.objectPath" :hint="`${t.objectPreview}: ${policyObjectValue}`" :rules="[policyObjectPathRule]"></q-input>
+              </div>
+              <q-select :model-value="policyForm.v2" dark outlined multiple use-chips emit-value map-options :options="httpActions" :label="t.httpAction" :hint="t.httpActionHint" :rules="[required]" @update:model-value="setPolicyMethods"></q-select>
+              <div class="policy-effect-field">
+                <div class="policy-effect-label">{{ t.effect }}</div>
+                <div class="policy-effect-options">
+                  <q-radio v-model="policyForm.eft" val="allow" :label="t.allow" color="teal-4"></q-radio>
+                  <q-radio v-model="policyForm.eft" val="deny" :label="t.deny" color="red-4"></q-radio>
+                </div>
+              </div>
+            </q-card-section>
+            <q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="policyEditingId ? t.savePolicy : t.createPolicy" class="primary-button" :loading="saving"></q-btn></q-card-actions>
+          </q-form>
+        </q-card>
+      </q-dialog>
+    </main>
+  </div>
+  <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./api.js?v=10"></script>
+  <script src="./i18n.js?v=21"></script>
+  <script>
+    const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
+    
+    const app = createApp({
+      setup () {
+      const bindings = ref([])
+      const policies = ref([])
+      const policyUsers = ref([])
+      const policyRoles = ref(['admin', 'staff', 'user', 'viewer', 'api'])
+      const policyMethods = ref(['*', 'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE'])
+      const locale = ref(window.adminI18n.getLocale())
+      const t = computed(() => window.adminI18n.messages[locale.value].authorization)
+      let unsubscribeLocale
+        const csrf = ref('')
+        const isAdmin = ref(false)
+        const loading = ref(false)
+        const saving = ref(false)
+        const error = ref('')
+        const policyFilter = ref('')
+        const bindingOpen = ref(false)
+        const bindingAdvancedOpen = ref(false)
+        const bindingEditingId = ref(null)
+        const policyOpen = ref(false)
+        const policyEditingId = ref(null)
+        const portMin = ref(2000)
+        const portMax = ref(20000)
+        const bindingDefaults = () => ({ domain: '', target_ip: '127.0.0.1', port: 3000, menu_name: '', note: '', enabled: true, upstream_scheme: 'http', upstream_ssl_verify: true, upstream_path: '', upstream_host: '', forwarded_host: '', forwarded_proto: '', forwarded_port: '', origin_mode: 'auto', custom_origin: '', simulate_local: false, local_ip: '127.0.0.1' })
+        const bindingForm = reactive(bindingDefaults())
+        const policyForm = reactive({ ptype: 'p', v0: 'role:user', objectTarget: 'global', objectPath: '/*', v2: ['*'], eft: 'allow' })
+      const policyUserOptions = computed(() => policyUsers.value.map(user => ({
+        label: `${user.username} · ${sourceLabel(user.source)}`,
+        value: user.identity
+      })))
+      const policyRoleOptions = computed(() => policyRoles.value.map(role => ({ label: role, value: `role:${role}` })))
+      const policySubjectOptions = computed(() => [
+        ...policyRoleOptions.value.map(option => ({ label: `${t.value.role} · ${option.label}`, value: option.value })),
+        ...policyUserOptions.value.map(option => ({ label: `${t.value.user} · ${option.label}`, value: option.value }))
+      ])
+      const policyObjectOptions = computed(() => {
+        const options = [{ label: t.value.allObjects, detail: t.value.allObjectsHint, value: 'global', icon: 'mdi-earth' }]
+        const boundPorts = new Set()
+        bindings.value.forEach(binding => {
+          const port = Number(binding.port)
+          boundPorts.add(port)
+          options.push({
+            label: binding.menu_name || binding.domain,
+            detail: `${binding.domain} · ${binding.target_ip || '127.0.0.1'}:${port}`,
+            value: `binding:${binding.id}`,
+            bindingId: Number(binding.id),
+            port,
+            icon: (binding.target_ip || '127.0.0.1') === '127.0.0.1' ? 'mdi-laptop' : 'mdi-server-network'
+          })
+        })
+        const seenPorts = new Set()
+        policies.value.filter(policy => policy.ptype === 'p').forEach(policy => {
+          const port = Number(policy.object_port || String(policy.v1 || '').match(/^\/(\d+)/)?.[1])
+          if (port && !boundPorts.has(port) && !seenPorts.has(port)) {
+            seenPorts.add(port)
+            options.push({ label: `${t.value.directPort} :${port}`, detail: t.value.unboundObject, value: `port:${port}`, port, icon: 'mdi-ethernet' })
+          }
+        })
+        return options
+      })
+      const selectedPolicyObject = computed(() => policyObjectOptions.value.find(option => option.value === policyForm.objectTarget))
+      const policyObjectValue = computed(() => {
+        if (policyForm.objectTarget === 'global') return '/*'
+        const port = selectedPolicyObject.value?.port || Number(String(policyForm.objectTarget || '').match(/^port:(\d+)$/)?.[1])
+        const path = String(policyForm.objectPath || '/*').replace(/\s/g, '')
+        return port ? `/${port}${path}` : path
+      })
+      const httpActions = computed(() => policyMethods.value
+        .map(value => ({ label: value === '*' ? t.value.allActions : value, value })))
+      const forwardedProtoOptions = computed(() => [
+        { label: t.value.autoValue, value: '' },
+        { label: 'HTTP', value: 'http' },
+        { label: 'HTTPS', value: 'https' }
+      ])
+      const originModeOptions = computed(() => [
+        { label: t.value.originAuto, value: 'auto' },
+        { label: t.value.originPreserve, value: 'preserve' },
+        { label: t.value.originRewrite, value: 'rewrite' },
+        { label: t.value.originRemove, value: 'remove' },
+        { label: t.value.originCustom, value: 'custom' }
+      ])
+      const upstreamSchemeOptions = computed(() => [
+        { label: 'HTTP', value: 'http' },
+        { label: 'HTTPS', value: 'https' }
+      ])
+
+      function actionList (value) {
+        return String(value || '-').split(',').filter(Boolean)
+      }
+
+      function sourceLabel (source) {
+        if (!source) return ''
+        return source === 'local' ? t.value.local : source === 'nocobase' ? 'NocoBase' : source === 'google' ? 'Google' : source === 'dingtalk' ? t.value.dingtalk : source === 'wechat' ? t.value.wechat : source
+      }
+
+      function hasCustomProxy (binding) {
+        return Boolean(binding.upstream_scheme === 'https' || Number(binding.upstream_ssl_verify) === 0 || binding.upstream_path || binding.upstream_host || binding.forwarded_host || binding.forwarded_proto || Number(binding.forwarded_port) || (binding.origin_mode && binding.origin_mode !== 'auto') || binding.custom_origin)
+      }
+
+      function proxySummary (binding) {
+        if (binding.simulate_local === 1) return t.value.proxyLocal
+        return hasCustomProxy(binding) ? t.value.proxyCustom : t.value.proxyDefault
+      }
+
+      function proxyDetails (binding) {
+        const automatic = t.value.autoValue
+        const ssl = binding.upstream_scheme === 'https'
+          ? (Number(binding.upstream_ssl_verify) === 0 ? t.value.sslIgnored : t.value.sslVerified)
+          : t.value.notApplicable
+        return [
+          `${t.value.upstreamScheme}: ${(binding.upstream_scheme || 'http').toUpperCase()}`,
+          `${t.value.sslVerification}: ${ssl}`,
+          `${t.value.upstreamPath}: ${binding.upstream_path || automatic}`,
+          `Host: ${binding.upstream_host || automatic}`,
+          `X-Forwarded-Host: ${binding.forwarded_host || automatic}`,
+          `X-Forwarded-Proto / Port: ${binding.forwarded_proto || automatic} / ${Number(binding.forwarded_port) || automatic}`,
+          `Origin: ${binding.origin_mode || 'auto'}`,
+          binding.simulate_local === 1 ? `${t.value.localIp}: ${binding.local_ip || '127.0.0.1'}` : ''
+        ].filter(Boolean)
+      }
+
+      function setPolicyMethods (values) {
+        const nextValues = Array.isArray(values) ? values : []
+        if (nextValues.includes('*') && nextValues.length > 1) {
+          policyForm.v2 = policyForm.v2.includes('*') ? nextValues.filter(value => value !== '*') : ['*']
+          return
+        }
+        policyForm.v2 = nextValues
+      }
+
+      function policyObjectTargetRule (value) {
+        return value === 'global' || /^binding:\d+$/.test(String(value || '')) || /^port:\d+$/.test(String(value || '')) || t.value.objectAddressRule
+      }
+
+      function policyObjectPathRule (value) {
+        return /^\/[^\s,]*$/.test(String(value || '')) || t.value.objectPathRule
+      }
+
+      function policyBindings (policy) {
+        return Array.isArray(policy.binding_matches) ? policy.binding_matches : []
+      }
+
+      function policyPrimaryBinding (policy) {
+        return policyBindings(policy)[0] || null
+      }
+
+      function policyObjectTitle (policy) {
+        if (policy.object_kind === 'global') return t.value.allObjects
+        const binding = policyPrimaryBinding(policy)
+        if (binding) return binding.menu_name || binding.domain
+        return policy.object_port ? `${t.value.directPort} :${policy.object_port}` : t.value.invalidObject
+      }
+
+      function policyObjectIcon (policy) {
+        const binding = policyPrimaryBinding(policy)
+        if (!binding) return policy.object_kind === 'global' ? 'mdi-earth' : 'mdi-alert-circle-outline'
+        return (binding.target_ip || '127.0.0.1') === '127.0.0.1' ? 'mdi-laptop' : 'mdi-server-network'
+      }
+      const bindingColumns = computed(() => [
+        { name: 'domain', label: t.value.domain, field: 'domain', align: 'left', sortable: true },
+        { name: 'target_ip', label: t.value.targetIp, field: 'target_ip', align: 'left', sortable: true },
+        { name: 'port', label: t.value.port, field: 'port', align: 'left', sortable: true },
+        { name: 'proxy', label: t.value.proxyMode, field: 'simulate_local', align: 'left' },
+        { name: 'enabled', label: t.value.status, field: 'enabled', align: 'left', sortable: true },
+        { name: 'note', label: t.value.note, field: 'note', align: 'left' },
+        { name: 'actions', label: '', field: 'actions', align: 'right' }
+      ])
+      const policyColumns = computed(() => [
+        { name: 'ptype', label: t.value.type, field: 'ptype', align: 'left', sortable: true },
+        { name: 'v0', label: t.value.subject, field: 'subject_label', align: 'left', sortable: true },
+        { name: 'v1', label: t.value.objectRole, field: 'v1', align: 'left', sortable: true },
+        { name: 'action', label: t.value.action, field: 'action', align: 'left' },
+        { name: 'effect', label: t.value.effect, field: 'effect', align: 'left', sortable: true },
+        { name: 'actions', label: '', field: 'actions', align: 'right' }
+      ])
+    
+        const allowCount = computed(() => policies.value.filter(policy => policy.effect !== 'deny').length)
+        const denyCount = computed(() => policies.value.filter(policy => policy.effect === 'deny').length)
+    
+      function required (value) {
+        if (Array.isArray(value)) return value.length > 0 || t.value.required
+        return value !== '' && value !== null && value !== undefined || t.value.required
+        }
+    
+        function notify (message, type = 'positive') {
+          Quasar.Notify.create({ message, type, position: 'top-right', timeout: 2200 })
+        }
+    
+        async function load () {
+          loading.value = true
+          error.value = ''
+          try {
+            const data = await window.adminApi.authorization()
+            bindings.value = data.bindings || []
+            policies.value = data.policies || []
+            policyUsers.value = data.policy_users || []
+            policyRoles.value = data.policy_roles || ['admin', 'staff', 'user', 'viewer', 'api']
+            policyMethods.value = data.http_methods || ['*', 'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE']
+            csrf.value = data.csrf || ''
+            isAdmin.value = Boolean(data.admin)
+            portMin.value = data.port_min || 2000
+            portMax.value = data.port_max || 20000
+          } catch (loadError) {
+            error.value = loadError.message
+          } finally {
+            loading.value = false
+          }
+        }
+    
+        async function mutate (action, successMessage) {
+          saving.value = true
+          try {
+            await action()
+            notify(successMessage)
+            await load()
+            return true
+          } catch (mutationError) {
+            notify(mutationError.message, 'negative')
+            return false
+          } finally {
+            saving.value = false
+          }
+        }
+    
+        function openCreateBinding () {
+          bindingEditingId.value = null
+          Object.assign(bindingForm, bindingDefaults())
+          bindingAdvancedOpen.value = false
+          bindingOpen.value = true
+        }
+
+        function openEditBinding (binding) {
+          bindingEditingId.value = binding.id
+          Object.assign(bindingForm, bindingDefaults(), { domain: binding.domain, target_ip: binding.target_ip || '127.0.0.1', port: binding.port, menu_name: binding.menu_name || '', note: binding.note || '', enabled: binding.enabled === 1, upstream_scheme: binding.upstream_scheme || 'http', upstream_ssl_verify: binding.upstream_ssl_verify !== 0, upstream_path: binding.upstream_path || '', upstream_host: binding.upstream_host || '', forwarded_host: binding.forwarded_host || '', forwarded_proto: binding.forwarded_proto || '', forwarded_port: Number(binding.forwarded_port) || '', origin_mode: binding.origin_mode || 'auto', custom_origin: binding.custom_origin || '', simulate_local: binding.simulate_local === 1, local_ip: binding.local_ip || '127.0.0.1' })
+          bindingAdvancedOpen.value = binding.simulate_local === 1 || hasCustomProxy(binding)
+          bindingOpen.value = true
+        }
+
+        async function saveBindingForm () {
+        const action = bindingEditingId.value ? 'edit' : 'create'
+        const values = { _csrf: csrf.value, action, ...bindingForm }
+        if (bindingEditingId.value) values.id = bindingEditingId.value
+        const ok = await mutate(() => window.adminApi.saveBinding(values), action === 'edit' ? t.value.bindingUpdated : t.value.bindingCreated)
+          if (ok) {
+            bindingOpen.value = false
+            bindingEditingId.value = null
+            Object.assign(bindingForm, bindingDefaults())
+          }
+        }
+    
+        function toggleBinding (binding) {
+        mutate(() => window.adminApi.saveBinding({ _csrf: csrf.value, action: 'toggle', id: binding.id, enabled: binding.enabled !== 1 }), binding.enabled === 1 ? t.value.bindingDisabled : t.value.bindingEnabled)
+        }
+
+        function removeBinding (binding) {
+        Quasar.Dialog.create({ title: t.value.deleteBindingTitle, message: `${binding.domain} → ${binding.target_ip || '127.0.0.1'}:${binding.port} · ${t.value.deleteBindingConfirm}`, cancel: true, persistent: true, ok: { label: t.value.deleteAction, color: 'negative', flat: true } })
+          .onOk(() => mutate(() => window.adminApi.saveBinding({ _csrf: csrf.value, action: 'delete', id: binding.id }), t.value.bindingDeleted))
+        }
+    
+        async function savePolicyForm () {
+          const { objectTarget, objectPath, ...fields } = policyForm
+          const selected = selectedPolicyObject.value
+          const action = policyEditingId.value ? 'edit' : 'add'
+          const values = { _csrf: csrf.value, action, ...fields, v1: policyObjectValue.value }
+          if (policyEditingId.value) values.id = policyEditingId.value
+          if (selected?.bindingId) values.binding_id = selected.bindingId
+        const ok = await mutate(() => window.adminApi.savePolicy(values), action === 'edit' ? t.value.policyUpdated : t.value.policyCreated)
+          if (ok) {
+            policyOpen.value = false
+            policyEditingId.value = null
+            resetPolicyFields()
+          }
+        }
+
+        function resetPolicyFields () {
+          policyForm.ptype = 'p'
+          policyForm.v2 = ['*']
+          policyForm.eft = 'allow'
+          policyForm.v0 = policyRoleOptions.value.find(option => option.value === 'role:user')?.value || policyRoleOptions.value[0]?.value || policyUserOptions.value[0]?.value || ''
+          policyForm.objectTarget = 'global'
+          policyForm.objectPath = '/*'
+        }
+
+        function openPolicyDialog () {
+          policyEditingId.value = null
+          resetPolicyFields()
+          policyOpen.value = true
+        }
+
+        function openEditPolicy (policy) {
+          if (policy.ptype !== 'p') return
+          policyEditingId.value = policy.id
+          resetPolicyFields()
+          policyForm.v0 = policy.v0
+          const binding = policyPrimaryBinding(policy)
+          policyForm.objectTarget = policy.object_kind === 'global'
+            ? 'global'
+            : binding ? `binding:${binding.id}` : policy.object_port ? `port:${policy.object_port}` : 'global'
+          policyForm.objectPath = policy.object_path || '/*'
+          policyForm.v2 = actionList(policy.action)
+          policyForm.eft = policy.effect || 'allow'
+          policyOpen.value = true
+        }
+    
+        function removePolicy (policy) {
+        Quasar.Dialog.create({ title: t.value.deletePolicyTitle, message: `${policy.v0} → ${policy.v1} · ${t.value.deletePolicyConfirm}`, cancel: true, persistent: true, ok: { label: t.value.deleteAction, color: 'negative', flat: true } })
+          .onOk(() => mutate(() => window.adminApi.savePolicy({ _csrf: csrf.value, action: 'del', id: policy.id }), t.value.policyDeleted))
+        }
+    
+      function applyLocale (nextLocale) {
+        locale.value = nextLocale
+        document.documentElement.lang = nextLocale
+        document.title = t.value.title
+        Quasar.Lang.set(nextLocale === 'zh-CN' ? Quasar.Lang.zhCN : Quasar.Lang.enUS)
+      }
+
+      onMounted(() => {
+        applyLocale(locale.value)
+        unsubscribeLocale = window.adminI18n.subscribe(applyLocale)
+        load()
+      })
+
+      onBeforeUnmount(() => unsubscribeLocale?.())
+    
+      return { actionList, allowCount, bindingAdvancedOpen, bindingColumns, bindingEditingId, bindingForm, bindingOpen, bindings, denyCount, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, required, resetPolicyFields, saveBindingForm, savePolicyForm, saving, selectedPolicyObject, setPolicyMethods, sourceLabel, t, toggleBinding, upstreamSchemeOptions }
+      }
+    })
+    
+    app.use(Quasar, { config: { dark: true } })
+    Quasar.Dark.set(true)
+    Quasar.Lang.set(window.adminI18n.getLocale() === 'en-US' ? Quasar.Lang.enUS : Quasar.Lang.zhCN)
+    Quasar.IconSet.set(Quasar.IconSet.mdiV7)
+    app.mount('#q-app')
+  </script>
+</body>
+</html>

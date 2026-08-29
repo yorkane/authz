@@ -1,0 +1,119 @@
+{
+  "format": 3,
+  "source": "https://registry.npmjs.org",
+  "font_source": "https://fonts.googleapis.com/css?family=Roboto:100,300,400,500,700,900",
+  "packages": {
+    "vue": {
+      "version": "3.5.41",
+      "tarball": "https://registry.npmjs.org/vue/-/vue-3.5.41.tgz"
+    },
+    "quasar": {
+      "version": "2.26.0",
+      "tarball": "https://registry.npmjs.org/quasar/-/quasar-2.26.0.tgz"
+    },
+    "@mdi/font": {
+      "version": "7.4.47",
+      "tarball": "https://registry.npmjs.org/@mdi/font/-/font-7.4.47.tgz"
+    }
+  },
+  "bundles": {
+    "js": [
+      "vue",
+      "quasar",
+      "lang/zh-CN",
+      "lang/en-US",
+      "mdi-v7"
+    ],
+    "css": [
+      "Roboto",
+      "MDI",
+      "Quasar"
+    ]
+  },
+  "assets": [
+    {
+      "path": "quasar-umd.js",
+      "source_path": "Vue + Quasar + lang + mdi-v7",
+      "package": "bundled",
+      "sha256": "ad3db239a6ab630f4476cc6503c4b11791ae72f2ecbb24003c1e80a8c3c91db8",
+      "bytes": 722231
+    },
+    {
+      "path": "quasar-umd.css",
+      "source_path": "Roboto + MDI + Quasar",
+      "package": "bundled",
+      "sha256": "9aeb73b4d55ac7d6d52c47181fffc226acc30d70332bfbe1b71f3118ab63c719",
+      "bytes": 548167
+    },
+    {
+      "path": "fonts/mdi/materialdesignicons-webfont.eot",
+      "source_path": "package/fonts/materialdesignicons-webfont.eot",
+      "package": "bundled",
+      "sha256": "0b183104d2fc5f26196e773c77bdaf2e05509fd4259d2d15ecedca79b87e84f9",
+      "bytes": 1307880
+    },
+    {
+      "path": "fonts/mdi/materialdesignicons-webfont.ttf",
+      "source_path": "package/fonts/materialdesignicons-webfont.ttf",
+      "package": "bundled",
+      "sha256": "61e8aba5a4e981fe22cf7c8e8bcdbea00476e75c62c37f01bf7ee33361d68428",
+      "bytes": 1307660
+    },
+    {
+      "path": "fonts/mdi/materialdesignicons-webfont.woff",
+      "source_path": "package/fonts/materialdesignicons-webfont.woff",
+      "package": "bundled",
+      "sha256": "a5928a0d5c2f624e46f98d9b15c2f60045377f7c594dd78a1759132ea3b463eb",
+      "bytes": 587984
+    },
+    {
+      "path": "fonts/mdi/materialdesignicons-webfont.woff2",
+      "source_path": "package/fonts/materialdesignicons-webfont.woff2",
+      "package": "bundled",
+      "sha256": "662fefa8f2f8a95c18588d21774789c107c64e771cbe65a69af46291c4311afc",
+      "bytes": 403216
+    },
+    {
+      "path": "fonts/roboto/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWubEbFmUiA8.ttf",
+      "source_path": "https://fonts.gstatic.com/s/roboto/v51/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWubEbFmUiA8.ttf",
+      "package": "bundled",
+      "sha256": "a343fa57d59c88663c5256516ca0124af69d1958d2448a7748554e2f02480690",
+      "bytes": 44744
+    },
+    {
+      "path": "fonts/roboto/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWuaabVmUiA8.ttf",
+      "source_path": "https://fonts.gstatic.com/s/roboto/v51/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWuaabVmUiA8.ttf",
+      "package": "bundled",
+      "sha256": "be5ffcf033d7e69b219d38a9bbf0e35bd6e8fdb7a5b9fc3c3c6ec4224672c017",
+      "bytes": 44792
+    },
+    {
+      "path": "fonts/roboto/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWubEbVmUiA8.ttf",
+      "source_path": "https://fonts.gstatic.com/s/roboto/v51/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWubEbVmUiA8.ttf",
+      "package": "bundled",
+      "sha256": "e9ff3730797df6aaf76d37c48234a6c4875032eaad8f1aaccd7daefa6dca9e7a",
+      "bytes": 44724
+    },
+    {
+      "path": "fonts/roboto/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWub2bVmUiA8.ttf",
+      "source_path": "https://fonts.gstatic.com/s/roboto/v51/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWub2bVmUiA8.ttf",
+      "package": "bundled",
+      "sha256": "2cf4c1c3ffaeee44c1a1027d579edbd15ca137747eadbe90de953c6155477bae",
+      "bytes": 44796
+    },
+    {
+      "path": "fonts/roboto/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWuYjalmUiA8.ttf",
+      "source_path": "https://fonts.gstatic.com/s/roboto/v51/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWuYjalmUiA8.ttf",
+      "package": "bundled",
+      "sha256": "bbf3e2a2cb10a5a59284f96f97f4083c176798fe709633db019da376b10936e9",
+      "bytes": 44864
+    },
+    {
+      "path": "fonts/roboto/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWuZtalmUiA8.ttf",
+      "source_path": "https://fonts.gstatic.com/s/roboto/v51/KFOMCnqEu92Fr1ME7kSn66aGLdTylUAMQXC89YmC2DPNWuZtalmUiA8.ttf",
+      "package": "bundled",
+      "sha256": "a4ac947bc7f50939c8b468da550ca9c36c65756e2a6e4a6ab2a5b6422cec4b8b",
+      "bytes": 44948
+    }
+  ]
+}
