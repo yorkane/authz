@@ -134,6 +134,11 @@ location / {
     proxy_send_timeout 3600s;
 }
 
+# 用户自定义附加配置（外置可编辑：conf/server_inc.conf，
+# 由入口脚本在文件缺失时自动生成默认内容；位于本 server 配置最末尾，
+# 可同时追加 location / 覆盖网关行为，修改后重建或重启容器生效）
+include server_inc.conf;
+
 # HTTPS bindings that explicitly disable certificate verification are routed
 # here by resty.authz after authentication and Casbin authorization.  Keep
 # this named location private so it cannot bypass the gateway access phase.

@@ -100,4 +100,12 @@ http {
         add_header Strict-Transport-Security "max-age=31536000" always;
         include server.conf;
     }
+
+    # 用户自定义 http 层附加配置（外置可编辑，见 conf/http_inc.conf）
+    include http_inc.conf;
+}
+
+# 用户自定义 stream 层附加配置（外置可编辑，见 conf/stream_inc.conf）
+stream {
+    include stream_inc.conf;
 }

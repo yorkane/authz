@@ -422,6 +422,9 @@ RUN apk add --no-cache --virtual .brotli-tools brotli \
 COPY conf/nginx.conf.template /usr/local/openresty/nginx/conf/nginx.conf.template
 COPY conf/server.conf.template /usr/local/openresty/nginx/conf/server.conf.template
 COPY conf/openssl.cnf /usr/local/openresty/nginx/conf/openssl.cnf
+COPY conf/http_inc.conf /usr/local/openresty/nginx/conf/http_inc.conf
+COPY conf/server_inc.conf /usr/local/openresty/nginx/conf/server_inc.conf
+COPY conf/stream_inc.conf /usr/local/openresty/nginx/conf/stream_inc.conf
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
