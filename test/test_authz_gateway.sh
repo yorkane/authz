@@ -5,6 +5,7 @@ REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 IMAGE=${OPENRESTY_TEST_IMAGE:-ghcr.io/yorkane/authz:latest}
 CONTAINER_NAME="authz-gateway-test-$$"
 REDIRECT_CONTAINER_NAME=""
+ORIGIN_CONTAINER_NAME=""
 TMP_DIR=$(mktemp -d)
 PASS=0
 MOCK_PID=""
@@ -52,6 +53,10 @@ cleanup() {
     if [[ -n "$REDIRECT_CONTAINER_NAME" ]]; then
         docker exec "$REDIRECT_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
         docker rm -f "$REDIRECT_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$ORIGIN_CONTAINER_NAME" ]]; then
+        docker exec "$ORIGIN_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+        docker rm -f "$ORIGIN_CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
     if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" >/dev/null 2>&1 || true; fi
     if [[ -n "$REMOTE_PID" ]]; then kill "$REMOTE_PID" >/dev/null 2>&1 || true; fi
@@ -1736,5 +1741,58 @@ assert_eq "public HTTP defaults to permanent HTTPS redirect" "$STATUS" "308"
 REDIRECT_LOCATION=$(awk 'BEGIN { IGNORECASE=1 } /^Location:/ { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$TMP_DIR/redirect-headers")
 assert_eq "HTTPS redirect preserves host port path and query" "$REDIRECT_LOCATION" \
     "https://redirect.test.example:$REDIRECT_HTTPS_PORT/_authz/login?next=%2Fdemo"
+
+# ── Cookie 域选择：Origin 与 Host 不一致时以 Origin 匹配的父域为准 ──
+ORIGIN_CONTAINER_NAME="authz-gateway-origin-test-$$"
+ORIGIN_HTTP_PORT=$(free_port)
+ORIGIN_HTTPS_PORT=$(free_port)
+mkdir -p "$TMP_DIR/origin-data/authz"
+docker run -d \
+    --name "$ORIGIN_CONTAINER_NAME" \
+    --network host \
+    -e NGINX_WORKER_PROCESSES=1 \
+    -e AUTHZ_HTTP_PORT="$ORIGIN_HTTP_PORT" \
+    -e AUTHZ_HTTPS_PORT="$ORIGIN_HTTPS_PORT" \
+    -e AUTHZ_HTTP_MODE=serve \
+    -e AUTHZ_ADMIN_PASSWORD=admin123 \
+    -e AUTHZ_COOKIE_DOMAIN=".one.example.com,.two.example.net" \
+    -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
+    -v "$TMP_DIR/origin-data:/data" \
+    -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
+    -v "$REPO_DIR/lualib:/usr/local/openresty/site/lualib:ro" \
+    "$IMAGE" >/dev/null
+for _ in $(seq 1 60); do
+    STATUS=$(curl -sS --max-time 2 --resolve "a.one.example.com:$ORIGIN_HTTP_PORT:127.0.0.1" \
+        -o /dev/null -w '%{http_code}' \
+        "http://a.one.example.com:$ORIGIN_HTTP_PORT/_authz/login" 2>/dev/null || true)
+    [[ "$STATUS" == "200" ]] && break
+    sleep 0.2
+done
+[[ "$STATUS" == "200" ]] || fail "origin-select gateway did not become ready"
+
+origin_login_cookie_domain() {
+    local host="$1" origin_header="$2"
+    local extra_args=()
+    if [[ -n "$origin_header" ]]; then
+        extra_args=(-H "origin: $origin_header")
+    fi
+    curl -sS --max-time 5 --resolve "$host:$ORIGIN_HTTP_PORT:127.0.0.1" \
+        -D "$TMP_DIR/origin-headers" -o /dev/null \
+        "${extra_args[@]}" \
+        -X POST "http://$host:$ORIGIN_HTTP_PORT/_authz/login" \
+        --data-urlencode 'username=admin' --data-urlencode 'password=admin123' >/dev/null
+    awk 'BEGIN { IGNORECASE=1 } /^Set-Cookie:/ && /Max-Age=[1-9]/ { match($0, /Domain=[^;]+/); print substr($0, RSTART+8, RLENGTH-8); exit }' "$TMP_DIR/origin-headers"
+}
+
+assert_eq "login without origin uses host domain" \
+    "$(origin_login_cookie_domain a.one.example.com)" ".one.example.com"
+assert_eq "mismatched origin in configured list wins" \
+    "$(origin_login_cookie_domain a.one.example.com https://b.two.example.net:99)" ".two.example.net"
+assert_eq "matching origin keeps host domain" \
+    "$(origin_login_cookie_domain a.one.example.com https://a.one.example.com)" ".one.example.com"
+assert_eq "unknown origin falls back to host domain" \
+    "$(origin_login_cookie_domain a.one.example.com https://other.example.org)" ".one.example.com"
 
 printf '\nAll %d authz gateway checks passed.\n' "$PASS"

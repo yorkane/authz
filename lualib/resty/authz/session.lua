@@ -270,6 +270,22 @@ local function current_cookie_domain()
     if host == "" or host:match("^%d+%.%d+%.%d+%.%d+$") or host:find(":", 1, true) then
         return ""
     end
+    -- Origin 优先: 当反向代理改写了 Host、请求 Origin 与实际 Host 不一致时,
+    -- 浏览器的真实地址以 Origin 为准; 若 Origin 主机命中已配置的父域,
+    -- 则以该配置域下发 Cookie (例如 Origin 为 *.ws.gatepro.cn,
+    -- 而 Host 被边缘改写成 *.ai-t.wtvdev.com)。
+    local origin_value = tostring(ngx.var.http_origin or ""):match("^%s*([^,]+)")
+    local origin_host = host_from_url(origin_value)
+    if origin_host ~= "" and origin_host ~= host:gsub(":%d+$", "") then
+        local origin_selected, origin_labels = "", 0
+        for _, configured in ipairs(_M.cookie_domains or {}) do
+            local labels = label_count(configured)
+            if domain_matches_host(configured, origin_host) and labels > origin_labels then
+                origin_selected, origin_labels = configured, labels
+            end
+        end
+        if origin_selected ~= "" then return origin_selected end
+    end
     local derived = domain_from_host(host)
     local selected, selected_labels = "", 0
     for _, configured in ipairs(_M.cookie_domains or {}) do
