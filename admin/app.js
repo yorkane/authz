@@ -4,7 +4,7 @@ const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref, watch } 
 const builtInApps = {
   users: 'users.html?v=7',
   authorization: 'authorization.html?v=15',
-  menuEditor: 'menu-editor.html?v=10',
+  menuEditor: 'menu-editor.html?v=11',
   files: 'files.html?v=4',
   nginxConf: 'nginx_conf.html?v=2'
 }
@@ -72,8 +72,8 @@ const app = createApp({
       activeTitle.value = node.label || ''
     }
 
-    function toggleGroup (group) {
-      groupOpen[group.id] = !groupOpen[group.id]
+    function toggleGroup (groupId) {
+      groupOpen[groupId] = !groupOpen[groupId]
     }
 
     function toggleDrawer () {
@@ -94,8 +94,9 @@ const app = createApp({
         groups.value = tree.groups || []
         for (const group of groups.value) {
           if (!(group.id in groupOpen)) {
-            // 默认展开：包含内置页面的分组（含当前页）默认展开。
-            groupOpen[group.id] = group.builtin !== 'local'
+            // 默认：系统应用与域名服务展开，本地服务（条目多、噪音大）收起；
+            // 当前页面所在分组始终展开。
+            groupOpen[group.id] = group.builtin !== 'local' || group.id === activeGroupId.value
           }
         }
       } catch (error) {
@@ -146,8 +147,11 @@ const app = createApp({
     watch(drawerMini, mini => {
       const current = activeGroupId.value
       if (mini) {
-        // 收起为窄栏：只展开包含当前页面的分组，保留当前菜单图标。
-        for (const group of groups.value) groupOpen[group.id] = group.id === current
+        // 收起为窄栏：系统应用与域名服务默认展开（图标直接可见），
+        // 本地服务收起（条目多、噪音大）；当前页面所在分组始终展开。
+        for (const group of groups.value) {
+          groupOpen[group.id] = group.builtin !== 'local' || group.id === current
+        }
       } else {
         // 展开为完整侧栏：恢复分组，当前所在分组保持展开。
         for (const group of groups.value) {

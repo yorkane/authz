@@ -297,6 +297,23 @@ _M.list = {
                 sys_id, now, now))
         end,
     },
+    {
+        version = 13,
+        name = "menu_group_domain_services",
+        up = function(db)
+            -- 左侧菜单三分组：系统应用 / 域名服务(builtin='domains') / 本地服务。
+            -- 域名服务分组在读取时注入已绑定域名的应用；原“本机应用”
+            -- (builtin='local') 更名为“本地服务”，只保留端口自动发现条目。
+            local rows = db.query("SELECT id FROM menu_entries WHERE builtin = 'domains'")
+            if rows and rows[1] then return end
+            local now = os.time()
+            must(db.exec([[INSERT INTO menu_entries(
+                kind, parent_id, label, url, icon, builtin, admin_only, sort_order, enabled, created_at, updated_at)
+                VALUES('group', NULL, '域名服务', '', 'mdi-web-box', 'domains', 0, 50, 1, ?, ?)]], now, now))
+            must(db.exec([[UPDATE menu_entries SET label = '本地服务', sort_order = 60
+                WHERE builtin = 'local' AND kind = 'group']]))
+        end,
+    },
 }
 
 function _M.run(db)

@@ -451,7 +451,7 @@ assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services"
 
 cookie_header() {
     awk '
@@ -1599,13 +1599,14 @@ assert_json "unknown API error" '.error.code' "http_404"
 # ── 菜单树管理 /_authz/api/menu-tree + /menu-entries ────────────
 request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
 assert_eq "menu tree loads" "$STATUS" "200"
-assert_json "menu tree seeds two groups" '.data.groups | length' "2"
+assert_json "menu tree seeds three groups" '.data.groups | length' "3"
 assert_json "first seeded group is system apps" '.data.groups[0].label' "系统应用"
 assert_json "system group carries five built-in pages" '.data.groups[0].children | length' "5"
 assert_json "file browser built-in is seeded" '[.data.groups[0].children[] | select(.builtin == "files")] | length' "1"
 assert_json "built-in item maps to internal page" '.data.groups[0].children[0].builtin' "users"
-assert_json "second seeded group is local apps" '.data.groups[1].builtin' "local"
-assert_json "local group collects discovered services" '.data.groups[1].children | length > 0 | tostring' "true"
+assert_json "second seeded group is domain services" '.data.groups[1].builtin' "domains"
+assert_json "third seeded group is local services" '.data.groups[2].builtin' "local"
+assert_json "discovered services land in domain or local groups" '(.data.groups[1].children | length) + (.data.groups[2].children | length) > 0 | tostring' "true"
 
 request GET "$ADMIN_HOST" /_authz/api/menu-entries "$ADMIN_COOKIE"
 assert_eq "menu entries list" "$STATUS" "200"

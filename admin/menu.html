@@ -7,22 +7,31 @@
     </div>
 
     <q-list class="menu-list">
-      <q-expansion-item v-for="group in groups" :key="group.id" v-model="groupOpen[group.id]" hide-expand-icon class="menu-expansion menu-group" dense>
-        <template #header>
-          <q-tooltip v-if="group.children && group.children.length" anchor="top right" self="top left" :offset="[8, 0]">{{ group.label }}</q-tooltip>
-          <q-item-section avatar><q-icon :name="group.icon || 'mdi-folder'" size="18px"></q-icon></q-item-section>
-          <q-item-section class="menu-copy"><span class="menu-item-label">{{ group.label }}</span><span class="menu-item-note">{{ group.children ? group.children.length : 0 }}</span></q-item-section>
-          <q-item-section side class="menu-copy"><q-icon name="mdi-chevron-down" :class="{ 'menu-expansion-rotated': groupOpen[group.id] }" size="16px"></q-icon></q-item-section>
-        </template>
-        <q-list class="menu-local-list">
-          <q-item v-for="child in (group.children || [])" :key="(child.id || '') + nodeUrl(child)" clickable :active="activeApp === nodeUrl(child)" active-class="menu-item-active" class="menu-item menu-item-local" @click="navigate(child, $event)">
-            <q-tooltip v-if="nodeUrl(child)" anchor="top right" self="top left" :offset="[8, 0]">{{ nodeUrl(child) }}</q-tooltip>
-            <q-item-section avatar><q-icon :name="child.icon || 'mdi-link-variant'" size="16px"></q-icon></q-item-section>
-            <q-item-section class="menu-copy"><span class="menu-item-label">{{ child.label }}</span><span v-if="child.note" class="menu-item-note">{{ child.note }}</span></q-item-section>
-            <q-item-section v-if="activeApp === nodeUrl(child)" side class="menu-copy"><span class="active-dot"></span></q-item-section>
-          </q-item>
-        </q-list>
-      </q-expansion-item>
+      <section v-for="group in groups" :key="group.id" class="menu-group-section">
+        <div class="menu-group-header" role="button" tabindex="0" :aria-expanded="groupOpen[group.id] ? 'true' : 'false'"
+             @click="toggleGroup(group.id)" @keydown.enter.prevent="toggleGroup(group.id)">
+          <q-btn flat round dense class="group-toggle group-toggle-inline" :icon="groupOpen[group.id] ? 'mdi-chevron-down' : 'mdi-chevron-right'"
+                 :aria-label="groupOpen[group.id] ? i18n.collapse : i18n.expand" @click.stop="toggleGroup(group.id)">
+            <q-tooltip>{{ group.label }}</q-tooltip>
+          </q-btn>
+          <q-icon class="group-toggle group-toggle-icon" :name="group.icon || 'mdi-folder'" size="17px"></q-icon>
+          <span class="menu-copy group-title">{{ group.label }}</span>
+          <span class="menu-copy group-count">{{ (group.children || []).length }}</span>
+        </div>
+        <q-slide-transition>
+          <div v-show="groupOpen[group.id]">
+            <div class="menu-child-list">
+              <q-item v-for="child in (group.children || [])" :key="(child.id || '') + nodeUrl(child)" clickable :active="activeApp === nodeUrl(child)" active-class="menu-item-active" class="menu-item menu-item-local" @click="navigate(child, $event)">
+                <q-tooltip v-if="nodeUrl(child)" anchor="top right" self="top left" :offset="[8, 0]">{{ nodeUrl(child) }}</q-tooltip>
+                <q-item-section avatar><q-icon :name="child.icon || 'mdi-link-variant'" size="16px"></q-icon></q-item-section>
+                <q-item-section class="menu-copy"><span class="menu-item-label">{{ child.label }}</span><span v-if="child.note" class="menu-item-note">{{ child.note }}</span></q-item-section>
+                <q-item-section v-if="activeApp === nodeUrl(child)" side class="menu-copy"><span class="active-dot"></span></q-item-section>
+              </q-item>
+              <div v-if="!(group.children || []).length" class="menu-copy group-empty">{{ i18n.emptyGroup }}</div>
+            </div>
+          </div>
+        </q-slide-transition>
+      </section>
     </q-list>
 
     <div class="menu-footer-actions">
@@ -31,4 +40,3 @@
     </div>
   </aside>
 </div>
-

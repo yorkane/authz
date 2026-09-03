@@ -43,26 +43,46 @@ function _M.menu_tree(subject)
         end
     end
     -- 把动态发现的本机服务挂到 builtin='local' 分组。
+    -- 域名绑定条目注入 builtin='domains'（域名服务），端口自动发现条目注入
+    -- builtin='local'（本地服务）；applications.list() 已排除绑定占用的端口，
+    -- 两个分组天然不重复。分组缺失或被禁用时对应条目不展示。
     local local_group
+    local domain_group
     for _, node in ipairs(nodes) do
-        if node.kind == "group" and node.builtin == "local" then local_group = node end
+        if node.kind == "group" then
+            if node.builtin == "local" then local_group = node
+            elseif node.builtin == "domains" then domain_group = node end
+        end
     end
+    local targets = {}
     if local_group and local_group.enabled == 1 then
         local_group.children = {}
+        targets["local"] = local_group.children
+    end
+    if domain_group and domain_group.enabled == 1 then
+        domain_group.children = {}
+        targets["domains"] = domain_group.children
+    end
+    if targets["local"] or targets["domains"] then
         for _, application in ipairs(applications.list()) do
-            local label = application.binding
-                and (application.label or application.menu_name or application.domain or application.note or
-                    ("local:" .. application.port))
-                or ("local:" .. application.port)
-            local_group.children[#local_group.children + 1] = {
-                kind = "item",
-                label = label,
-                port = application.port,
-                domain = application.domain and application.domain or cjson.null,
-                binding = application.binding == true or nil,
-                note = application.binding and (application.note ~= "" and application.note or cjson.null) or cjson.null,
-                icon = application.binding and "mdi-application-outline" or "mdi-lan-connect",
-            }
+            local bound = application.binding == true
+            local bucket = (bound and targets["domains"] or targets["local"])
+                or (bound and targets["local"] or targets["domains"])
+            if bucket then
+                local label = bound
+                    and (application.label or application.menu_name or application.domain or application.note or
+                        ("local:" .. application.port))
+                    or ("local:" .. application.port)
+                bucket[#bucket + 1] = {
+                    kind = "item",
+                    label = label,
+                    port = application.port,
+                    domain = application.domain and application.domain or cjson.null,
+                    binding = bound or nil,
+                    note = bound and (application.note ~= "" and application.note or cjson.null) or cjson.null,
+                    icon = bound and "mdi-web-box" or "mdi-lan-connect",
+                }
+            end
         end
     end
     -- 组装两级树：条目挂到分组，分组为顶层。
