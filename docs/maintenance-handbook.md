@@ -45,9 +45,9 @@ Browser
 
 - HTTP 入口默认 6080，但默认模式（`AUTHZ_HTTP_MODE=redirect`）会把公网 HTTP 请求 308 到 HTTPS；`disabled` 只绑定回环，`serve` 仅供受控测试；显式绑定按记录代理到 `http://` 或 `https://<target_ip>:<port>`；
 - HTTPS 入口默认 6443，在网关终止客户端 TLS 后，仍按绑定记录选择 HTTP/HTTPS 上游；HTTPS 上游默认校验证书，可按绑定关闭校验；
-- 目标优先取启用的精确域名绑定，否则解析 `<port>-任意域名` 到 `127.0.0.1:<port>`；显式绑定还可保存绑定级 Host、Forwarded、Origin 和模拟本机访问配置；
+- 目标优先取启用的精确域名绑定，否则解析 `<port>-任意域名` 到 `127.0.0.1:<port>`；显式绑定还可保存绑定级 Host、Forwarded、Origin 和模拟本机访问配置；未绑定域名的动态端口入口默认启用模拟本机访问；
 - 可代理端口下限强制不小于 2000；目标为网关自身端口时返回 508；
-- 上游收到 `X-Authz-User`、`X-Authz-Source`、`X-Authz-Identity`；默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名。若最外层代理替换了端口，只在 Origin 与请求 Host 的主机名相同时恢复 Origin 中的公网端口。显式绑定可安全覆盖 `Host`、`X-Forwarded-Host/Proto/Port` 和 `Origin`，但不能改变真实 TCP peer。
+- 上游收到 `X-Authz-User`、`X-Authz-Source`、`X-Authz-Identity`；显式绑定默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名，`<port>-任意域名` 动态入口默认模拟本机访问（Host/`X-Forwarded-Host` 为 `127.0.0.1:<port>`，`X-Real-IP`/`X-Forwarded-For` 为 `127.0.0.1`）。若最外层代理替换了端口，只在 Origin 与请求 Host 的主机名相同时恢复 Origin 中的公网端口。显式绑定可安全覆盖 `Host`、`X-Forwarded-Host/Proto/Port` 和 `Origin`，但不能改变真实 TCP peer。
 - 只要请求带有 `Upgrade: websocket`，所有已解析的动态代理目标都会转发升级头，并关闭缓冲、延长读写超时。`bindings.websocket` 保留为历史兼容字段，不再阻断升级请求。
 
 Admin 菜单应用列表不依赖 `bindings` 表：`/_authz/api/applications` 读取 `/proc/net/tcp` 和

@@ -191,8 +191,9 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 仅 `admin` 角色。可修改创建接口中的全部字段。
 
 显式绑定按 `upstream_scheme` 代理到 `http(s)://<target_ip>:<port>`；HTTPS 上游默认校验证书，只有绑定显式设置
-`upstream_ssl_verify=false` 时才进入忽略校验的内部代理路径。数字前缀免配置入口仍固定使用
-`http://127.0.0.1:<port>`；主动发现也只扫描本机 `127.0.0.1`。客户端访问网关的 HTTP/HTTPS 协议与上游绑定协议相互独立。
+-`upstream_ssl_verify=false` 时才进入忽略校验的内部代理路径。数字前缀免配置入口仍固定使用
+-`http://127.0.0.1:<port>`，并默认启用模拟本机请求头；主动发现也只扫描本机 `127.0.0.1`。
+-客户端访问网关的 HTTP/HTTPS 协议与上游绑定协议相互独立。
 
 `target_ip` 不改变现有 Casbin 对象格式，授权仍按 `/<port><path>` 判断；不同 IP 上相同端口的绑定共享同一端口策略。
 `admin`/`api` Key 能创建指向内网地址的绑定，应只发放给允许访问目标网络的可信应用。

@@ -13,7 +13,10 @@ function _M.resolve(host, config)
         if match then
             local port = tonumber(match[1])
             if port and port >= config.port_min and port <= config.port_max then
-                return port, false, "127.0.0.1", nil
+                -- 未绑定域名的动态端口入口默认按"模拟本机访问"处理：目标固定是
+                -- 本机 127.0.0.1，向上游发送目标地址 Host 与本机来源头，
+                -- 兼容只接受本地 Host/来源的本地应用（proxy.apply_headers 消费）。
+                return port, false, "127.0.0.1", { simulate_local = true }
             end
         end
     end

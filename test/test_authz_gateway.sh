@@ -1298,7 +1298,12 @@ request GET "$DYNAMIC_HOST" /identity "$DYNAMIC_COOKIE"
 assert_json "upstream receives raw username" '.user' "bob"
 assert_json "upstream receives identity source" '.source' "local"
 assert_json "upstream receives canonical identity" '.identity' "user:local:bob"
-assert_json "upstream receives external dynamic Host" '.host' "$DYNAMIC_HOST:$HTTP_PORT"
+assert_json "dynamic port access defaults to simulate-local Host" '.host' "127.0.0.1:$UPSTREAM_PORT"
+assert_json "dynamic port access defaults to simulate-local forwarded host" '.forwarded_host' "127.0.0.1:$UPSTREAM_PORT"
+assert_json "dynamic port access defaults to http forwarded proto" '.forwarded_proto' "http"
+assert_json "dynamic port access defaults to local real IP" '.real_ip' "127.0.0.1"
+assert_json "dynamic port access defaults to local forwarded-for" '.forwarded_for' "127.0.0.1"
+assert_json "dynamic port access drops client Forwarded header" '.forwarded | tostring' "null"
 AUTHZ_COOKIE_HEADER=$(cookie_header "$DYNAMIC_COOKIE")
 STATUS=$(curl -sS --max-time 5 --resolve "$DYNAMIC_HOST:$HTTP_PORT:127.0.0.1" \
     -H "Cookie: $AUTHZ_COOKIE_HEADER; app_session=keep-me" \
