@@ -109,6 +109,31 @@ docker compose logs --tail=20
 
 首次启动会自动：建库并 seed `admin` 用户、生成自签证书（`/data/certs`）、渲染 Nginx 配置。
 
+### 3.4 外置 include 配置（自定义 Nginx 规则）
+
+网关在 Nginx 配置中预留了三个外置 include 文件，用于追加用户自定义规则，无需改动模板：
+
+| 文件 | include 位置 | 典型用途 |
+| --- | --- | --- |
+| `conf/http_inc.conf` | `http {}` 块末尾 | 额外 `server {}`、`upstream {}`、`map`、共享内存 |
+| `conf/server_inc.conf` | 网关 `server {}` 最末尾 | 额外 `location`（同路径会覆盖网关内置行为）、健康检查 |
+| `conf/stream_inc.conf` | 顶层 `stream {}` 块 | 四层 TCP/UDP 代理 |
+
+启动行为：
+
+- 入口脚本启动时检查这三个文件：存在（哪怕为空）就用用户的版本；不存在则自动生成带注释说明的默认内容，保证 Nginx 始终可用；
+- 纯镜像部署（3.2）：镜像已内置三个默认文件，位于 `/usr/local/openresty/nginx/conf/`；需要自定义时用卷覆盖单个文件即可，例如 `-v ./conf/server_inc.conf:/usr/local/openresty/nginx/conf/server_inc.conf:ro`；
+- 挂载模板目录部署（宿主机 `conf/` -> `/etc/openresty/templates:ro`）：直接编辑宿主机 `conf/` 下的三个文件，入口脚本会把它们复制进容器内 Nginx 配置目录，重启容器生效；
+- 修改后先验证语法再重启：`docker exec <容器> openresty -t`，语法错误会导致 Nginx 无法启动；
+- 内置示例：`server_inc.conf` 默认带 `location = /favicon.ico`（`empty_gif` + 204）与 `location = /noc.gif`（200，供 SLB 健康检查），均关闭访问日志。
+
+验证 include 已生效：
+
+```bash
+curl -sk -o /dev/null -w "%{http_code}\n" https://127.0.0.1:6443/favicon.ico   # 204
+curl -sk -o /dev/null -w "%{http_code}\n" https://127.0.0.1:6443/noc.gif       # 200
+```
+
 ## 4. 部署后验证（逐项执行，全部通过才算成功）
 
 ```bash

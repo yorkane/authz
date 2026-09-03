@@ -415,6 +415,14 @@ PKCE、resource、回调 issuer、state 一次性、角色映射、同名来源�
 宿主机 conf/   -> /etc/openresty/templates:ro
 ```
 
+`conf/` 目录中有三个外置 include 文件：`http_inc.conf`（include 到 http{} 末尾）、
+`server_inc.conf`（include 到网关 server{} 最末尾，同路径 location 会覆盖内置行为）、
+`stream_inc.conf`（include 到顶层 stream{} 块）。入口脚本启动时检查：存在（哪怕为空）
+即采用用户版本并复制进容器 Nginx 配置目录；缺失则自动生成带注释的默认内容。
+镜像内置同名的三个默认文件，纯镜像部署时也可用单文件卷覆盖。修改后先执行
+`docker exec <容器> openresty -t` 验证语法，再重启容器生效；语法错误会导致 Nginx 无法启动。
+默认 `server_inc.conf` 提供 `favicon.ico`（204）与 `noc.gif`（200，SLB 健康检查）两个示例 location。
+
 这使 Lua、前端和 Nginx 模板修改无需重建镜像。镜像入口脚本每次启动都从运行时模板目录生成
 `/usr/local/openresty/nginx/conf/nginx.conf` 与 `server.conf`；未挂载模板目录时回退到镜像内置模板。部署操作区分：
 

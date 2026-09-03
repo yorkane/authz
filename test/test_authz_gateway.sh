@@ -1773,7 +1773,7 @@ done
 [[ "$STATUS" == "200" ]] || fail "origin-select gateway did not become ready"
 
 origin_login_cookie_domain() {
-    local host="$1" origin_header="$2"
+    local host="$1" origin_header="${2:-}"
     local extra_args=()
     if [[ -n "$origin_header" ]]; then
         extra_args=(-H "origin: $origin_header")
@@ -1783,7 +1783,7 @@ origin_login_cookie_domain() {
         "${extra_args[@]}" \
         -X POST "http://$host:$ORIGIN_HTTP_PORT/_authz/login" \
         --data-urlencode 'username=admin' --data-urlencode 'password=admin123' >/dev/null
-    awk 'BEGIN { IGNORECASE=1 } /^Set-Cookie:/ && /Max-Age=[1-9]/ { match($0, /Domain=[^;]+/); print substr($0, RSTART+8, RLENGTH-8); exit }' "$TMP_DIR/origin-headers"
+    awk 'BEGIN { IGNORECASE=1 } /^Set-Cookie:/ && /Max-Age=[1-9]/ { match($0, /Domain=[^;\r]+/); print substr($0, RSTART+7, RLENGTH-7); exit }' "$TMP_DIR/origin-headers"
 }
 
 assert_eq "login without origin uses host domain" \
