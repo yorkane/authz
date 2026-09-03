@@ -93,6 +93,7 @@
                   <div><q-toggle v-model="bindingForm.simulate_local" dense color="teal-4" :label="t.simulateLocal"></q-toggle><div class="simulate-copy">{{ t.simulateLocalHint }}</div></div>
                   <q-input v-if="bindingForm.simulate_local" v-model.trim="bindingForm.local_ip" dark dense outlined hide-bottom-space maxlength="45" :label="t.localIp" :hint="t.localIpHint" :rules="[required]"></q-input>
                 </div>
+                <q-input v-model="bindingForm.header_overrides" dark dense outlined type="textarea" autogrow class="binding-grid-full" :label="t.headerOverrides" :placeholder="t.headerOverridesPlaceholder" :hint="t.headerOverridesHint"></q-input>
               </q-expansion-item>
 
               <q-toggle v-model="bindingForm.enabled" dense color="teal-4" :label="t.enabledNow"></q-toggle>
@@ -160,7 +161,7 @@
         const policyEditingId = ref(null)
         const portMin = ref(2000)
         const portMax = ref(20000)
-        const bindingDefaults = () => ({ domain: '', target_ip: '127.0.0.1', port: 3000, menu_name: '', note: '', enabled: true, upstream_scheme: 'http', upstream_ssl_verify: true, upstream_path: '', upstream_host: '', forwarded_host: '', forwarded_proto: '', forwarded_port: '', origin_mode: 'auto', custom_origin: '', simulate_local: false, local_ip: '127.0.0.1' })
+        const bindingDefaults = () => ({ domain: '', target_ip: '127.0.0.1', port: 3000, menu_name: '', note: '', enabled: true, upstream_scheme: 'http', upstream_ssl_verify: true, upstream_path: '', upstream_host: '', forwarded_host: '', forwarded_proto: '', forwarded_port: '', origin_mode: 'auto', custom_origin: '', simulate_local: false, local_ip: '127.0.0.1', header_overrides: '' })
         const bindingForm = reactive(bindingDefaults())
         const policyForm = reactive({ ptype: 'p', v0: 'role:user', objectTarget: 'global', objectPath: '/*', v2: ['*'], eft: 'allow' })
       const policyUserOptions = computed(() => policyUsers.value.map(user => ({
@@ -233,7 +234,7 @@
       }
 
       function hasCustomProxy (binding) {
-        return Boolean(binding.upstream_scheme === 'https' || Number(binding.upstream_ssl_verify) === 0 || binding.upstream_path || binding.upstream_host || binding.forwarded_host || binding.forwarded_proto || Number(binding.forwarded_port) || (binding.origin_mode && binding.origin_mode !== 'auto') || binding.custom_origin)
+        return Boolean(binding.upstream_scheme === 'https' || Number(binding.upstream_ssl_verify) === 0 || binding.upstream_path || binding.upstream_host || binding.forwarded_host || binding.forwarded_proto || Number(binding.forwarded_port) || (binding.origin_mode && binding.origin_mode !== 'auto') || binding.custom_origin || binding.header_overrides)
       }
 
       function proxySummary (binding) {
@@ -246,7 +247,7 @@
         const ssl = binding.upstream_scheme === 'https'
           ? (Number(binding.upstream_ssl_verify) === 0 ? t.value.sslIgnored : t.value.sslVerified)
           : t.value.notApplicable
-        return [
+        const details = [
           `${t.value.upstreamScheme}: ${(binding.upstream_scheme || 'http').toUpperCase()}`,
           `${t.value.sslVerification}: ${ssl}`,
           `${t.value.upstreamPath}: ${binding.upstream_path || automatic}`,
@@ -255,7 +256,13 @@
           `X-Forwarded-Proto / Port: ${binding.forwarded_proto || automatic} / ${Number(binding.forwarded_port) || automatic}`,
           `Origin: ${binding.origin_mode || 'auto'}`,
           binding.simulate_local === 1 ? `${t.value.localIp}: ${binding.local_ip || '127.0.0.1'}` : ''
-        ].filter(Boolean)
+        ]
+        if (binding.header_overrides) {
+          for (const line of String(binding.header_overrides).split('\n')) {
+            if (line.trim()) details.push(`Header: ${line.trim()}`)
+          }
+        }
+        return details.filter(Boolean)
       }
 
       function setPolicyMethods (values) {

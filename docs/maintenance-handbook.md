@@ -129,7 +129,7 @@ SQLite 默认位于 `/data/authz/authz.db`，`/data` 必须持久化。
 | `remote_users` | 主键 `(provider, subject)`；唯一 `(provider, username)`；创建/最近登录/修改时间 |
 | `sessions` | token、username、source、csrf、expires_at |
 | `policies` | `ptype/v0/v1/v2` 唯一；存 p/g 规则 |
-| `bindings` | domain 唯一；target_ip/port、enabled、websocket、note、menu_name；upstream/forwarded/origin 代理字段；simulate_local/local_ip |
+| `bindings` | domain 唯一；target_ip/port、enabled、websocket、note、menu_name；upstream/forwarded/origin 代理字段；simulate_local/local_ip；header_overrides（多行 Header 覆盖，逐条校验后存储） |
 
 `remote_users.synced_at` 是保留的内部存储列名；管理 API 只输出语义明确的 `recorded_at`，避免把
 单向身份记录误解为双向同步协议。
@@ -208,6 +208,8 @@ API Key 安全约束：
   `/<port><path>` 授权，同端口的不同目标 IP 共享策略；
 - 绑定级 Host/Forwarded/Origin 字段必须经过 authority/origin 白名单校验并拒绝 CR/LF；模拟本机访问只重写
   `Host`、`Origin`、`X-Real-IP`、`X-Forwarded-For` 等 HTTP 头，不应被描述成 TCP 来源伪造；
+  header_overrides 只覆盖透传类请求头，格式、控制字符、长度和白名单（禁 Host/Cookie/Origin/X-Authz-*/X-Forwarded-*/hop-by-hop）
+  在 validation 层校验，cache 层防御性二次过滤，proxy 层用 ngx.req.set_header 注入；
 - Key 启用、禁用、删除和策略变更都必须 bump cache revision，并有跨 worker HTTP 回归。
 
 策略规则：

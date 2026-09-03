@@ -42,6 +42,7 @@
 - 域名绑定的 `note` 会在左侧菜单名称下方显示；鼠标悬浮菜单时显示该菜单实际打开的完整域名地址，自动探测的 `local:<port>` 也显示生成后的地址；普通点击在右侧 iframe 打开，Ctrl/Command + 点击在新窗口打开菜单地址；
 - WebSocket 默认对所有已解析目标开启；`bindings.websocket` 字段保留用于兼容历史数据，不再作为升级请求的阻断开关。
 - “高级代理配置”可选择上游协议、SSL 校验和上游路径改写，并覆盖上游 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto`、`X-Forwarded-Port`，以及保持、重写、移除或自定义 `Origin`；改写路径留空时保持原路径，填写后请求统一转发到该路径。
+- “高级代理配置”还支持多行 Header 覆盖：每行 `Header-Name: value`，按行覆盖发往上游的透传请求头（如 `Authorization`、自定义业务头）；Host、Cookie、X-Authz-* 等网关控制头不可覆盖。
 - “模拟本机访问”默认把 `Host`/`Origin` 改为目标 HTTP 地址，并将 `X-Real-IP`、`X-Forwarded-For` 设置为 `127.0.0.1`；也可填写网关的局域网 IP。该选项只模拟 HTTP 请求头，不能改变真实 TCP 来源地址。
 
 ### 管理界面

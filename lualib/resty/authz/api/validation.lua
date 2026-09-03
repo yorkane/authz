@@ -17,6 +17,7 @@ local BINDING_PROXY_FIELDS = {
     "upstream_host", "forwarded_host", "forwarded_proto", "forwarded_port",
     "origin_mode", "custom_origin", "simulate_local", "local_ip", "upstream_scheme",
     "upstream_ssl_verify", "upstream_path",
+    "header_overrides",
 }
 local FORWARDED_PROTO_SET = { [""] = true, http = true, https = true }
 local UPSTREAM_SCHEME_SET = { http = true, https = true }
@@ -89,6 +90,19 @@ local function valid_domain_prefix(prefix)
     return ngx.re.match(prefix, [[^[a-z0-9]([a-z0-9-]*[a-z0-9])?$]]) ~= nil
 end
 
+-- 网关/代理链路专用头：由绑定专属字段或框架控制，不允许通过 header 覆盖篡改；
+-- hop-by-hop 与报文分帧头会破坏代理语义，一并禁止。
+local HEADER_OVERRIDE_BLOCKED = {
+    host = true, cookie = true, origin = true,
+    ["x-authz-user"] = true, ["x-authz-source"] = true, ["x-authz-identity"] = true,
+    ["x-authz-key"] = true, ["x-real-ip"] = true,
+    ["x-forwarded-for"] = true, ["x-forwarded-host"] = true,
+    ["x-forwarded-proto"] = true, ["x-forwarded-port"] = true,
+    ["content-length"] = true, ["transfer-encoding"] = true,
+    connection = true, ["keep-alive"] = true, upgrade = true,
+    te = true, trailer = true,
+}
+
 function _M.normalize_binding_domain(value)
     local domain = tostring(value or ""):lower():gsub("%s+", ""):gsub(":%d+$", "")
     if valid_host(domain) then return domain end
@@ -96,6 +110,51 @@ function _M.normalize_binding_domain(value)
     local host = tostring(ngx.var.host or ""):lower():gsub("^a%-", ""):gsub("^%d+%-", "")
     local generated = domain .. "-" .. host
     return valid_host(generated) and generated or nil
+end
+
+function _M.normalize_header_overrides(value)
+    if value == nil or value == cjson.null then return "" end
+    local raw = tostring(value)
+    local trim = function(text) return tostring(text):gsub("^%s+", ""):gsub("%s+$", "") end
+    if #raw > 8192 then return nil, "Header 覆盖总长度不能超过 8192 字符" end
+    local seen = {}
+    local count = 0
+    for line in (raw .. "\n"):gmatch("([^\r\n]*)[\r\n]") do
+        line = trim(line)
+        if line ~= "" then
+            local name, header_value = line:match("^([^:]+):(.*)$")
+            if not name then return nil, "Header 覆盖每行必须是 Header-Name: value 格式" end
+            name = trim(name)
+            header_value = trim(header_value)
+            if #name == 0 or #name > 128 or
+                not ngx.re.match(name, [[^[A-Za-z0-9][A-Za-z0-9_-]*$]]) then
+                return nil, "Header 名称只能包含字母、数字、下划线和中划线"
+            end
+            local lower = name:lower()
+            if HEADER_OVERRIDE_BLOCKED[lower] or lower:sub(1, 7) == "x-authz-" or
+                lower:sub(1, 6) == "proxy-" then
+                return nil, "Header 「" .. name .. "」由网关控制，不允许覆盖"
+            end
+            if header_value == "" then return nil, "Header 「" .. name .. "」的值不能为空" end
+            if #header_value > 1024 then return nil, "Header 「" .. name .. "」的值不能超过 1024 字符" end
+            if header_value:find("%c") then return nil, "Header 「" .. name .. "」的值不能包含控制字符" end
+            if not seen[lower] then
+                seen[lower] = { name = name, value = header_value }
+                count = count + 1
+            end
+        end
+    end
+    if count > 32 then return nil, "Header 覆盖不能超过 32 条" end
+    local names = {}
+    for lower, item in pairs(seen) do
+        names[#names + 1] = { lower = lower, name = item.name, value = item.value }
+    end
+    table.sort(names, function(a, b) return a.lower < b.lower end)
+    local lines = {}
+    for _, item in ipairs(names) do
+        lines[#lines + 1] = item.name .. ": " .. item.value
+    end
+    return table.concat(lines, "\n")
 end
 
 function _M.normalize_binding_proxy(data)
@@ -139,6 +198,8 @@ function _M.normalize_binding_proxy(data)
     if upstream_path == nil then
         return nil, "上游改写路径必须是合法路径，不能包含查询参数、片段、连续斜杠或 .."
     end
+    local header_overrides, header_err = _M.normalize_header_overrides(optional(data.header_overrides, ""))
+    if not header_overrides then return nil, header_err, 422 end
     local ssl_verify = optional(data.upstream_ssl_verify, true)
     if type(ssl_verify) == "string" then
         ssl_verify = ssl_verify:lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -156,6 +217,7 @@ function _M.normalize_binding_proxy(data)
         upstream_ssl_verify = (ssl_verify == false or ssl_verify == 0 or ssl_verify == "0" or
             ssl_verify == "false") and 0 or 1,
         upstream_path = upstream_path,
+        header_overrides = header_overrides,
     }
 end
 

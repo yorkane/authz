@@ -80,6 +80,12 @@ local function apply_headers(binding, target_ip, port)
         ngx.var.authz_forwarded_for = forwarded_for()
         ngx.var.authz_forwarded = tostring(ngx.var.http_forwarded or "")
     end
+    -- 绑定级 header 覆盖：逐条改写随请求透传给上游的头（如 Authorization、自定义业务头）。
+    -- Host/Cookie/X-Authz-*/X-Forwarded-* 等由 proxy_set_header 显式控制且校验层已禁止覆盖，
+    -- 不会在此被篡改；未列在 server.conf proxy_set_header 中的客户端头经此透传。
+    for _, header in ipairs(binding.header_overrides or {}) do
+        ngx.req.set_header(header.name, header.value)
+    end
 end
 
 -- nginx hands proxy_pass the *decoded* request path (ngx.var.uri).  Raw

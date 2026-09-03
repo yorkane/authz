@@ -179,6 +179,7 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 | `custom_origin` | 否 | `origin_mode=custom` 时必填，只接受无 path/query 的 `http(s)://authority` |
 | `simulate_local` | 否 | 默认 `false`；启用本机 HTTP 请求头模拟 |
 | `local_ip` | 否 | 模拟来源 IP，默认 `127.0.0.1`，也可使用网关局域网 IPv4/IPv6 |
+| `header_overrides` | 否 | 多行文本，每行 `Header-Name: value`，按行覆盖发往上游的透传请求头；Host、Cookie、Origin、X-Authz-*、X-Forwarded-*、X-Real-IP 与 hop-by-hop 头不可覆盖；留空表示不覆盖 |
 | `upstream_scheme` | 否 | 上游协议，`http`（默认）或 `https` |
 | `upstream_ssl_verify` | 否 | HTTPS 上游是否校验证书，默认 `true`；设为 `false` 忽略证书校验，仅建议用于受控内网或自签名证书 |
 | `upstream_path` | 否 | 上游路径改写，默认空值表示保留请求路径；例如 `/v1/index.html` 会把任意请求转发到 `/v1/index.html`，查询参数原样保留；不接受 query、fragment、连续斜杠或 `..` |
@@ -204,6 +205,9 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 指向 `http://<target_ip>:<port>`，把 `X-Real-IP` 与 `X-Forwarded-For` 改为 `local_ip`，并移除客户端
 `Forwarded`；显式填写的 Host/Forwarded/Origin 配置优先。它不会伪造 TCP peer，远端上游实际看到的
 TCP 来源仍是网关主机地址。
+`header_overrides` 每行一条 `Header-Name: value`，保存时做格式、控制字符、长度和白名单校验
+（名称不超过 128、值不超过 1024、总量不超过 8192、最多 32 条，重复名保留首条），
+只影响未在代理配置中显式控制的透传类请求头（如 `Authorization`、自定义业务头）。
 
 ### `DELETE /applications/:id`
 

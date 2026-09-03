@@ -42,10 +42,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "forwarded_host": self.headers.get("X-Forwarded-Host"),
                 "forwarded_proto": self.headers.get("X-Forwarded-Proto"),
                 "forwarded_port": self.headers.get("X-Forwarded-Port"),
-                "real_ip": self.headers.get("X-Real-IP"),
-                "forwarded_for": self.headers.get("X-Forwarded-For"),
-                "forwarded": self.headers.get("Forwarded"),
-                "cookie": self.headers.get("Cookie"),
+               "real_ip": self.headers.get("X-Real-IP"),
+               "forwarded_for": self.headers.get("X-Forwarded-For"),
+               "forwarded": self.headers.get("Forwarded"),
+               "cookie": self.headers.get("Cookie"),
+                "probe": self.headers.get("X-Probe-Header"),
+                "authorization": self.headers.get("Authorization"),
             }, separators=(",", ":")).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

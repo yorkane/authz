@@ -17,7 +17,7 @@ function _M.runtime_rows()
     return db.query([[SELECT domain, target_ip, port, enabled, websocket,
         upstream_host, forwarded_host, forwarded_proto, forwarded_port, origin_mode,
         custom_origin, simulate_local, local_ip, upstream_scheme, upstream_ssl_verify,
-        upstream_path FROM bindings]]) or {}
+        upstream_path, header_overrides FROM bindings]]) or {}
 end
 
 function _M.by_id(id)
@@ -45,13 +45,14 @@ function _M.insert(values)
         domain, target_ip, port, enabled, websocket, note, menu_name,
         upstream_host, forwarded_host, forwarded_proto, forwarded_port,
         origin_mode, custom_origin, simulate_local, local_ip,
-        upstream_scheme, upstream_ssl_verify, upstream_path, created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)]],
+        upstream_scheme, upstream_ssl_verify, upstream_path, header_overrides, created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)]],
         values.domain, values.target_ip, values.port, values.enabled, values.websocket,
         values.note, values.menu_name, values.upstream_host, values.forwarded_host,
         values.forwarded_proto, values.forwarded_port, values.origin_mode,
         values.custom_origin, values.simulate_local, values.local_ip,
         values.upstream_scheme, values.upstream_ssl_verify, values.upstream_path,
+        values.header_overrides,
         values.created_at)
 end
 

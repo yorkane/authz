@@ -5,7 +5,8 @@ import sys
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = self.path.encode()
+        probe = (self.headers.get("X-Probe-Header") or "").encode()
+        body = self.path.encode() + (b"|" + probe if probe else b"")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))

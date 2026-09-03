@@ -71,6 +71,7 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
 - `conf/nginx.conf.template` 只维护全局配置、HTTP/HTTPS listener 和 TLS；两个 server 必须共同 include 入口脚本生成的 `server.conf`，控制面 location 与代理参数只在 `conf/server.conf.template` 维护。
 - 显式绑定默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名；未绑定域名的 `<port>-任意域名` 动态入口固定指向本机 `127.0.0.1:<port>`，默认启用模拟本机访问（Host/Forwarded-Host 为目标地址，来源头为 `127.0.0.1`）。显式 binding 可按记录选择 HTTP/HTTPS 上游、关闭 HTTPS 证书校验、改写上游路径，或覆盖 Host、Forwarded、Origin、模拟本机 HTTP 请求头。不能恢复为 `$proxy_host` 全局默认。外层代理改写端口时，只能在 Origin 与请求 Host 的主机名相同后采用 Origin authority，不能信任异域 Origin；所有绑定级 authority/origin 必须拒绝 CR/LF 和 path/query，上游改写路径也必须拒绝 query/fragment、连续斜杠和 `..`。
 - 策略新增和编辑表单只管理 `p` 访问策略，不提供 `g` 角色分配切换；历史 `g` 规则仅列出和删除。
+- 绑定级 header 覆盖（多行 `Header-Name: value`）只允许覆盖透传类请求头；Host、Cookie、Origin、X-Authz-*、X-Forwarded-*、X-Real-IP、hop-by-hop 与分帧头必须在 validation 层拒绝，cache 层二次过滤，不得扩大可覆盖范围。
   表单按 binding ID 选择目标并由服务端统一校验 binding 与 Casbin 对象端口一致；
   绑定对象使用纯下拉选择，选中值不挤入详情；效果使用允许/拒绝 Radio；
   编辑使用 `PATCH /policies/:id` 并回填完整策略，校验失败不得覆盖旧值。策略列表通过 `binding_matches`

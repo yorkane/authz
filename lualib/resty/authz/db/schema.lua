@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS bindings(
   upstream_scheme TEXT NOT NULL DEFAULT 'http',
   upstream_ssl_verify INTEGER NOT NULL DEFAULT 1,
   upstream_path TEXT NOT NULL DEFAULT '',
+  header_overrides TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS api_keys(

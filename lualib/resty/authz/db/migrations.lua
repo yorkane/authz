@@ -239,6 +239,17 @@ _M.list = {
             must(db.exec("ALTER TABLE api_keys ADD COLUMN loopback_only INTEGER NOT NULL DEFAULT 0"))
         end,
     },
+    {
+        version = 9,
+        name = "bindings_header_overrides",
+        up = function(db)
+            local cols = db.query("PRAGMA table_info(bindings)") or {}
+            for _, c in ipairs(cols) do
+                if c.name == "header_overrides" then return end
+            end
+            must(db.exec("ALTER TABLE bindings ADD COLUMN header_overrides TEXT NOT NULL DEFAULT ''"))
+        end,
+    },
 }
 
 function _M.run(db)

@@ -451,7 +451,7 @@ assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides"
 
 cookie_header() {
     awk '
@@ -1504,6 +1504,44 @@ WS_STATUS=$(curl -skS --max-time 5 --http1.1 --resolve "ws-fixed.test.example:$H
 assert_eq "HTTPS default WebSocket proxy" "$WS_STATUS" "101"
 assert_contains "HTTPS WebSocket upgrade response" \
     "$(cat "$TMP_DIR/https-websocket-headers")" "101 Switching Protocols"
+
+# ── 绑定级 header 覆盖（多行输入，逐行覆盖透传请求头）──
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"header_overrides":"X-Probe-Header: from-binding\nAuthorization: Bearer fixed-token"}'
+assert_eq "save binding header overrides" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+assert_json "header overrides normalize to one entry per line" \
+    '.data.bindings[] | select(.domain == "fixed.test.example") | .header_overrides' \
+    $'Authorization: Bearer fixed-token\nX-Probe-Header: from-binding'
+request GET fixed.test.example /identity "$ADMIN_COOKIE"
+assert_json "header override reaches upstream" '.probe' "from-binding"
+assert_json "Authorization override reaches upstream" '.authorization' "Bearer fixed-token"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":"JustAName"}'
+assert_eq "header override without colon is rejected" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":"X-Authz-User: evil"}'
+assert_eq "header override cannot touch gateway identity headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":"X-Bad: bad\rvalue"}'
+assert_eq "header override rejects control characters" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":"X-Empty:"}'
+assert_eq "header override rejects empty values" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":null}'
+assert_eq "clear binding header overrides" "$STATUS" "200"
+request GET fixed.test.example /identity "$ADMIN_COOKIE"
+assert_json "cleared header overrides stop overriding" '.probe | tostring' "null"
+request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" \
+    '{"domain":"https-override.test.example","target_ip":"127.0.0.1","port":'$TLS_PORT',"upstream_scheme":"https","upstream_ssl_verify":false,"header_overrides":"X-Probe-Header: from-https-binding"}'
+assert_eq "create HTTPS binding with header overrides" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+HTTPS_OVERRIDE_ID=$(jq -er '.data.bindings[] | select(.domain == "https-override.test.example") | .id' "$TMP_DIR/body")
+STATUS=$(curl -sS --max-time 5 --resolve "https-override.test.example:$HTTP_PORT:127.0.0.1" \
+    -H "Cookie: $(cookie_header "$ADMIN_COOKIE")" \
+    -o "$TMP_DIR/https-override-body" -w '%{http_code}' \
+    "http://https-override.test.example:$HTTP_PORT/")
+assert_eq "HTTPS upstream with header override reaches insecure proxy path" "$STATUS" "200"
+assert_contains "header override survives internal redirect to insecure proxy" \
+    "$(cat "$TMP_DIR/https-override-body")" "from-https-binding"
+request DELETE "$ADMIN_HOST" "/_authz/api/applications/$HTTPS_OVERRIDE_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "delete HTTPS header override binding" "$STATUS" "200"
 
 request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" \
     "{\"domain\":\"https-fixed.test.example\",\"target_ip\":\"127.0.0.1\",\"port\":$TLS_PORT,\"upstream_scheme\":\"https\",\"upstream_ssl_verify\":false}"
