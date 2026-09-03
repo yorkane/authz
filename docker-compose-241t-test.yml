@@ -1,0 +1,18 @@
+# 241.t 测试部署实例（测试/回归专用，不影响本机与其他服务器）
+# 端口 6081/6444 避开 241.t 上的旧 openresty-gateway(6080/6443)
+# 镜像经 /nas2/docker/ 同步；admin/lualib/conf 代码 rsync 自本机仓库
+services:
+  gateway:
+    image: authz:latest
+    container_name: authz-test
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      OPENRESTY_TEMPLATE_DIR: /etc/openresty/templates
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+      - ${ADMIN_UI_DIR:-/data/app/authz-test/admin}:/usr/local/openresty/nginx/html/admin:ro
+      - ${LUALIB_DIR:-/data/app/authz-test/lualib}:/usr/local/openresty/site/lualib:ro
+      - ${NGINX_TEMPLATE_DIR:-/data/app/authz-test/conf}:/etc/openresty/templates:ro
