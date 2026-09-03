@@ -86,6 +86,35 @@ location ^~ /_authz/ {
     }
 }
 
+# ── 文件浏览模块（fancyindex 目录索引）───────────────────────────
+# 挂载到容器的 html 目录（ADMIN_UI_DIR → /usr/local/openresty/nginx/html/admin）
+# 以 /files/ 作为只读浏览入口；fancyindex 渲染目录列表，支持直接下载。
+# index 指向不存在的文件以强制回落到 fancyindex 列表（admin 首页是 SSI 页，
+# 统一走 /_authz/apps/ 会话入口）。未登录时与其他入口一致跳转登录页。
+location = /files {
+    return 301 /files/;
+}
+
+location /files/ {
+    alias /usr/local/openresty/nginx/html/admin/;
+    index .fancyindex-forbidden;
+    fancyindex on;
+    fancyindex_exact_size off;
+    fancyindex_time_format "%Y-%m-%d %H:%M";
+    fancyindex_header "";
+    fancyindex_footer "";
+    access_by_lua_block {
+        local authz = require "resty.authz"
+        require("resty.authz.db").open(authz.config.db_path)
+        local session = require "resty.authz.session"
+        local token = session.get_request_token()
+        local current = token and session.get(token)
+        if not current then
+            return ngx.redirect("/_authz/login?next=" .. ngx.escape_uri(ngx.var.request_uri))
+        end
+    }
+}
+
 location / {
     set $authz_target "";
     set $authz_user   "";

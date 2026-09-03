@@ -45,6 +45,14 @@
 - “高级代理配置”还支持多行 Header 覆盖：每行 `Header-Name: value`，按行覆盖发往上游的透传请求头（如 `Authorization`、自定义业务头）；Host、Cookie、X-Authz-* 等网关控制头不可覆盖。
 - “模拟本机访问”默认把 `Host`/`Origin` 改为目标 HTTP 地址，并将 `X-Real-IP`、`X-Forwarded-For` 设置为 `127.0.0.1`；也可填写网关的局域网 IP。该选项只模拟 HTTP 请求头，不能改变真实 TCP 来源地址。
 
+### 文件浏览（fancyindex）
+
+网关内置只读文件浏览入口 `/files/`，基于 ngx-fancyindex 渲染目录索引：
+
+- 根目录即挂载进容器的 html 目录（`ADMIN_UI_DIR` → `/usr/local/openresty/nginx/html/admin/`），可浏览并直接下载其中文件；
+- 与其他入口共用同一套服务端会话：未登录访问 `/files/` 会 302 到 `/_authz/login`；
+- 只读；不提供上传/删除（无 WebDAV）；目录列表按文件名/大小/时间可排序。
+
 ### 管理界面
 
 管理界面统一从 `/_authz/apps/` 进入：
