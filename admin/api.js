@@ -91,7 +91,7 @@ function saveMenuEntry (values) {
 function saveNginxConf (values) {
   if (values.action === 'validate') return mutation('POST', '/nginx-conf/validate', values)
   if (values.action === 'save') return mutation('PUT', '/nginx-conf', values)
-  if (values.action === 'reload') return mutation('POST', '/nginx-conf/reload', {})
+  if (values.action === 'reload') return mutation('POST', '/nginx-conf/reload', values)
   throw new Error('Unsupported nginx conf action')
 }
 
