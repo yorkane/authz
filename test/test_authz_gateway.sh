@@ -451,7 +451,7 @@ assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon"
 
 cookie_header() {
     awk '
@@ -1602,6 +1602,7 @@ assert_eq "menu tree loads" "$STATUS" "200"
 assert_json "menu tree seeds two groups" '.data.groups | length' "2"
 assert_json "first seeded group is system apps" '.data.groups[0].label' "系统应用"
 assert_json "system group carries four built-in pages" '.data.groups[0].children | length' "4"
+assert_json "file browser built-in is seeded" '[.data.groups[0].children[] | select(.builtin == "files")] | length' "1"
 assert_json "built-in item maps to internal page" '.data.groups[0].children[0].builtin' "users"
 assert_json "second seeded group is local apps" '.data.groups[1].builtin' "local"
 assert_json "local group collects discovered services" '.data.groups[1].children | length > 0 | tostring' "true"
@@ -1677,6 +1678,22 @@ request DELETE "$ADMIN_HOST" "/_authz/api/menu-entries/$MENU_NEW_GROUP_ID" "$ADM
 assert_eq "delete emptied group" "$STATUS" "200"
 request DELETE "$ADMIN_HOST" "/_authz/api/menu-entries/$MENU_NEW_GROUP_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "delete missing menu entry 404" "$STATUS" "404"
+
+# ── 文件浏览 API /_authz/api/files ─────────────────────────────
+request GET "$ADMIN_HOST" /_authz/api/files "$ADMIN_COOKIE"
+assert_eq "file listing loads" "$STATUS" "200"
+assert_json "file listing path is root" '.data.path' ""
+assert_json "file listing carries entries" '.data.items | length > 0 | tostring' "true"
+assert_json "file listing hides brotli sidecars" '[.data.items[] | select(.name | endswith(".br"))] | length' "0"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=vendor" "$ADMIN_COOKIE"
+assert_eq "file subdirectory listing" "$STATUS" "200"
+assert_json "file subdirectory path echoed" '.data.path' "vendor"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=..%2F..%2Fetc" "$ADMIN_COOKIE"
+assert_eq "file listing rejects traversal" "$STATUS" "400"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=missing-dir" "$ADMIN_COOKIE"
+assert_eq "file listing missing directory 404" "$STATUS" "404"
+request GET "$ADMIN_HOST" /_authz/api/files
+assert_eq "file listing requires session" "$STATUS" "401"
 
 
 request DELETE "$ADMIN_HOST" /_authz/api/session "$ADMIN_COOKIE" "$CSRF"
@@ -1769,6 +1786,7 @@ docker run -d \
     -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
     -v "$TMP_DIR/redirect-data:/data" \
     -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
+    -v "$REPO_DIR/admin:/files:ro" \
     -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
     -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
     -v "$REPO_DIR/lualib:/usr/local/openresty/site/lualib:ro" \

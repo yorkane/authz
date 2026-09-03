@@ -1,0 +1,3 @@
+# 文件浏览挂载点（容器内 /files）：内容不入库，仅保留目录占位
+files/*
+!files/.gitkeep

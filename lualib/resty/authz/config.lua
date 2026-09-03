@@ -77,6 +77,9 @@ function _M.load()
     c.db_cache_lru_size = math.max(50, tonumber(os.getenv("AUTHZ_DB_CACHE_LRU_SIZE")) or 500)
     c.cache_dict = "authz_cache"
     c.login_limit_dict = "authz_login_limit"
+    -- 文件浏览器根目录；默认容器内 /files（部署时把宿主目录挂载到 /files）。
+    -- 必须与 server.conf 里 /_authz/files/ 的 alias 保持一致。
+    c.files_root = os.getenv("AUTHZ_FILES_ROOT") or "/files"
     c.login_attempts = math.max(1, tonumber(os.getenv("AUTHZ_LOGIN_ATTEMPTS")) or 5)
     c.login_window = math.max(60, tonumber(os.getenv("AUTHZ_LOGIN_WINDOW")) or 1800)
     c.login_fail_delay_ms = math.min(10000, math.max(0,

@@ -7,6 +7,7 @@ local guard = require "resty.authz.api.guard"
 local service = require "resty.authz.api.service"
 local session = require "resty.authz.session"
 local ui = require "resty.authz.ui"
+local files = require "resty.authz.files"
 
 local router = require("klib.router").new("/_authz")
 
@@ -151,6 +152,20 @@ end))
 
 register("GET", "/api/menu-tree", guard.wrap(function(_, _, _, current)
     return { data = service.menu_tree(current) }
+end))
+
+-- ── File browser (read-only listing of the mounted html directory) ─────────
+register("GET", "/api/files", guard.wrap(function(_, env)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    local root = require("resty.authz").config.files_root or files.default_root
+    local listing, err, status = files.list(root, args.path)
+    if not listing then
+        return { error = {
+            code = status == 404 and "not_found" or "request_failed",
+            message = err or "无法读取目录",
+        } }, status or 400
+    end
+    return { data = listing }
 end))
 
 register("POST", "/api/menu-entries", guard.wrap(with_body(function(_, data)

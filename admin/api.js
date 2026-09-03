@@ -95,6 +95,7 @@ window.adminApi = {
   authorization: () => request('/authorization'),
   menuEntries: () => request('/menu-entries'),
   menuTree: () => request('/menu-tree'),
+  files: path => request('/files?path=' + encodeURIComponent(path || '')),
   saveUser,
   saveRemoteUser,
   saveBinding: saveApplication,

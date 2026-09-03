@@ -56,7 +56,7 @@ Admin 菜单应用列表不依赖 `bindings` 表：`/_authz/api/applications` �
 host 网络或其他方式让目标服务位于网关容器的 `127.0.0.1` 网络命名空间内。
 
 左侧菜单由存储的菜单树渲染（迁移 v7 起）：`menu_entries` 表以 `kind` 区分分组(`group`)与条目(`item`)，
-条目通过 `parent_id` 挂到分组下；`builtin` 标记内置页面(`users/authorization/menuEditor/omniscript`)，
+条目通过 `parent_id` 挂到分组下；`builtin` 标记内置页面(`users/authorization/menuEditor/files`)，
 `builtin='local'` 的分组在渲染时自动注入动态发现的本机服务。`/_authz/api/menu-tree` 输出两级树供左侧菜单渲染
 （只含启用项；编辑器通过 `/_authz/api/menu-entries` 读取全量含停用项）。`menu-editor.html` 提供树状编辑：
 新增/编辑分组与条目、上移下移、显隐开关、图标选择与分组归属调整。非空分组不可删除（先移走或删除条目）。

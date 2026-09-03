@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Files</title>
+  <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
+  <link rel="stylesheet" href="./app-page.css?v=5">
+  <link rel="stylesheet" href="./files.css?v=1">
+</head>
+<body>
+  <div id="q-app">
+    <main class="workspace-page files-page">
+      <header class="page-heading">
+        <div>
+          <h1>{{ t.title }}</h1>
+          <p>{{ t.description }}</p>
+        </div>
+        <div class="files-toolbar">
+          <q-input v-model="filter" dense outlined clearable :placeholder="t.search" class="files-search" @update:model-value="focusFirst">
+            <template v-slot:append><q-icon name="mdi-magnify"></q-icon></template>
+          </q-input>
+          <q-btn-toggle v-model="viewMode" dense unelevated no-caps :options="viewOptions" toggle-class="files-toggle-active"></q-btn-toggle>
+          <q-select v-model="sortKey" dense outlined :options="sortOptions" emit-value map-options class="files-sort" :label="t.sortBy"></q-select>
+          <q-btn dense unelevated round :icon="sortDesc ? 'mdi-sort-descending' : 'mdi-sort-ascending'" :title="t.sortOrder" @click="toggleSortOrder"></q-btn>
+          <q-btn dense unelevated round icon="mdi-refresh" :title="t.refresh" @click="load"></q-btn>
+        </div>
+      </header>
+
+      <nav class="files-crumbs">
+        <q-btn v-for="crumb in crumbs" :key="crumb.path" flat dense no-caps :icon="crumb.root ? 'mdi-home-outline' : ''" :label="crumb.label" :class="{ 'crumb-current': crumb.current }" @click="crumb.go"></q-btn>
+        <q-space></q-space>
+        <span class="files-stat">{{ statText }}</span>
+      </nav>
+
+      <q-banner v-if="error" rounded class="error-banner q-mb-md">
+        <template v-slot:avatar><q-icon name="mdi-alert-circle-outline"></q-icon></template>
+        {{ error }}
+        <template v-slot:action><q-btn flat dense no-caps :label="t.retry" @click="load"></q-btn></template>
+      </q-banner>
+      <q-banner v-if="truncated" rounded class="q-mb-md" dense>
+        <template v-slot:avatar><q-icon name="mdi-information-outline"></q-icon></template>
+        {{ t.truncated }}
+      </q-banner>
+
+      <div v-if="loading" class="files-loading"><q-linear-progress indeterminate></q-linear-progress></div>
+
+      <!-- 网格视图 -->
+      <div v-if="viewMode === 'grid'" ref="grid" class="files-grid">
+        <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-card" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
+             @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)" @contextmenu.prevent="download(item)">
+          <div class="files-thumb">
+            <img v-if="kindOf(item) === 'image' && idx &lt; thumbLimit" :src="fileUrl(item)" loading="lazy" alt="" @error="broken[idx] = true" v-show="!broken[idx]">
+            <q-icon v-else :name="iconOf(item)" :color="colorOf(item)" :size="item.type === 'dir' ? '44px' : '38px'"></q-icon>
+          </div>
+          <div class="files-name" :title="item.name">{{ item.name }}</div>
+          <div class="files-meta">{{ item.type === 'dir' ? t.folder : sizeText(item.size) }}</div>
+        </div>
+      </div>
+
+      <!-- 列表 / 详情视图共用行；详情模式右侧附预览面板 -->
+      <div v-else class="files-rows-wrap">
+        <div class="files-rows">
+          <div class="files-row files-row-head">
+            <span class="col-name">{{ t.name }}</span><span class="col-size">{{ t.size }}</span><span class="col-date">{{ t.modified }}</span>
+          </div>
+          <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-row" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
+               @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)">
+            <span class="col-name"><q-icon :name="iconOf(item)" :color="colorOf(item)" size="18px" class="q-mr-sm"></q-icon>{{ item.name }}</span>
+            <span class="col-size">{{ item.type === 'dir' ? '-' : sizeText(item.size) }}</span>
+            <span class="col-date">{{ dateText(item.mtime) }}</span>
+          </div>
+        </div>
+        <aside v-if="viewMode === 'detail' && focused" class="files-detail">
+          <div class="detail-title"><q-icon :name="iconOf(focused)" :color="colorOf(focused)" class="q-mr-sm"></q-icon>{{ focused.name }}</div>
+          <div class="detail-body">
+            <img v-if="kindOf(focused) === 'image'" :src="fileUrl(focused)" alt="" class="detail-media">
+            <video v-else-if="kindOf(focused) === 'video'" :src="fileUrl(focused)" controls preload="none" class="detail-media"></video>
+            <audio v-else-if="kindOf(focused) === 'audio'" :src="fileUrl(focused)" controls class="detail-audio"></audio>
+            <iframe v-else-if="kindOf(focused) === 'html'" :src="fileUrl(focused)" class="detail-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
+            <pre v-else-if="detailText !== null" class="detail-text">{{ detailText }}</pre>
+            <div v-else class="detail-none"><q-icon name="mdi-file-outline" size="52px"></q-icon><div>{{ t.noPreview }}</div></div>
+          </div>
+          <div class="detail-meta">
+            <span>{{ focused.type === 'dir' ? t.folder : sizeText(focused.size) }}</span>
+            <span>{{ dateText(focused.mtime) }}</span>
+            <q-btn flat dense no-caps icon="mdi-open-in-new" :label="t.openInTab" @click="openInTab(focused)"></q-btn>
+            <q-btn v-if="focused.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(focused)"></q-btn>
+          </div>
+        </aside>
+      </div>
+
+      <div v-if="!loading && shown.length === 0" class="files-empty">
+        <q-icon name="mdi-folder-outline" size="54px"></q-icon>
+        <div>{{ filter ? t.emptyFilter : t.empty }}</div>
+      </div>
+
+      <div v-if="!loading && pageCount > 1" class="files-pager">
+        <q-pagination v-model="page" :max="pageCount" :max-pages="7" direction-links boundary-links boundary-numbers></q-pagination>
+        <q-select v-model="pageSize" dense outlined :options="pageSizeOptions" class="files-page-size" :label="t.perPage"></q-select>
+      </div>
+
+      <div class="files-kbd-hint">{{ t.kbdHint }}</div>
+
+      <!-- 预览对话框（网格/列表模式） -->
+      <q-dialog v-model="previewOpen" maximized>
+        <q-card class="files-preview-card">
+          <q-card-section class="row items-center q-pb-none">
+            <div class="text-h6"><q-icon :name="iconOf(previewItem)" :color="colorOf(previewItem)" class="q-mr-sm"></q-icon>{{ previewItem ? previewItem.name : '' }}</div>
+            <q-space></q-space>
+            <q-btn v-if="previewItem" flat dense no-caps icon="mdi-open-in-new" :label="t.openInTab" @click="openInTab(previewItem)"></q-btn>
+            <q-btn v-if="previewItem && previewItem.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(previewItem)"></q-btn>
+            <q-btn flat dense round icon="mdi-close" :aria-label="t.close" @click="previewOpen = false"></q-btn>
+          </q-card-section>
+          <q-card-section class="files-preview-body">
+            <img v-if="previewKind === 'image'" :src="fileUrl(previewItem)" alt="" class="preview-image">
+            <video v-else-if="previewKind === 'video'" :src="fileUrl(previewItem)" controls autoplay preload="metadata" class="preview-media"></video>
+            <div v-else-if="previewKind === 'audio'" class="preview-audio-wrap"><q-icon name="mdi-music-circle-outline" size="84px"></q-icon><audio :src="fileUrl(previewItem)" controls autoplay class="preview-audio"></audio></div>
+            <iframe v-else-if="previewKind === 'html'" :src="fileUrl(previewItem)" class="preview-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
+            <div v-else-if="previewKind === 'text'" class="preview-text-wrap"><pre v-if="previewText !== null">{{ previewText }}</pre><q-spinner v-else size="34px"></q-spinner></div>
+            <div v-else class="preview-none">
+              <q-icon name="mdi-file-outline" size="64px"></q-icon>
+              <div class="q-mt-md">{{ t.noPreview }}</div>
+              <q-btn class="q-mt-md" unelevated no-caps icon="mdi-download" :label="t.download" @click="download(previewItem)"></q-btn>
+            </div>
+          </q-card-section>
+        </q-card>
+      </q-dialog>
+    </main>
+  </div>
+
+  <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./i18n.js?v=23"></script>
+  <script src="./api.js?v=11"></script>
+  <script>
+    const { createApp, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } = Vue
+
+    const IMAGES = ['jpg','jpeg','png','gif','webp','svg','bmp','ico','avif']
+    const VIDEOS = ['mp4','webm','mov','m4v','mkv','ogv','avi']
+    const AUDIOS = ['mp3','wav','ogg','oga','m4a','flac','aac','opus']
+    const TEXTS = ['txt','md','json','js','mjs','css','xml','log','csv','tsv','yml','yaml','ini','conf','lua','py','sh','sql']
+    const MAX_TEXT_PREVIEW = 512 * 1024
+
+    function extOf (name) {
+      const base = name.split('/').pop()
+      const dot = base.lastIndexOf('.')
+      return dot >= 0 ? base.slice(dot + 1).toLowerCase() : ''
+    }
+
+    const app = createApp({
+      setup () {
+        const localeRef = ref(window.adminI18n.getLocale())
+        const t = computed(() => window.adminI18n.messages[localeRef.value].files)
+
+        const loading = ref(false)
+        const error = ref('')
+        const path = ref(localStorage.getItem('files_path') || '')
+        const items = ref([])
+        const truncated = ref(false)
+        const filter = ref('')
+        const focusIndex = ref(0)
+        const broken = reactive({})
+
+        // 触屏设备没有可靠的双击语义：单击直接“打开/进入”，桌面仍是单击选中、双击打开。
+        const isTouch = window.matchMedia && window.matchMedia('(pointer: coarse)').matches
+
+        const page = ref(1)
+        const pageSize = ref(Number(localStorage.getItem('files_page_size')) || 100)
+        const pageSizeOptions = [50, 100, 200, 500]
+
+        const viewMode = ref(localStorage.getItem('files_view') || 'grid')
+        const sortKey = ref(localStorage.getItem('files_sort') || 'name')
+        const sortDesc = ref(localStorage.getItem('files_sort_desc') === '1')
+        const viewOptions = computed(() => [
+          { value: 'grid', icon: 'mdi-view-grid-outline', label: '' },
+          { value: 'list', icon: 'mdi-view-list-outline', label: '' },
+          { value: 'detail', icon: 'mdi-page-layout-sidebar-right', label: '' }
+        ])
+        const sortOptions = computed(() => [
+          { value: 'name', label: t.value.sortName },
+          { value: 'size', label: t.value.sortSize },
+          { value: 'time', label: t.value.sortTime }
+        ])
+
+        const previewOpen = ref(false)
+        const previewItem = ref(null)
+        const previewText = ref(null)
+        const detailText = ref(null)
+        const grid = ref(null)
+        // 缩略图限量：大目录切目录时只加载前 N 张图片原图，其余用图标占位，
+        // 避免浏览器一次性拉取大量原图拖慢切换。
+        const thumbLimit = 24
+
+        function kindOf (item) {
+          if (!item) return 'other'
+          if (item.type === 'dir') return 'dir'
+          const ext = extOf(item.name)
+          if (IMAGES.includes(ext)) return 'image'
+          if (VIDEOS.includes(ext)) return 'video'
+          if (AUDIOS.includes(ext)) return 'audio'
+          if (ext === 'html' || ext === 'htm') return 'html'
+          if (TEXTS.includes(ext)) return 'text'
+          return 'other'
+        }
+
+        function iconOf (item) {
+          const kind = kindOf(item)
+          return { dir: 'mdi-folder-outline', image: 'mdi-file-image-outline', video: 'mdi-file-video-outline',
+                   audio: 'mdi-file-music-outline', html: 'mdi-language-html5', text: 'mdi-file-document-outline',
+                   other: 'mdi-file-outline' }[kind]
+        }
+
+        // 按文件类别给图标着色（贴近文件管理器的颜色习惯）。
+        const KIND_COLORS = { dir: 'amber-8', image: 'deep-orange-9', video: 'blue-6', audio: 'teal-6',
+                              html: 'orange-7', text: 'green-6', other: 'grey-6' }
+        function colorOf (item) {
+          const kind = kindOf(item)
+          if (kind === 'text') {
+            // 文本类细分：CSS 绿色、JSON 黄色、Markdown/纯文本保持浅绿。
+            const ext = extOf(item.name)
+            if (ext === 'json') return 'yellow-8'
+            if (ext === 'css') return 'green-6'
+          }
+          return KIND_COLORS[kind] || 'grey-6'
+        }
+
+        function fileUrl (item) {
+          if (!item) return ''
+          const segments = (path.value === '' ? item.name : path.value + '/' + item.name).split('/')
+          return '/_authz/files/' + segments.map(s => encodeURIComponent(s)).join('/')
+        }
+
+        const previewKind = computed(() => previewItem.value ? kindOf(previewItem.value) : '')
+        const focused = computed(() => shown.value[focusIndex.value] || null)
+
+        function sizeText (bytes) {
+          if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GiB'
+          if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MiB'
+          if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KiB'
+          return bytes + ' B'
+        }
+
+        function dateText (ts) {
+          if (!ts) return '-'
+          const d = new Date(ts * 1000)
+          const p = n => String(n).padStart(2, '0')
+          return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
+        }
+
+        const filtered = computed(() => {
+          const needle = filter.value.trim().toLowerCase()
+          let list = items.value
+          if (needle) list = list.filter(item => item.name.toLowerCase().includes(needle))
+          const key = sortKey.value
+          const dir = sortDesc.value ? -1 : 1
+          return [...list].sort((a, b) => {
+            if ((a.type === 'dir') !== (b.type === 'dir')) return a.type === 'dir' ? -1 : 1
+            let cmp = 0
+            if (key === 'size') cmp = (a.size || 0) - (b.size || 0)
+            else if (key === 'time') cmp = (a.mtime || 0) - (b.mtime || 0)
+            if (cmp === 0) cmp = a.name.localeCompare(b.name, undefined, { numeric: true })
+            return cmp * (key === 'name' ? dir : dir)
+          })
+        })
+
+        const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize.value)))
+        const shown = computed(() => {
+          const start = (page.value - 1) * pageSize.value
+          return filtered.value.slice(start, start + pageSize.value)
+        })
+
+        const statText = computed(() => {
+          const src = filtered.value
+          const dirs = src.filter(i => i.type === 'dir').length
+          const bytes = src.reduce((acc, i) => acc + (i.size || 0), 0)
+          let text = dirs + ' ' + t.value.foldersUnit + ' · ' + (src.length - dirs) + ' ' + t.value.filesUnit + ' · ' + sizeText(bytes)
+          if (pageCount.value > 1) text += ' · ' + t.value.pageOf.replace('%s', page.value).replace('%n', pageCount.value)
+          return text
+        })
+
+        const crumbs = computed(() => {
+          const parts = path.value === '' ? [] : path.value.split('/')
+          const list = [{ path: '', label: t.value.root, root: true, current: parts.length === 0, go: () => navigate('') }]
+          let acc = ''
+          parts.forEach((part, i) => {
+            acc = acc === '' ? part : acc + '/' + part
+            list.push({ path: acc, label: part, root: false, current: i === parts.length - 1, go: () => navigate(acc) })
+          })
+          return list
+        })
+
+        async function load () {
+          loading.value = true
+          error.value = ''
+          page.value = 1
+          try {
+            const data = await window.adminApi.files(path.value)
+            items.value = data.items || []
+            truncated.value = !!data.truncated
+            focusFirst()
+          } catch (err) {
+            error.value = err.message || String(err)
+            items.value = []
+          } finally {
+            loading.value = false
+          }
+        }
+
+        function navigate (next) {
+          path.value = next
+          localStorage.setItem('files_path', next)
+          filter.value = ''
+          page.value = 1
+          // 先清空旧目录条目：否则加载期间残留的媒体缩略图会用新 path
+          // 重算 URL，产生一批 404 请求。
+          items.value = []
+          load()
+        }
+
+        function onItemClick (item, idx) {
+          select(idx)
+          if (isTouch) open(item)
+        }
+
+        function onItemDouble (item) {
+          if (!isTouch) open(item)
+        }
+
+        function select (idx) {
+          focusIndex.value = idx
+          if (viewMode.value === 'detail') loadDetailText(focused.value)
+        }
+
+        function focusFirst () {
+          focusIndex.value = 0
+          scrollFocusIntoView()
+        }
+
+        function moveFocus (delta) {
+          const count = shown.value.length
+          if (count === 0) return
+          const next = focusIndex.value + delta
+          if (next < 0) {
+            // 越过页首：翻到上一页并聚焦其末尾。
+            if (page.value <= 1) return
+            page.value -= 1
+            nextTick(() => {
+              focusIndex.value = Math.max(0, shown.value.length - 1)
+              scrollFocusIntoView()
+              if (viewMode.value === 'detail') loadDetailText(focused.value)
+            })
+            return
+          }
+          if (next >= count) {
+            if (page.value >= pageCount.value) return
+            page.value += 1
+            nextTick(() => {
+              focusIndex.value = 0
+              scrollFocusIntoView()
+              if (viewMode.value === 'detail') loadDetailText(focused.value)
+            })
+            return
+          }
+          focusIndex.value = next
+          scrollFocusIntoView()
+          if (viewMode.value === 'detail') loadDetailText(focused.value)
+        }
+
+        function gridColumns () {
+          if (!grid.value) return 1
+          const style = window.getComputedStyle(grid.value)
+          return Math.max(1, style.gridTemplateColumns.split(' ').length)
+        }
+
+        function scrollFocusIntoView () {
+          nextTick(() => {
+            const el = document.getElementById('fx-' + focusIndex.value)
+            if (el) el.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+          })
+        }
+
+        async function open (item) {
+          if (!item) return
+          if (item.type === 'dir') return navigate(path.value === '' ? item.name : path.value + '/' + item.name)
+          const kind = kindOf(item)
+          if (kind === 'text') {
+            previewText.value = null
+            previewItem.value = item
+            previewOpen.value = true
+            loadText(item).then(text => { previewText.value = text }).catch(() => { previewText.value = t.value.textTooLarge })
+          } else {
+            previewItem.value = item
+            previewOpen.value = true
+          }
+        }
+
+        async function loadText (item) {
+          if ((item.size || 0) > MAX_TEXT_PREVIEW) return t.value.textTooLarge
+          const response = await fetch(fileUrl(item), { credentials: 'same-origin' })
+          if (!response.ok) throw new Error('HTTP ' + response.status)
+          return await response.text()
+        }
+
+        function loadDetailText (item) {
+          detailText.value = null
+          if (!item || kindOf(item) !== 'text') return
+          loadText(item).then(text => { detailText.value = text }).catch(() => { detailText.value = t.value.textTooLarge })
+        }
+
+        function openInTab (item) {
+          if (!item) return
+          window.open(fileUrl(item), '_blank', 'noopener')
+        }
+
+        function download (item) {
+          if (!item || item.type === 'dir') return
+          const anchor = document.createElement('a')
+          anchor.href = fileUrl(item)
+          anchor.download = item.name
+          anchor.click()
+        }
+
+        function toggleSortOrder () {
+          sortDesc.value = !sortDesc.value
+        }
+
+        function handleKeydown (event) {
+          const target = event.target
+          if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+            // 搜索框内的 Enter 视为“打开当前选中项”，其余按键保持正常编辑。
+            if (target.tagName === 'INPUT' && event.key === 'Enter' && !previewOpen.value) {
+              target.blur()
+              open(focused.value)
+              event.preventDefault()
+            }
+            return
+          }
+          if (event.ctrlKey || event.metaKey || event.altKey) return
+          if (previewOpen.value) {
+            if (event.key === 'Escape') previewOpen.value = false
+            return
+          }
+          const cols = viewMode.value === 'grid' ? gridColumns() : 1
+          switch (event.key) {
+            case 'ArrowRight': moveFocus(1); break
+            case 'ArrowLeft': moveFocus(-1); break
+            case 'ArrowDown': moveFocus(cols); break
+            case 'ArrowUp': moveFocus(-cols); break
+            case 'Home': focusIndex.value = 0; scrollFocusIntoView(); break
+            case 'End': focusIndex.value = shown.value.length - 1; scrollFocusIntoView(); break
+            case 'PageDown': if (page.value < pageCount.value) page.value += 1; break
+            case 'PageUp': if (page.value > 1) page.value -= 1; break
+            case 'Enter': open(focused.value); break
+            case 'Backspace':
+              if (path.value !== '') navigate(path.value.split('/').slice(0, -1).join('/'))
+              break
+            case 'g': viewMode.value = 'grid'; break
+            case 'l': viewMode.value = 'list'; break
+            case 'd': viewMode.value = 'detail'; break
+            case 'f': {
+              const input = document.querySelector('.files-search input')
+              if (input) input.focus()
+              break
+            }
+            default: return
+          }
+          event.preventDefault()
+        }
+
+        watch(viewMode, value => { localStorage.setItem('files_view', value); scrollFocusIntoView() })
+        watch(sortKey, value => localStorage.setItem('files_sort', value))
+        watch(sortDesc, value => localStorage.setItem('files_sort_desc', value ? '1' : '0'))
+        watch(pageSize, value => { localStorage.setItem('files_page_size', String(value)); page.value = 1 })
+        watch(page, value => {
+          if (value === 0) { page.value = 1; return }
+          focusIndex.value = 0
+          scrollFocusIntoView()
+          if (viewMode.value === 'detail') loadDetailText(focused.value)
+        })
+        // 过滤/排序变化后页码与焦点可能失效，收敛后刷新详情预览。
+        watch(filtered, () => {
+          if (page.value > pageCount.value) page.value = pageCount.value
+          if (focusIndex.value >= shown.value.length) focusIndex.value = Math.max(0, shown.value.length - 1)
+          if (viewMode.value === 'detail') loadDetailText(focused.value)
+          scrollFocusIntoView()
+        })
+
+        function applyLocale (nextLocale) {
+          localeRef.value = nextLocale
+          document.documentElement.lang = nextLocale
+          document.title = t.value.title
+          Quasar.Lang.set(nextLocale === 'zh-CN' ? Quasar.Lang.zhCN : Quasar.Lang.enUS)
+        }
+
+        let unsubscribeLocale
+        onMounted(() => {
+          applyLocale(localeRef.value)
+          unsubscribeLocale = window.adminI18n.subscribe(applyLocale)
+          window.addEventListener('keydown', handleKeydown)
+          load()
+        })
+        onBeforeUnmount(() => {
+          unsubscribeLocale?.()
+          window.removeEventListener('keydown', handleKeydown)
+        })
+
+        return { broken, colorOf, crumbs, detailText, download, dateText, error, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, kindOf, loading, load, moveFocus, navigate, onItemDouble, onItemClick, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, previewItem, previewKind, previewOpen, previewText, select, shown, sizeText, sortDesc, sortKey, sortOptions, statText, t, toggleSortOrder, truncated, viewMode, viewOptions }
+      }
+    })
+
+    app.use(Quasar, { config: { dark: true } })
+    Quasar.Dark.set(true)
+    Quasar.Lang.set(window.adminI18n.getLocale() === 'en-US' ? Quasar.Lang.enUS : Quasar.Lang.zhCN)
+    Quasar.IconSet.set(Quasar.IconSet.mdiV7)
+    app.mount('#q-app')
+  </script>
+</body>
+</html>

@@ -114,8 +114,12 @@ services:
       AUTHZ_OAUTH_READ_TIMEOUT_MS: ${AUTHZ_OAUTH_READ_TIMEOUT_MS:-15000}
       AUTHZ_DNS_RESOLVER: ${AUTHZ_DNS_RESOLVER:-}
       OPENRESTY_TEMPLATE_DIR: /etc/openresty/templates
+      # 文件浏览应用只读内容根（默认 /files，与 server.conf 的 alias 保持一致）
+      AUTHZ_FILES_ROOT: ${AUTHZ_FILES_ROOT:-/files}
     volumes:
       - ${DATA_DIR:-./data}:/data
       - ${ADMIN_UI_DIR:-./admin}:/usr/local/openresty/nginx/html/admin:ro
       - ${LUALIB_DIR:-./lualib}:/usr/local/openresty/site/lualib:ro
       - ${NGINX_TEMPLATE_DIR:-./conf}:/etc/openresty/templates:ro
+      # 文件浏览内容目录：宿主 FILES_DIR -> 容器 /files (只读)
+      - ${FILES_DIR:-./files}:/files:ro

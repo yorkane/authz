@@ -45,13 +45,17 @@
 - “高级代理配置”还支持多行 Header 覆盖：每行 `Header-Name: value`，按行覆盖发往上游的透传请求头（如 `Authorization`、自定义业务头）；Host、Cookie、X-Authz-* 等网关控制头不可覆盖。
 - “模拟本机访问”默认把 `Host`/`Origin` 改为目标 HTTP 地址，并将 `X-Real-IP`、`X-Forwarded-For` 设置为 `127.0.0.1`；也可填写网关的局域网 IP。该选项只模拟 HTTP 请求头，不能改变真实 TCP 来源地址。
 
-### 文件浏览（fancyindex）
+### 文件浏览（Web 文件管理器）
 
-网关内置只读文件浏览入口 `/files/`，基于 ngx-fancyindex 渲染目录索引：
+管理壳内置“文件浏览”应用（左侧菜单 → 系统应用 → 文件浏览，即 `/_authz/apps/` 下的 `files.html`）：
 
-- 根目录即挂载进容器的 html 目录（`ADMIN_UI_DIR` → `/usr/local/openresty/nginx/html/admin/`），可浏览并直接下载其中文件；
-- 与其他入口共用同一套服务端会话：未登录访问 `/files/` 会 302 到 `/_authz/login`；
-- 只读；不提供上传/删除（无 WebDAV）；目录列表按文件名/大小/时间可排序。
+- 内容根为容器内 `/files` 目录（默认空目录），部署时把宿主目录挂载进去：`-v /data/shared-files:/files`（Compose：`FILES_DIR`）；`AUTHZ_FILES_ROOT` 可改到镜像内其他目录，API 根与静态 alias 必须保持一致；
+- 三种视图：缩略图网格 / 列表 / 详情（右侧内联预览面板），支持按名称、大小、修改时间排序与升降序切换，条目多时自动分页；
+- 预览：图片缩略图与放大、视频（点击后弹窗播放，走 nginx 原生 Range 分段）、音频、HTML 页面（经 `/_authz/files/` 静态入口并附加 `Content-Security-Policy: sandbox` 隔离渲染）、常见文本/JSON 内联预览；
+- 图标按文件类型着色：目录琥珀、HTML 橙、文本/脚本绿、JSON 黄、图片暗红、视频蓝、音频青；
+- 键盘操作：↑↓←→ 移动焦点、Enter 进入目录或打开预览、Backspace 返回上级、PageUp/PageDown 翻页、g/l/d 切换视图、f 聚焦搜索、Esc 关闭预览；触屏设备单击即打开；
+- 目录列表由 `GET /_authz/api/files?path=...` 提供（LuaFileSystem 实现，路径已做穿越防护、隐藏文件与 `.br` sidecar 过滤），文件字节走会话保护的 `/_authz/files/` 静态入口（`aio threads` + `open_file_cache`）；
+- 只读：不提供上传/删除；未登录访问 `/_authz/files/*` 与 API 均要求登录。
 
 ### 管理界面
 

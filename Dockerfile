@@ -363,6 +363,22 @@ RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
     && ln -sf /dev/stdout /usr/local/openresty/nginx/logs/access.log \
     && ln -sf /dev/stderr /usr/local/openresty/nginx/logs/error.log
 
+# ── lfs-builder ─────────────────────────────────────────────────────────
+# LuaFileSystem powers the web file browser directory listing (io.popen is
+# unavailable in the OpenResty request context). The tiny C module is built
+# against the exact shared LuaJIT runtime produced by openresty-builder so
+# it loads through the runtime LUA_CPATH.
+FROM ${RESTY_IMAGE_BASE}:${RESTY_IMAGE_TAG} AS lfs-builder
+ARG LUA_FILESYSTEM_VERSION="v1_9_0"
+COPY --from=openresty-builder /usr/local/openresty/luajit /opt/luajit
+RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
+    && apk add --no-cache curl gcc musl-dev tar \
+    && curl -fL --retry 3 \
+        "https://github.com/lunarmodules/luafilesystem/archive/refs/tags/${LUA_FILESYSTEM_VERSION}.tar.gz" \
+        -o /tmp/lfs.tar.gz \
+    && cd /tmp && tar xzf lfs.tar.gz && cd luafilesystem-* \
+    && cc -O2 -fPIC -shared -I/opt/luajit/include/luajit-2.1 src/*.c -o /opt/lfs.so
+
 # --------------------------------------------------------------------------
 # Runtime stage: keep only OpenResty, runtime libraries and application files.
 # --------------------------------------------------------------------------
@@ -386,7 +402,7 @@ RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
         tzdata \
         zlib \
         ${RESTY_ADD_PACKAGE_RUNDEPS} \
-    && mkdir -p /var/run/openresty
+    && mkdir -p /var/run/openresty /files
 
 # --------------------------------------------------------------------------
 # Runtime environment
@@ -403,6 +419,8 @@ COPY --from=lua-resty-http-source /out/ /usr/local/openresty/lualib/resty/
 # 整体复制到 site/lualib，和开发时只读挂载目录保持完全一致；同时不遮蔽
 # OpenResty 自带的 /usr/local/openresty/lualib 模块。
 COPY lualib/ /usr/local/openresty/site/lualib/
+# File browser support module (built in the lfs-builder stage).
+COPY --from=lfs-builder /opt/lfs.so /usr/local/openresty/site/lualib/lfs.so
 # Container maintenance command for recovering the built-in admin account.
 COPY scripts/admin_password_reset.lua /usr/local/openresty/admin_password_reset.lua
 COPY scripts/admin_password_reset /usr/local/bin/admin_password_reset

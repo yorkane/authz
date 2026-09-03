@@ -250,6 +250,35 @@ _M.list = {
             must(db.exec("ALTER TABLE bindings ADD COLUMN header_overrides TEXT NOT NULL DEFAULT ''"))
         end,
     },
+    {
+        version = 10,
+        name = "menu_entry_files_browser",
+        up = function(db)
+            -- 内置“文件浏览”入口（前端 builtin=files 映射到 files.html）。
+            local rows = db.query("SELECT id FROM menu_entries WHERE builtin = 'files'")
+            if rows and rows[1] then return end
+            local groups = db.query([[SELECT id FROM menu_entries
+                WHERE kind = 'group' AND label = '系统应用' ORDER BY id LIMIT 1]])
+            local sys_id = groups and groups[1] and groups[1].id
+            if not sys_id then return end
+            local now = os.time()
+            must(db.exec([[INSERT INTO menu_entries(
+                kind, parent_id, label, url, icon, builtin, admin_only, sort_order, enabled, created_at, updated_at)
+                VALUES('item', ?, '文件浏览', '', 'mdi-folder-image-outline', 'files', 0, 15, 1, ?, ?)]],
+                sys_id, now, now))
+        end,
+    },
+    {
+        version = 11,
+        name = "remove_omniscript_fix_files_icon",
+        up = function(db)
+            -- 移除 OmniScript 内置菜单入口（应用本体已随镜像删除）。
+            must(db.exec([[DELETE FROM menu_entries WHERE builtin = 'omniscript']]))
+            -- mdi-folder-image-outline 不在镜像打包的 MDI v7 图标集内，换成存在的图标。
+            must(db.exec([[UPDATE menu_entries SET icon = 'mdi-file-tree-outline'
+                WHERE builtin = 'files' AND icon = 'mdi-folder-image-outline']]))
+        end,
+    },
 }
 
 function _M.run(db)

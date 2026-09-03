@@ -86,23 +86,35 @@ location ^~ /_authz/ {
     }
 }
 
-# ── 文件浏览模块（fancyindex 目录索引）───────────────────────────
-# 挂载到容器的 html 目录（ADMIN_UI_DIR → /usr/local/openresty/nginx/html/admin）
-# 以 /files/ 作为只读浏览入口；fancyindex 渲染目录列表，支持直接下载。
-# index 指向不存在的文件以强制回落到 fancyindex 列表（admin 首页是 SSI 页，
-# 统一走 /_authz/apps/ 会话入口）。未登录时与其他入口一致跳转登录页。
-location = /files {
-    return 301 /files/;
+# ── 文件浏览模块 ────────────────────────────────────────────────
+# 目录列表由 Web UI（/_authz/apps/ 内置应用 files）通过 /_authz/api/files
+# 获取；/_authz/files/ 只负责按路径吐出文件字节（预览与下载同源复用）。
+# 内容根是容器内 /files 目录（默认空，部署时用 -v <宿主目录>:/files 挂载；
+# 必须与 AUTHZ_FILES_ROOT 保持一致）。路径挂在 /_authz/ 命名空间下，
+# 避免与业务代理的 /files 前缀冲突；最长前缀匹配优先于 ^~ /_authz/。
+#
+# CSP sandbox：被浏览的 HTML/资源在独立源中渲染，脚本可运行但不携带
+# 网关会话 Cookie，避免被浏览的页面访问 /_authz/api/*。
+location = /_authz/files {
+    return 301 /_authz/files/;
 }
 
-location /files/ {
-    alias /usr/local/openresty/nginx/html/admin/;
-    index .fancyindex-forbidden;
-    fancyindex on;
-    fancyindex_exact_size off;
-    fancyindex_time_format "%Y-%m-%d %H:%M";
-    fancyindex_header "";
-    fancyindex_footer "";
+location = /_authz/files/ {
+    return 302 /_authz/apps/;
+}
+
+location ^~ /_authz/files/ {
+    alias /files/;
+    # 大文件（视频/镜像）用线程池异步读，慢客户端不阻塞 worker。
+    aio threads;
+    # 缓存打开的文件句柄与 stat 结果：目录浏览和缩略图会反复命中同一批文件。
+    open_file_cache max=2000 inactive=30s;
+    open_file_cache_valid 60s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors on;
+    add_header Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-modals" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    expires 1h;
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)

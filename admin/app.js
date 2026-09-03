@@ -4,8 +4,8 @@ const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref, watch } 
 const builtInApps = {
   users: 'users.html?v=7',
   authorization: 'authorization.html?v=15',
-  omniscript: 'omniscript.html?v=4',
-  menuEditor: 'menu-editor.html?v=10'
+  menuEditor: 'menu-editor.html?v=10',
+  files: 'files.html?v=4'
 }
 
 function isNavigable (app) {
@@ -189,4 +189,3 @@ app.use(Quasar)
 Quasar.Lang.set(window.adminI18n.getLocale() === 'en-US' ? Quasar.Lang.enUS : Quasar.Lang.zhCN)
 Quasar.IconSet.set(Quasar.IconSet.mdiV7)
 app.mount('#q-app')
-
