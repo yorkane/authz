@@ -80,6 +80,13 @@ function _M.load()
     -- 文件浏览器根目录；默认容器内 /files（部署时把宿主目录挂载到 /files）。
     -- 必须与 server.conf 里 /_authz/files/ 的 alias 保持一致。
     c.files_root = os.getenv("AUTHZ_FILES_ROOT") or "/files"
+    -- Nginx 配置编辑页（/_authz/api/nginx-conf*）使用的运行时路径。
+    -- conf 目录存放渲染后的 nginx.conf/server.conf 与三个用户 include；
+    -- template 目录是启动时 include 的来源（compose 里只读挂载）。
+    c.nginx_conf_dir = os.getenv("AUTHZ_NGINX_CONF_DIR") or "/usr/local/openresty/nginx/conf"
+    c.nginx_prefix = os.getenv("AUTHZ_NGINX_PREFIX") or "/usr/local/openresty/nginx"
+    c.nginx_bin = os.getenv("AUTHZ_NGINX_BIN") or "/usr/local/openresty/bin/openresty"
+    c.nginx_template_dir = os.getenv("OPENRESTY_TEMPLATE_DIR") or ""
     c.login_attempts = math.max(1, tonumber(os.getenv("AUTHZ_LOGIN_ATTEMPTS")) or 5)
     c.login_window = math.max(60, tonumber(os.getenv("AUTHZ_LOGIN_WINDOW")) or 1800)
     c.login_fail_delay_ms = math.min(10000, math.max(0,

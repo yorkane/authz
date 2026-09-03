@@ -279,6 +279,24 @@ _M.list = {
                 WHERE builtin = 'files' AND icon = 'mdi-folder-image-outline']]))
         end,
     },
+    {
+        version = 12,
+        name = "menu_entry_nginx_conf",
+        up = function(db)
+            -- 内置“Nginx配置(危险)”入口（前端 builtin=nginxConf 映射到 nginx_conf.html）。
+            local rows = db.query("SELECT id FROM menu_entries WHERE builtin = 'nginxConf'")
+            if rows and rows[1] then return end
+            local groups = db.query([[SELECT id FROM menu_entries
+                WHERE kind = 'group' AND label = '系统应用' ORDER BY id LIMIT 1]])
+            local sys_id = groups and groups[1] and groups[1].id
+            if not sys_id then return end
+            local now = os.time()
+            must(db.exec([[INSERT INTO menu_entries(
+                kind, parent_id, label, url, icon, builtin, admin_only, sort_order, enabled, created_at, updated_at)
+                VALUES('item', ?, 'Nginx配置(危险)', '', 'mdi-file-cog-outline', 'nginxConf', 1, 16, 1, ?, ?)]],
+                sys_id, now, now))
+        end,
+    },
 }
 
 function _M.run(db)

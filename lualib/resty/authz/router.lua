@@ -8,6 +8,7 @@ local service = require "resty.authz.api.service"
 local session = require "resty.authz.session"
 local ui = require "resty.authz.ui"
 local files = require "resty.authz.files"
+local nginxconf = require "resty.authz.nginxconf"
 
 local router = require("klib.router").new("/_authz")
 
@@ -170,6 +171,29 @@ end))
 
 register("POST", "/api/menu-entries", guard.wrap(with_body(function(_, data)
     return service.create_menu_entry(data)
+end), { admin = true, csrf = true }))
+
+-- ── Nginx include editor (dangerous: admin-only, validate-then-save) ───────
+register("GET", "/api/nginx-conf", guard.wrap(function()
+    return { data = nginxconf.read_all() }
+end, { admin = true }))
+
+register("POST", "/api/nginx-conf/validate", guard.wrap(with_body(function(_, data)
+    local result, err, status = nginxconf.validate(data.name, data.content)
+    if not result then return nil, err, status or 400 end
+    return result
+end), { admin = true, csrf = true }))
+
+register("PUT", "/api/nginx-conf", guard.wrap(with_body(function(_, data)
+    local saved, err, status = nginxconf.save(data.name, data.content)
+    if not saved then return nil, err, status or 400 end
+    return saved
+end), { admin = true, csrf = true }))
+
+register("POST", "/api/nginx-conf/reload", guard.wrap(with_body(function()
+    local reloaded, err, status = nginxconf.reload()
+    if not reloaded then return nil, err, status or 500 end
+    return reloaded
 end), { admin = true, csrf = true }))
 
 -- /reorder must be registered before /:id so it is not matched as an id.

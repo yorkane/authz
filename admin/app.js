@@ -5,7 +5,8 @@ const builtInApps = {
   users: 'users.html?v=7',
   authorization: 'authorization.html?v=15',
   menuEditor: 'menu-editor.html?v=10',
-  files: 'files.html?v=4'
+  files: 'files.html?v=4',
+  nginxConf: 'nginx_conf.html?v=1'
 }
 
 function isNavigable (app) {

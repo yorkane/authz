@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Nginx Conf</title>
+  <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
+  <link rel="stylesheet" href="./app-page.css?v=5">
+  <link rel="stylesheet" href="./nginx-conf.css?v=1">
+</head>
+<body>
+  <div id="q-app">
+    <main class="workspace-page nginxconf-page" v-if="ready">
+      <header class="page-heading">
+        <div>
+          <h1>{{ t.title }}</h1>
+          <p>{{ t.description }}</p>
+        </div>
+        <div class="nginxconf-actions">
+          <q-btn dense outline no-caps icon="mdi-refresh" :label="t.reloadFiles" :loading="loading" @click="load"></q-btn>
+          <q-btn dense unelevated no-caps color="negative" icon="mdi-sync" :label="busy.reload ? t.reloading : t.reload"
+                 :loading="busy.reload" :disable="busy.reload" @click="confirmReload"></q-btn>
+        </div>
+      </header>
+
+      <q-banner dense rounded class="q-mb-md" style="border:1px solid rgba(240,107,130,.3);background:rgba(240,107,130,.08);color:#ffb4c0">
+        <template v-slot:avatar><q-icon name="mdi-alert-octagon-outline"></q-icon></template>
+        {{ t.danger }}
+      </q-banner>
+
+      <div class="nginxconf-meta">
+        <span class="meta-item">{{ t.confDir }}:</span>
+        <code class="meta-path">{{ meta.conf_dir }}</code>
+        <template v-if="meta.template_dir && meta.template_dir !== meta.conf_dir">
+          <span class="meta-item">· {{ t.templateDir }}:</span>
+          <code class="meta-path">{{ meta.template_dir }}</code>
+        </template>
+        <q-space></q-space>
+        <q-badge v-if="meta.persistent" color="teal-8" outline>{{ t.persistent }}</q-badge>
+        <q-badge v-else color="orange-9" outline>{{ t.ephemeral }}</q-badge>
+      </div>
+
+      <q-banner v-if="error" rounded class="error-banner q-mb-md">
+        <template v-slot:avatar><q-icon name="mdi-alert-circle-outline"></q-icon></template>
+        {{ error }}
+        <template v-slot:action><q-btn flat dense no-caps :label="t.retry" @click="load"></q-btn></template>
+      </q-banner>
+
+      <q-tabs v-model="active" dense align="left" class="text-grey" active-color="white" indicator-color="purple-6" narrow-indicator>
+        <q-tab v-for="file in files" :key="file.name" :name="file.name">
+          <div class="row items-center no-wrap">
+            <span>{{ file.name }}</span>
+            <q-icon v-if="isDirty(file)" name="circle" size="8px" color="orange-6" class="q-ml-xs"></q-icon>
+          </div>
+        </q-tab>
+      </q-tabs>
+      <q-separator></q-separator>
+
+      <div v-if="current" class="q-mt-md">
+        <p class="nginxconf-hint">
+          <q-icon name="mdi-information-outline" size="16px"></q-icon>
+          {{ hintFor(current) }} · {{ scopeOf(current) }} · {{ t.charLimit }}
+          <template v-if="!current.exists"> · <span class="text-orange-6">{{ t.emptyFile }}</span></template>
+          <template v-if="current.truncated"> · <span class="text-orange-6">{{ t.truncated }}</span></template>
+        </p>
+
+        <textarea class="nginxconf-editor" spellcheck="false" v-model="current.draft" @keydown.tab.prevent="indent"
+                  :placeholder="t.emptyFile"></textarea>
+
+        <div class="nginxconf-actions">
+          <q-btn dense unelevated no-caps color="primary" icon="mdi-test-tube" :loading="busy.validate" :disable="busy.saving || busy.validate"
+                 :label="busy.validate ? t.validating : t.validate" @click="validate"></q-btn>
+          <q-btn dense unelevated no-caps icon="mdi-content-save" color="positive" :loading="busy.saving" :disable="busy.saving || busy.validate"
+                 :label="busy.saving ? t.saving : t.save" @click="confirmSave"></q-btn>
+          <span class="nginxconf-state" :class="isDirty(current) ? 'dirty' : 'clean'">
+            <q-icon :name="isDirty(current) ? 'mdi-pencil-outline' : 'mdi-check-circle-outline'" size="15px"></q-icon>
+            {{ isDirty(current) ? t.modified : t.saved }}
+          </span>
+        </div>
+
+        <div v-if="lastResult" class="q-mt-md">
+          <p class="nginxconf-hint">
+            <q-icon :name="lastResult.ok ? 'mdi-check-circle' : 'mdi-close-circle'" size="16px"
+                    :color="lastResult.ok ? 'positive' : 'negative'"></q-icon>
+            {{ lastResult.title }}
+          </p>
+          <pre class="nginxconf-output" :class="lastResult.ok ? 'ok' : 'fail'">{{ lastResult.output }}</pre>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./api.js?v=12"></script>
+  <script src="./i18n.js?v=24"></script>
+  <script>
+    const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
+
+    const app = createApp({
+      setup () {
+        const locale = ref(window.adminI18n.getLocale())
+        const t = computed(() => window.adminI18n.messages[locale.value].nginxConf)
+        const ready = ref(false)
+        const loading = ref(false)
+        const error = ref('')
+        const csrf = ref('')
+        const active = ref('')
+        const meta = reactive({ conf_dir: '', template_dir: '', persistent: true })
+        const files = ref([])
+        const busy = reactive({ validate: false, saving: false, reload: false })
+        const lastResult = ref(null)
+        let unsubscribeLocale
+
+        const current = computed(() => files.value.find(f => f.name === active.value) || null)
+
+        function isDirty (file) {
+          return file && file.draft !== file.saved
+        }
+
+        function scopeOf (file) {
+          return file ? file.scope : ''
+        }
+
+        function hintFor (file) {
+          if (!file) return ''
+          if (file.name === 'http_inc.conf') return t.value.httpHint
+          if (file.name === 'server_inc.conf') return t.value.serverHint
+          return t.value.streamHint
+        }
+
+        async function load () {
+          loading.value = true
+          error.value = ''
+          try {
+            const [session, payload] = await Promise.all([window.adminApi.session(), window.adminApi.nginxConf()])
+            csrf.value = session.csrf || ''
+            meta.conf_dir = payload.conf_dir
+            meta.template_dir = payload.template_dir || ''
+            meta.persistent = Boolean(payload.persistent)
+            files.value = payload.files.map(f => ({ ...f, saved: f.content, draft: f.content }))
+            if (!active.value || !files.value.some(f => f.name === active.value)) {
+              active.value = files.value[0] ? files.value[0].name : ''
+            }
+            lastResult.value = null
+            ready.value = true
+          } catch (err) {
+            error.value = t.value.loadError + '：' + err.message
+            ready.value = true
+          } finally {
+            loading.value = false
+          }
+        }
+
+        function notify (type, message) {
+          Quasar.Notify.create({ type, message, position: 'bottom' })
+        }
+
+        async function runValidate () {
+          const file = current.value
+          if (!file) return null
+          busy.validate = true
+          try {
+            const result = await window.adminApi.saveNginxConf({
+              _csrf: csrf.value, action: 'validate', name: file.name, content: file.draft
+            })
+            lastResult.value = {
+              ok: Boolean(result.ok),
+              title: result.ok ? t.value.validationPassed : t.value.validationFailed,
+              output: result.output || ''
+            }
+            return result
+          } catch (err) {
+            lastResult.value = { ok: false, title: t.value.validationFailed, output: err.message }
+            return null
+          } finally {
+            busy.validate = false
+          }
+        }
+
+        async function validate () {
+          const result = await runValidate()
+          if (result) notify(result.ok ? 'positive' : 'negative', lastResult.value.title)
+        }
+
+        async function doSave () {
+          const file = current.value
+          if (!file) return
+          busy.saving = true
+          try {
+            const result = await window.adminApi.saveNginxConf({
+              _csrf: csrf.value, action: 'save', name: file.name, content: file.draft
+            })
+            file.saved = file.draft
+            file.content = file.draft
+            file.exists = true
+            lastResult.value = { ok: true, title: t.value.saveDone, output: result.output || '' }
+            const detail = result.mirrored ? t.value.savedMirrored
+              : (result.persistent ? t.value.saveDone : t.value.savedNotPersistent)
+            notify('positive', t.value.savedNotApplied + ' · ' + detail)
+          } catch (err) {
+            lastResult.value = { ok: false, title: t.value.failed, output: err.message }
+            notify('negative', t.value.failed + '：' + err.message)
+          } finally {
+            busy.saving = false
+          }
+        }
+
+        function confirmSave () {
+          const file = current.value
+          if (!file) return
+          if (!isDirty(file)) {
+            notify('info', t.value.saved)
+            return
+          }
+          // 保存前先执行 nginx -t；通过后才询问是否写入。
+          runValidate().then(result => {
+            if (!result || !result.ok) {
+              notify('negative', t.value.validationFailed)
+              return
+            }
+            Quasar.Dialog.create({
+              title: t.value.saveConfirmTitle,
+              message: t.value.saveConfirm.replace('%s', file.name),
+              cancel: true,
+              persistent: true,
+              ok: { label: t.value.saveAction, color: 'primary', flat: true }
+            }).onOk(() => doSave())
+          })
+        }
+
+        function dirtyAny () {
+          return files.value.some(isDirty)
+        }
+
+        function confirmReload () {
+          if (dirtyAny()) {
+            notify('warning', t.value.saveFirstTitle + '：' + t.value.saveFirst)
+            return
+          }
+          Quasar.Dialog.create({
+            title: t.value.reloadConfirmTitle,
+            message: t.value.reloadConfirm,
+            cancel: true,
+            persistent: true,
+            ok: { label: t.value.reloadAction, color: 'negative', flat: true }
+          }).onOk(doReload)
+        }
+
+        async function doReload () {
+          busy.reload = true
+          try {
+            const result = await window.adminApi.saveNginxConf({ _csrf: csrf.value, action: 'reload' })
+            lastResult.value = { ok: true, title: t.value.reloadDone, output: result.output || '' }
+            notify('positive', t.value.reloadDone)
+          } catch (err) {
+            lastResult.value = { ok: false, title: t.value.reloadFailed, output: err.message }
+            notify('negative', t.value.reloadFailed + '：' + err.message)
+          } finally {
+            busy.reload = false
+          }
+        }
+
+        function indent (event) {
+          const el = event.target
+          const start = el.selectionStart
+          const end = el.selectionEnd
+          el.value = el.value.slice(0, start) + '    ' + el.value.slice(end)
+          el.selectionStart = el.selectionEnd = start + 4
+          current.value.draft = el.value
+        }
+
+        function applyLocale (nextLocale) {
+          locale.value = nextLocale
+          document.documentElement.lang = nextLocale
+          document.title = t.value.title
+          Quasar.Lang.set(nextLocale === 'zh-CN' ? Quasar.Lang.zhCN : Quasar.Lang.enUS)
+        }
+
+        onMounted(() => {
+          applyLocale(locale.value)
+          unsubscribeLocale = window.adminI18n.subscribe(applyLocale)
+          load()
+        })
+
+        onBeforeUnmount(() => unsubscribeLocale?.())
+
+        return {
+          active, busy, confirmReload, confirmSave, current, dirtyAny, files, hintFor, indent,
+          isDirty, lastResult, load, loading, meta, ready, scopeOf, t, validate, error
+        }
+      }
+    })
+
+    app.use(Quasar, { config: { dark: true } })
+    Quasar.Dark.set(true)
+    Quasar.Lang.set(window.adminI18n.getLocale() === 'en-US' ? Quasar.Lang.enUS : Quasar.Lang.zhCN)
+    Quasar.IconSet.set(Quasar.IconSet.mdiV7)
+    app.mount('#q-app')
+  </script>
+</body>
+</html>

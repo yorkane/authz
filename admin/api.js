@@ -88,6 +88,13 @@ function saveMenuEntry (values) {
   throw new Error('Unsupported menu entry action')
 }
 
+function saveNginxConf (values) {
+  if (values.action === 'validate') return mutation('POST', '/nginx-conf/validate', values)
+  if (values.action === 'save') return mutation('PUT', '/nginx-conf', values)
+  if (values.action === 'reload') return mutation('POST', '/nginx-conf/reload', {})
+  throw new Error('Unsupported nginx conf action')
+}
+
 window.adminApi = {
   session: () => request('/session'),
   applications: () => request('/applications'),
@@ -96,11 +103,13 @@ window.adminApi = {
   menuEntries: () => request('/menu-entries'),
   menuTree: () => request('/menu-tree'),
   files: path => request('/files?path=' + encodeURIComponent(path || '')),
+  nginxConf: () => request('/nginx-conf'),
   saveUser,
   saveRemoteUser,
   saveBinding: saveApplication,
   savePolicy,
   saveMenuEntry,
+  saveNginxConf,
   changePassword: values => mutation('PUT', '/me/password', values),
   logout: values => mutation('DELETE', '/session', values),
   fetchJson

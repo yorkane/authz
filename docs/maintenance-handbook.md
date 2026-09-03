@@ -56,7 +56,7 @@ Admin 菜单应用列表不依赖 `bindings` 表：`/_authz/api/applications` �
 host 网络或其他方式让目标服务位于网关容器的 `127.0.0.1` 网络命名空间内。
 
 左侧菜单由存储的菜单树渲染（迁移 v7 起）：`menu_entries` 表以 `kind` 区分分组(`group`)与条目(`item`)，
-条目通过 `parent_id` 挂到分组下；`builtin` 标记内置页面(`users/authorization/menuEditor/files`)，
+条目通过 `parent_id` 挂到分组下；`builtin` 标记内置页面(`users/authorization/menuEditor/files/nginxConf`)，
 `builtin='local'` 的分组在渲染时自动注入动态发现的本机服务。`/_authz/api/menu-tree` 输出两级树供左侧菜单渲染
 （只含启用项；编辑器通过 `/_authz/api/menu-entries` 读取全量含停用项）。`menu-editor.html` 提供树状编辑：
 新增/编辑分组与条目、上移下移、显隐开关、图标选择与分组归属调整。非空分组不可删除（先移走或删除条目）。
@@ -425,6 +425,11 @@ PKCE、resource、回调 issuer、state 一次性、角色映射、同名来源�
 `docker exec <容器> openresty -t` 验证语法，再重启容器生效；语法错误会导致 Nginx 无法启动。
 默认 `server_inc.conf` 提供 `favicon.ico`（204）与 `noc.gif`（200，SLB 健康检查）两个示例 location。
 
+管理壳的“Nginx配置(危险)”应用（`nginx_conf.html`，仅 admin）可在线编辑这三个文件：
+保存前在临时前缀副本上跑 `openresty -t`（不触碰线上文件），失败时回显 nginx 原始错误；
+校验通过并二次确认后才写入（保留一个 `.bak`），模板目录可写时同步镜像以便重启后保留；
+“nginx 重启”按钮执行 `openresty -s reload`。对应 API 为 `/_authz/api/nginx-conf*`，
+实现在 `lualib/resty/authz/nginxconf.lua`（admin + CSRF + 文件名白名单）。
 这使 Lua、前端和 Nginx 模板修改无需重建镜像。镜像入口脚本每次启动都从运行时模板目录生成
 `/usr/local/openresty/nginx/conf/nginx.conf` 与 `server.conf`；未挂载模板目录时回退到镜像内置模板。部署操作区分：
 

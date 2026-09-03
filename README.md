@@ -57,6 +57,15 @@
 - 目录列表由 `GET /_authz/api/files?path=...` 提供（LuaFileSystem 实现，路径已做穿越防护、隐藏文件与 `.br` sidecar 过滤），文件字节走会话保护的 `/_authz/files/` 静态入口（`aio threads` + `open_file_cache`）；
 - 只读：不提供上传/删除；未登录访问 `/_authz/files/*` 与 API 均要求登录。
 
+### Nginx 配置编辑（危险）
+
+管理壳内置“Nginx配置(危险)”应用（左侧菜单 → 系统应用 → Nginx配置(危险)，即 `/_authz/apps/` 下的 `nginx_conf.html`，仅 admin 可见）：
+
+- 三个 Tab 分别编辑运行时配置目录里的 `http_inc.conf`（http{} 层）、`server_inc.conf`（server{} 层，只允许 location 级指令）与 `stream_inc.conf`（stream{} 层）；
+- “校验 (nginx -t)”把整个运行时配置目录复制到临时前缀、替换被编辑文件后执行 `openresty -t`，绝不触碰线上文件；失败时页面显示 nginx 的原始错误输出；
+- “保存”先跑一次校验，通过后才弹出确认对话框；写入前再次校验，成功后保留一份 `.bak` 备份。模板目录可写时会同步镜像一份，使修改在容器重启后仍然保留（页面顶部徽标提示当前是否可持久）；
+- “nginx 重启”按钮执行 `openresty -s reload` 优雅热重载；存在未保存修改时拒绝重载。所有接口位于 `/_authz/api/nginx-conf*`（admin + CSRF 保护），文件名单一路径白名单，不可触及其他路径。
+
 ### 管理界面
 
 管理界面统一从 `/_authz/apps/` 进入：

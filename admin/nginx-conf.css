@@ -1,0 +1,44 @@
+/* Nginx 配置编辑页（nginx_conf.html）专用样式 */
+
+.nginxconf-page { display: flex; flex-direction: column; }
+
+.nginxconf-meta {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 2px 0 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); margin-bottom: 12px;
+}
+.nginxconf-meta .meta-item { color: rgba(255, 255, 255, 0.55); font-size: 12px; white-space: nowrap; }
+.nginxconf-meta .meta-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: rgba(255, 255, 255, 0.75); font-size: 12px;
+}
+
+.nginxconf-editor {
+  width: 100%; min-height: 340px; resize: vertical;
+  background: rgba(10, 12, 24, 0.72); color: #e8eaf6;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  padding: 12px 14px; tab-size: 4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.55; outline: none;
+}
+.nginxconf-editor:focus { border-color: var(--purple); }
+
+.nginxconf-hint { color: rgba(255, 255, 255, 0.5); font-size: 12px; margin: 8px 0; }
+
+.nginxconf-output {
+  background: rgba(10, 12, 24, 0.72); border-radius: 8px;
+  border: 1px solid var(--line); padding: 10px 12px;
+  white-space: pre-wrap; word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.5; max-height: 260px; overflow: auto;
+}
+.nginxconf-output.ok { border-color: rgba(88, 211, 197, .35); color: #9fe9dd; }
+.nginxconf-output.fail { border-color: rgba(240, 107, 130, .4); color: #ffb4c0; }
+
+.nginxconf-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.nginxconf-state { font-size: 12px; }
+.nginxconf-state.dirty { color: #ffcf7a; }
+.nginxconf-state.clean { color: rgba(255, 255, 255, 0.5); }
+
+@media (max-width: 720px) {
+  .nginxconf-editor { min-height: 260px; font-size: 12px; }
+}
