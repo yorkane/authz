@@ -62,11 +62,12 @@ location ^~ /_authz/apps/ {
         application/json
         application/manifest+json
         application/xml
-        image/svg+xml
-        text/css
-        text/plain
-        text/xml;
-    expires max;
+    image/svg+xml
+    text/css
+    text/plain
+    text/xml;
+    # HTML 强制再校验（见 nginx.conf 里的 $authz_apps_expires），其余强缓存。
+    expires $authz_apps_expires;
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)

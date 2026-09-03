@@ -71,6 +71,13 @@ http {
         ''      close;
     }
 
+    # /_authz/apps/ 静态资源缓存策略：HTML 是入口，必须每次回源校验（否则升级后
+    # 浏览器会一直用旧 HTML + 旧版本位的 JS）；带 ?v=N 版本位的 js/css/字体仍强缓存。
+    map $uri $authz_apps_expires {
+        ~*\.html$   -1;
+        default     max;
+    }
+
     map $http_x_forwarded_host $authz_request_host {
         default $http_x_forwarded_host;
         ""      $http_host;
