@@ -50,9 +50,15 @@ register("GET",  "/oauth/start",   ui.oauth_start)
 register("GET",  "/oauth/callback", ui.oauth_callback)
 
 -- ── Session ─────────────────────────────────────────────────────────────────
-register("GET", "/api/session", guard.wrap(function(_, _, _, current)
+-- The SPA shell calls this on startup; re-issue the session cookie so
+-- tokens created before a cookie-attribute change (SameSite=Lax to None)
+-- migrate transparently. HttpOnly cookies cannot be fixed from JS, and
+-- API-key calls have no session token, so they stay untouched.
+register("GET", "/api/session", guard.wrap(function(_, _, _, current, token)
+    if token then session.set_cookie(token) end
     return { data = service.session_payload(current) }
 end))
+
 
 register("DELETE", "/api/session", guard.wrap(function(_, _, _, _, token)
     session.delete(token)

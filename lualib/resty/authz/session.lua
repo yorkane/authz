@@ -308,11 +308,19 @@ local function secure_flag()
     return (_M.secure or ngx.var.https == "on" or forwarded_https) and "; Secure" or ""
 end
 
+-- Sandboxed pages (CSP sandbox without allow-same-origin, e.g. HTML files
+-- browsed under /_authz/files/) are treated as cross-site, so Chrome strips
+-- SameSite=Lax cookies from their <video>/<img>/fetch subrequests and those
+-- media requests get 302'd to the login page. SameSite=None keeps the
+-- session available there; browsers only accept it together with Secure,
+-- so plain-HTTP deployments must stay on Lax.
 local function cookie_line(value, max_age, domain)
+    local secure = secure_flag()
+    local same_site = secure ~= "" and "; SameSite=None" or "; SameSite=Lax"
     local line = _M.cookie_name .. "=" .. tostring(value or "") ..
-        "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" .. tostring(max_age)
+        "; Path=/; HttpOnly" .. same_site .. "; Max-Age=" .. tostring(max_age)
     if domain and domain ~= "" then line = line .. "; Domain=" .. domain end
-    return line .. secure_flag()
+    return line .. secure
 end
 
 local function legacy_cookie_domains(desired_domain)
