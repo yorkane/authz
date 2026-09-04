@@ -9,6 +9,15 @@
   <title>Admin</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
   <link rel="stylesheet" href="./app-page.css?v=10">
+  <style>
+    .group-heading { min-height: 52px; padding: 8px 12px; gap: 10px; }
+    .tree-actions { gap: 0; margin-left: 4px; }
+    .tree-actions .q-btn { margin-left: -2px; }
+    .tree-row { padding: 3px 6px 3px 2px; }
+    .tree-row .q-item__section--avatar { min-width: 34px; padding: 0; }
+    .menu-tree-body { padding-top: 4px; padding-bottom: 6px; }
+    .menu-tree-body .q-list--separator > .q-item + .q-item { border-color: rgba(139, 145, 184, .08); }
+  </style>
 </head>
 <body>
   <div id="q-app">
@@ -23,15 +32,15 @@
       <div v-if="!loading && !groups.length" class="surface-card q-pa-xl row flex-center empty-state"><q-icon name="mdi-menu-open" size="30px"></q-icon><span>{{ t.noEntries }}</span></div>
 
       <q-card v-for="group in groups" :key="group.id" flat class="surface-card q-mb-md">
-        <q-card-section class="surface-heading">
-          <div class="row items-center no-wrap q-gutter-sm">
-            <q-icon :name="group.icon || 'mdi-folder'" size="22px" color="blue-3"></q-icon>
+        <q-card-section class="surface-heading group-heading">
+         <div class="row items-center no-wrap q-gutter-sm">
+           <q-icon :name="group.icon || 'mdi-folder'" size="22px" color="blue-3"></q-icon>
             <div><div class="surface-title">{{ group.label }}</div><div class="surface-subtitle">{{ t.groupKind }} · {{ group.children.length }}</div></div>
           </div>
-          <div class="row items-center no-wrap q-gutter-xs">
+          <div class="row items-center no-wrap tree-actions">
             <q-btn flat round dense icon="mdi-arrow-up" size="sm" @click="moveGroup(group, -1)"><q-tooltip>{{ t.moveUp }}</q-tooltip></q-btn>
             <q-btn flat round dense icon="mdi-arrow-down" size="sm" @click="moveGroup(group, 1)"><q-tooltip>{{ t.moveDown }}</q-tooltip></q-btn>
-            <q-toggle :model-value="group.enabled === 1" color="teal-4" @update:model-value="toggleEnabled(group)"><q-tooltip>{{ group.enabled === 1 ? t.enableToggle : t.disableToggle }}</q-tooltip></q-toggle>
+            <q-btn flat round dense size="sm" :icon="group.enabled === 1 ? 'mdi-eye-outline' : 'mdi-eye-off-outline'" :color="group.enabled === 1 ? '' : 'grey-6'" @click="toggleEnabled(group)"><q-tooltip>{{ group.enabled === 1 ? t.disableToggle : t.enableToggle }}</q-tooltip></q-btn>
             <q-btn flat round dense icon="mdi-pencil-outline" @click="openEditGroup(group)"><q-tooltip>{{ t.editGroupTitle }}</q-tooltip></q-btn>
             <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeGroup(group)"><q-tooltip>{{ t.deleteGroupTitle }}</q-tooltip></q-btn>
           </div>
@@ -47,13 +56,13 @@
                 <q-item-label>{{ child.label }}<q-badge v-if="child.builtin" outline color="blue-3" class="q-ml-sm">{{ t.builtinHint }}</q-badge></q-item-label>
                 <q-item-label caption><code class="code-pill">{{ child.url || child.builtin || '' }}</code></q-item-label>
               </q-item-section>
-              <q-item-section side class="row items-center no-wrap q-gutter-xs">
-                <q-btn flat round dense icon="mdi-arrow-up" size="sm" :disable="idx === 0" @click="moveChild(group, child, -1)"><q-tooltip>{{ t.moveUp }}</q-tooltip></q-btn>
-                <q-btn flat round dense icon="mdi-arrow-down" size="sm" :disable="idx === group.children.length - 1" @click="moveChild(group, child, 1)"><q-tooltip>{{ t.moveDown }}</q-tooltip></q-btn>
-                <q-toggle :model-value="child.enabled === 1" color="teal-4" dense @update:model-value="toggleEnabled(child)"><q-tooltip>{{ child.enabled === 1 ? t.enableToggle : t.disableToggle }}</q-tooltip></q-toggle>
-                <q-btn flat round dense icon="mdi-pencil-outline" @click="openEdit(child, group)"><q-tooltip>{{ t.editTitle }}</q-tooltip></q-btn>
-                <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="remove(child)"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
-              </q-item-section>
+              <q-item-section side class="row items-center no-wrap tree-actions">
+               <q-btn flat round dense icon="mdi-arrow-up" size="sm" :disable="idx === 0" @click="moveChild(group, child, -1)"><q-tooltip>{{ t.moveUp }}</q-tooltip></q-btn>
+               <q-btn flat round dense icon="mdi-arrow-down" size="sm" :disable="idx === group.children.length - 1" @click="moveChild(group, child, 1)"><q-tooltip>{{ t.moveDown }}</q-tooltip></q-btn>
+                <q-btn flat round dense size="sm" :icon="child.enabled === 1 ? 'mdi-eye-outline' : 'mdi-eye-off-outline'" :color="child.enabled === 1 ? '' : 'grey-6'" @click="toggleEnabled(child)"><q-tooltip>{{ child.enabled === 1 ? t.disableToggle : t.enableToggle }}</q-tooltip></q-btn>
+               <q-btn flat round dense icon="mdi-pencil-outline" @click="openEdit(child, group)"><q-tooltip>{{ t.editTitle }}</q-tooltip></q-btn>
+               <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="remove(child)"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
+             </q-item-section>
             </q-item>
             <q-item v-if="!group.children.length" class="empty-state row flex-center"><span>{{ t.noEntries }}</span></q-item>
           </q-list>
