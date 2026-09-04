@@ -12,18 +12,33 @@ local function config()
 end
 
 function _M.list()
-    local applications = bindings.enabled_applications()
+    -- db.query (mlcache) and discovery.list return worker-shared cached tables.
+    -- Never mutate or append to them in place: doing so pushed discovered ports
+    -- into the cached bindings array, so on the next call the binding loop stamped
+    -- them binding=true and every local service looked like a domain binding.
+    local applications = {}
     local known_ports = {}
-    for _, application in ipairs(applications) do
-        known_ports[tonumber(application.port)] = true
+    for _, row in ipairs(bindings.enabled_applications()) do
+        local application = {}
+        for key, value in pairs(row) do application[key] = value end
         application.label = application.menu_name ~= "" and application.menu_name or application.domain
         application.binding = true
+        known_ports[tonumber(application.port)] = true
+        applications[#applications + 1] = application
     end
-    for _, application in ipairs(discovery.list(config())) do
-        if not known_ports[tonumber(application.port)] then
-            application.label = "local:" .. tostring(application.port)
-            application.binding = false
-            applications[#applications + 1] = application
+    local taken = {}
+    for _, item in ipairs(discovery.list(config())) do
+        local port = tonumber(item.port)
+        if port and not known_ports[port] and not taken[port] then
+            taken[port] = true
+            applications[#applications + 1] = {
+                port = port,
+                source = item.source,
+                note = item.note,
+                enabled = item.enabled,
+                label = "local:" .. tostring(port),
+                binding = false,
+            }
         end
     end
     table.sort(applications, function(left, right)
