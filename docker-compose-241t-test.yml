@@ -1,5 +1,6 @@
 # 241.t 测试部署实例（测试/回归专用，不影响本机与其他服务器）
-# 端口 6081/6444 避开 241.t 上的旧 openresty-gateway(6080/6443)
+# 端口 6080/6443：a-241.ai-t.wtvdev.com 经 APISIX 回源到 241.t:6443
+# （旧 openresty-gateway 已停用；回滚方案见 boxes/241.t.md）
 # 镜像经 /nas2/docker/ 同步；admin/lualib/conf 代码 rsync 自本机仓库
 services:
   gateway:
