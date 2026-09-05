@@ -351,6 +351,7 @@ docker run -d \
     -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
     -v "$TMP_DIR/data:/data" \
     -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
+    -v "$REPO_DIR/admin:/files:ro" \
     -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
     -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
     -v "$REPO_DIR/lualib:/usr/local/openresty/site/lualib:ro" \
@@ -595,7 +596,7 @@ assert_contains_all "admin shell loads SSI menu rendered from the stored tree" "
     'v-for="child in (group.children || [])"' \
     ':name="group.icon' \
     '{{ group.label }}' \
-    'v-model="groupOpen[group.id]"' \
+    'v-show="groupOpen[group.id]"' \
     'http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"' \
     'http-equiv="Pragma" content="no-cache"' \
     'http-equiv="Expires" content="0"'
@@ -644,9 +645,9 @@ assert_contains_all "app.js renders the stored menu tree" "$BODY" \
     "menuEditor: 'menu-editor.html" \
     "function nodeUrl (node)" \
     "groupOpen[group.id]"
-request GET "$ADMIN_HOST" '/_authz/apps/i18n.js?v=19' "$ADMIN_COOKIE"
+request GET "$ADMIN_HOST" '/_authz/apps/i18n.js?v=26' "$ADMIN_COOKIE"
 assert_contains_all "i18n exposes menu group labels and hints" "$BODY" \
-    "localApps: 'local APP'" \
+    "localApps: '本地服务'" \
     "自动发现的本机 HTTP 端口（未绑定域名）" \
     "Discovered local HTTP ports (no domain binding)" \
     "systemApps: '系统应用'" \

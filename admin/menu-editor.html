@@ -10,12 +10,13 @@
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
   <link rel="stylesheet" href="./app-page.css?v=10">
   <style>
-    .group-heading { min-height: 52px; padding: 8px 12px; gap: 10px; }
-    .tree-actions { gap: 0; margin-left: 4px; }
-    .tree-actions .q-btn { margin-left: -2px; }
-    .tree-row { padding: 3px 6px 3px 2px; }
-    .tree-row .q-item__section--avatar { min-width: 34px; padding: 0; }
-    .menu-tree-body { padding-top: 4px; padding-bottom: 6px; }
+    .group-heading { min-height: 52px; padding: 6px 12px 6px 6px; gap: 10px; }
+    .group-chevron { margin-right: -2px; }
+    .tree-actions { gap: 3px; margin-left: 6px; }
+    .tree-row { padding: 4px 6px 4px 2px; min-height: 52px; }
+    .tree-row .q-item__section--avatar { min-width: 34px; padding: 0; margin-left: 30px; }
+    .tree-row .q-item__section--side.tree-actions { flex-direction: row; align-items: center; }
+    .menu-tree-body { padding-top: 0; padding-bottom: 6px; }
     .menu-tree-body .q-list--separator > .q-item + .q-item { border-color: rgba(139, 145, 184, .08); }
   </style>
 </head>
@@ -33,8 +34,9 @@
 
       <q-card v-for="group in groups" :key="group.id" flat class="surface-card q-mb-md">
         <q-card-section class="surface-heading group-heading">
-         <div class="row items-center no-wrap q-gutter-sm">
-           <q-icon :name="group.icon || 'mdi-folder'" size="22px" color="blue-3"></q-icon>
+          <div class="row items-center no-wrap q-gutter-sm">
+            <q-btn flat round dense class="group-chevron" :icon="isGroupOpen(group) ? 'mdi-chevron-down' : 'mdi-chevron-right'" :aria-label="isGroupOpen(group) ? t.collapse : t.expand" @click="toggleGroupOpen(group)"><q-tooltip>{{ isGroupOpen(group) ? t.collapse : t.expand }}</q-tooltip></q-btn>
+            <q-icon :name="group.icon || 'mdi-folder'" size="22px" color="blue-3"></q-icon>
             <div><div class="surface-title">{{ group.label }}</div><div class="surface-subtitle">{{ t.groupKind }} · {{ group.children.length }}</div></div>
           </div>
           <div class="row items-center no-wrap tree-actions">
@@ -45,6 +47,7 @@
             <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeGroup(group)"><q-tooltip>{{ t.deleteGroupTitle }}</q-tooltip></q-btn>
           </div>
         </q-card-section>
+        <template v-if="isGroupOpen(group)">
         <q-separator dark></q-separator>
         <q-card-section class="menu-tree-body">
           <div v-if="group.builtin === 'domains'" class="tree-hint"><q-icon name="mdi-information-outline" size="16px"></q-icon><span>{{ t.domainsGroupHint }}</span></div>
@@ -67,6 +70,7 @@
             <q-item v-if="!group.children.length" class="empty-state row flex-center"><span>{{ t.noEntries }}</span></q-item>
           </q-list>
         </q-card-section>
+        </template>
       </q-card>
 
       <q-dialog v-model="formOpen">
@@ -98,7 +102,7 @@
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
   <script src="./api.js?v=13"></script>
-  <script src="./i18n.js?v=25"></script>
+  <script src="./i18n.js?v=26"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
 
@@ -117,6 +121,18 @@
         const isGroupForm = ref(false)
         const form = reactive({ label: '', url: '', icon: '', parent: null })
         let unsubscribeLocale
+
+        // 分组折叠状态：默认展开，收起偏好记在本地，刷新后保持。
+        const COLLAPSE_KEY = 'authz.menu-editor.collapsed'
+        const collapsedGroups = ref(new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]')))
+        function persistCollapsed () { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedGroups.value])) }
+        function isGroupOpen (group) { return !collapsedGroups.value.has(group.id) }
+        function toggleGroupOpen (group) {
+          const next = new Set(collapsedGroups.value)
+          if (next.has(group.id)) next.delete(group.id); else next.add(group.id)
+          collapsedGroups.value = next
+          persistCollapsed()
+        }
 
         const isItemForm = computed(() => !isGroupForm.value)
         const formTitle = computed(() => isGroupForm.value
@@ -294,7 +310,7 @@
 
         onBeforeUnmount(() => unsubscribeLocale?.())
 
-        return { form, formCopy, formOpen, formTitle, groupOptions, groups, isAdmin, isItemForm, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, iconOptions, remove, removeGroup, saveForm, saving, t, toggleEnabled, urlValid, error }
+        return { form, formCopy, formOpen, formTitle, groupOptions, groups, isAdmin, isGroupOpen, isItemForm, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, iconOptions, remove, removeGroup, saveForm, saving, t, toggleEnabled, toggleGroupOpen, urlValid, error }
       }
     })
 
