@@ -92,7 +92,8 @@ function saveMenuEntry (values) {
 function saveMenuService (values) {
   const { action, id, ...payload } = values
   if (action === 'edit') return mutation('PATCH', `/menu-services/${encodeURIComponent(id)}`, payload)
-  if (action === 'reset') return mutation('DELETE', `/menu-services/${encodeURIComponent(id)}`, {})
+  // payload 保留 _csrf，由 mutation 提取为请求头并从 body 中剔除。
+  if (action === 'reset') return mutation('DELETE', `/menu-services/${encodeURIComponent(id)}`, payload)
   if (action === 'reorder') return mutation('PUT', '/menu-services/reorder', payload)
   throw new Error('Unsupported menu service action')
 }
