@@ -314,6 +314,23 @@ _M.list = {
                 WHERE builtin = 'local' AND kind = 'group']]))
         end,
     },
+    {
+        version = 14,
+        name = "menu_service_overrides",
+        up = function(db)
+            -- 运行时注入的服务条目（域名绑定 binding:<id> / 端口探测 port:<port>）
+            -- 的菜单覆盖：改名、图标、排序、显隐。域名条目的名称回写
+            -- bindings.menu_name（单一事实来源），这里只存图标/排序/显隐。
+            must(db.exec([[CREATE TABLE IF NOT EXISTS menu_overrides(
+                menu_key TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                icon TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            )]]))
+        end,
+    },
 }
 
 function _M.run(db)

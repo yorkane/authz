@@ -88,6 +88,15 @@ function saveMenuEntry (values) {
   throw new Error('Unsupported menu entry action')
 }
 
+// 域名服务/本地服务条目：键为 binding:<id> / port:<port>，无删除语义。
+function saveMenuService (values) {
+  const { action, id, ...payload } = values
+  if (action === 'edit') return mutation('PATCH', `/menu-services/${encodeURIComponent(id)}`, payload)
+  if (action === 'reset') return mutation('DELETE', `/menu-services/${encodeURIComponent(id)}`, {})
+  if (action === 'reorder') return mutation('PUT', '/menu-services/reorder', payload)
+  throw new Error('Unsupported menu service action')
+}
+
 function saveNginxConf (values) {
   if (values.action === 'validate') return mutation('POST', '/nginx-conf/validate', values)
   if (values.action === 'save') return mutation('PUT', '/nginx-conf', values)
@@ -102,6 +111,7 @@ window.adminApi = {
   authorization: () => request('/authorization'),
   menuEntries: () => request('/menu-entries'),
   menuTree: () => request('/menu-tree'),
+  menuServices: () => request('/menu-services'),
   files: path => request('/files?path=' + encodeURIComponent(path || '')),
   nginxConf: () => request('/nginx-conf'),
   saveUser,
@@ -109,6 +119,7 @@ window.adminApi = {
   saveBinding: saveApplication,
   savePolicy,
   saveMenuEntry,
+  saveMenuService,
   saveNginxConf,
   changePassword: values => mutation('PUT', '/me/password', values),
   logout: values => mutation('DELETE', '/session', values),

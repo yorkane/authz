@@ -9,11 +9,75 @@ local users = require "resty.authz.repository.users"
 local applications = require "resty.authz.api.services.applications"
 local common = require "resty.authz.api.common"
 local validation = require "resty.authz.api.validation"
+local menu_overrides = require "resty.authz.repository.menu_overrides"
 
 local _M = {}
 
+-- 未被用户手动排序（sort_order=0）的条目用大基数排序，排在手动排序区之后。
+local UNORDERED_BASE = 1000000000
+
 local function config()
     return require("resty.authz").config
+end
+
+-- 运行时注入的服务条目（域名绑定 / 端口探测）合并菜单覆盖后的行。
+-- 返回数组，每项带 bound 标记；调用方决定挂到哪个分组、是否过滤隐藏项。
+-- menu_key 是稳定标识（binding:<id> / port:<port>），编辑器据此调用
+-- /menu-services 接口改名、换图标、排序、显隐。
+function _M.service_entries()
+    local overrides = {}
+    for _, row in ipairs(menu_overrides.all()) do
+        overrides[row.menu_key] = row
+    end
+    local entries = {}
+    for index, application in ipairs(applications.list()) do
+        local bound = application.binding == true
+        local menu_key = bound and application.id and ("binding:" .. tostring(application.id))
+            or ("port:" .. tostring(application.port))
+        local override = overrides[menu_key]
+        local label = bound
+            and (application.label or application.menu_name or application.domain or application.note or
+                ("local:" .. application.port))
+            or ("local:" .. application.port)
+        entries[#entries + 1] = {
+            kind = "item",
+            menu_key = menu_key,
+            bound = bound,
+            label = (override and override.label ~= "" and override.label) or label,
+            port = application.port,
+            domain = application.domain and application.domain or cjson.null,
+            binding = bound or nil,
+            note = bound and (application.note ~= "" and application.note or cjson.null) or cjson.null,
+            icon = (override and override.icon ~= "" and override.icon)
+                or (bound and "mdi-web-box" or "mdi-lan-connect"),
+            -- 未被用户排序过的条目（sort_order 为默认 0 时视为未排序）排在
+            -- 手动排序区（1..n）之后，并保持应用列表自身顺序。
+            sort_order = (override and (tonumber(override.sort_order) or 0) > 0
+                and override.sort_order) or (UNORDERED_BASE + index),
+            hidden = override and tonumber(override.enabled) == 0 or false,
+        }
+    end
+    return entries
+end
+
+-- 编辑器视图：域名服务/本地服务两组的完整条目（含隐藏项）。
+function _M.menu_service_rows()
+    local domain_services, local_services = {}, {}
+    for _, entry in ipairs(_M.service_entries()) do
+        local row = {}
+        for key, value in pairs(entry) do row[key] = value end
+        row.bound = nil
+        if entry.bound then domain_services[#domain_services + 1] = row
+        else local_services[#local_services + 1] = row end
+    end
+    -- 与左侧菜单一致：按覆盖后的 sort_order 排列，编辑器所见即所得。
+    local function by_order(left, right)
+        return (left.sort_order or 0) < (right.sort_order or 0)
+    end
+    table.sort(domain_services, by_order)
+    table.sort(local_services, by_order)
+    -- "local" 是 Lua 保留字，必须用方括号键（JSON 输出仍为 "local"）。
+    return { domains = domain_services, ["local"] = local_services }
 end
 
 -- 左侧菜单布局：把 menu_entries 树按分组/条目组装，并把动态发现的本机
@@ -64,24 +128,17 @@ function _M.menu_tree(subject)
         targets["domains"] = domain_group.children
     end
     if targets["local"] or targets["domains"] then
-        for _, application in ipairs(applications.list()) do
-            local bound = application.binding == true
-            local bucket = (bound and targets["domains"] or targets["local"])
-                or (bound and targets["local"] or targets["domains"])
-            if bucket then
-                local label = bound
-                    and (application.label or application.menu_name or application.domain or application.note or
-                        ("local:" .. application.port))
-                    or ("local:" .. application.port)
-                bucket[#bucket + 1] = {
-                    kind = "item",
-                    label = label,
-                    port = application.port,
-                    domain = application.domain and application.domain or cjson.null,
-                    binding = bound or nil,
-                    note = bound and (application.note ~= "" and application.note or cjson.null) or cjson.null,
-                    icon = bound and "mdi-web-box" or "mdi-lan-connect",
-                }
+        for _, entry in ipairs(_M.service_entries()) do
+            if not entry.hidden then
+                local bucket = (entry.bound and targets["domains"] or targets["local"])
+                    or (entry.bound and targets["local"] or targets["domains"])
+                if bucket then
+                    local row = {}
+                    for key, value in pairs(entry) do row[key] = value end
+                    row.bound = nil
+                    row.hidden = nil
+                    bucket[#bucket + 1] = row
+                end
             end
         end
     end

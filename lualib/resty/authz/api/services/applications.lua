@@ -153,6 +153,9 @@ end
 
 function _M.delete(id)
     local ok, err = db.authz_transaction(function()
+        -- 菜单覆盖跟随绑定一起消失，避免残留孤儿键。
+        local menu_overrides = require "resty.authz.repository.menu_overrides"
+        menu_overrides.delete("binding:" .. tostring(id))
         local deleted, delete_err = bindings.delete(id)
         if not deleted then return nil, delete_err end
         return true

@@ -161,6 +161,24 @@ register("GET", "/api/menu-tree", guard.wrap(function(_, _, _, current)
     return { data = service.menu_tree(current) }
 end))
 
+-- 域名服务/本地服务两组的可编辑条目（含隐藏项），键为 binding:<id>/port:<port>。
+register("GET", "/api/menu-services", guard.wrap(function()
+    return { data = service.menu_service_rows() }
+end))
+
+-- /menu-services/reorder must be registered before /:key-style rules.
+register("PUT", "/api/menu-services/reorder", guard.wrap(with_body(function(_, data)
+    return service.reorder_menu_services(data)
+end), { admin = true, csrf = true }))
+
+register("PATCH", "/api/menu-services/:key", guard.wrap(with_body(function(params, data)
+    return service.update_menu_service(params.key, data)
+end), { admin = true, csrf = true }))
+
+register("DELETE", "/api/menu-services/:key", guard.wrap(function(params)
+    return guard.result(service.reset_menu_service(params.key))
+end, { admin = true, csrf = true }))
+
 -- ── File browser (read-only listing of the mounted html directory) ─────────
 register("GET", "/api/files", guard.wrap(function(_, env)
     local args = type(env.uri_args) == "table" and env.uri_args or {}

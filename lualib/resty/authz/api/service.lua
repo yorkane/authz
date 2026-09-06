@@ -8,6 +8,7 @@ local policies = require "resty.authz.api.services.policies"
 local read_models = require "resty.authz.api.services.read_models"
 local users = require "resty.authz.api.services.users"
 local menu_entries = require "resty.authz.api.services.menu_entries"
+local menu_services = require "resty.authz.api.services.menu_services"
 
 local _M = {
     roles_for = common.roles_for,
@@ -18,6 +19,7 @@ local _M = {
     list_users = read_models.users,
     authorization = read_models.authorization,
     menu_tree = read_models.menu_tree,
+    menu_service_rows = read_models.menu_service_rows,
     applications = applications.list,
     list_api_keys = api_keys.list,
 
@@ -46,6 +48,9 @@ local _M = {
     update_menu_entry = menu_entries.update,
     reorder_menu_entries = menu_entries.reorder,
     delete_menu_entry = menu_entries.delete,
+    update_menu_service = menu_services.update,
+    reset_menu_service = menu_services.reset,
+    reorder_menu_services = menu_services.reorder,
 }
 
 return _M

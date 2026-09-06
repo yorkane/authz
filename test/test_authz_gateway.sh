@@ -452,7 +452,7 @@ assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides"
 
 cookie_header() {
     awk '
@@ -645,13 +645,20 @@ assert_contains_all "app.js renders the stored menu tree" "$BODY" \
     "menuEditor: 'menu-editor.html" \
     "function nodeUrl (node)" \
     "groupOpen[group.id]"
-request GET "$ADMIN_HOST" '/_authz/apps/i18n.js?v=26' "$ADMIN_COOKIE"
+request GET "$ADMIN_HOST" '/_authz/apps/i18n.js?v=28' "$ADMIN_COOKIE"
 assert_contains_all "i18n exposes menu group labels and hints" "$BODY" \
     "localApps: '本地服务'" \
     "自动发现的本机 HTTP 端口（未绑定域名）" \
     "Discovered local HTTP ports (no domain binding)" \
     "systemApps: '系统应用'" \
     "menuEditor: '菜单编辑'"
+request GET "$ADMIN_HOST" '/_authz/apps/menu-editor.html' "$ADMIN_COOKIE"
+assert_contains_all "menu editor renders service entries with edit and reset" "$BODY" \
+    "window.adminApi.menuServices()" \
+    "childEnabled (child)" \
+    "isServiceEdit" \
+    "mdi-restore" \
+    "action: 'reset'"
 request GET "$ADMIN_HOST" /_authz/apps/menu-editor.html "$ADMIN_COOKIE"
 assert_eq "menu editor page loads" "$STATUS" "200"
 assert_contains_all "menu editor page edits the tree and offers icon configuration" "$BODY" \
@@ -1680,6 +1687,55 @@ request DELETE "$ADMIN_HOST" "/_authz/api/menu-entries/$MENU_NEW_GROUP_ID" "$ADM
 assert_eq "delete emptied group" "$STATUS" "200"
 request DELETE "$ADMIN_HOST" "/_authz/api/menu-entries/$MENU_NEW_GROUP_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "delete missing menu entry 404" "$STATUS" "404"
+
+# ── 文件浏览 API /_authz/api/files ─────────────────────────────
+request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
+assert_eq "menu services list loads" "$STATUS" "200"
+assert_json "menu services expose discovered local entry" '[.data.local[] | select(.port == '$UPSTREAM_PORT')] | length' "1"
+MENU_SERVICE_KEY="port:$UPSTREAM_PORT"
+request PATCH "$ADMIN_HOST" "/_authz/api/menu-services/$MENU_SERVICE_KEY" "$ADMIN_COOKIE" "$CSRF" '{"label":"压测面板","icon":"mdi-gauge"}'
+assert_eq "rename discovered service menu entry" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
+assert_json "renamed service label persists" '.data.local[] | select(.menu_key == "'$MENU_SERVICE_KEY'") | .label' "压测面板"
+assert_json "renamed service icon persists" '.data.local[] | select(.menu_key == "'$MENU_SERVICE_KEY'") | .icon' "mdi-gauge"
+request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
+assert_json "renamed service shows in menu tree" '[.data.groups[] | select(.builtin != "domains") | .children[]? | select(.menu_key == "'$MENU_SERVICE_KEY'") | .label] | first' "压测面板"
+request PATCH "$ADMIN_HOST" "/_authz/api/menu-services/$MENU_SERVICE_KEY" "$ADMIN_COOKIE" "$CSRF" '{"enabled":false}'
+assert_eq "hide service menu entry" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
+assert_json "hidden service absent from menu tree" '[.data.groups[].children[]? | select(.menu_key == "'$MENU_SERVICE_KEY'")] | length' "0"
+request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
+assert_json "hidden service stays visible to editor" '.data.local[] | select(.menu_key == "'$MENU_SERVICE_KEY'") | .hidden | tostring' "true"
+request PATCH "$ADMIN_HOST" "/_authz/api/menu-services/$MENU_SERVICE_KEY" "$ADMIN_COOKIE" "$CSRF" '{"enabled":true,"label":"","icon":""}'
+assert_eq "restore service defaults" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
+assert_json "restored service falls back to port label" '.data.local[] | select(.menu_key == "'$MENU_SERVICE_KEY'") | .label' "local:$UPSTREAM_PORT"
+request PATCH "$ADMIN_HOST" "/_authz/api/menu-services/$MENU_SERVICE_KEY" "$ADMIN_COOKIE" "" '{"label":"no-csrf"}'
+assert_eq "service menu rename without CSRF rejected" "$STATUS" "403"
+request PATCH "$ADMIN_HOST" "/_authz/api/menu-services/evil%20key" "$ADMIN_COOKIE" "$CSRF" '{"label":"x"}'
+assert_eq "service menu invalid key rejected" "$STATUS" "422"
+# 端口是动态的：覆盖允许先于服务存在（键合法即接受），但不得出现在菜单树里。
+request PATCH "$ADMIN_HOST" "/_authz/api/menu-services/port%3A999999" "$ADMIN_COOKIE" "$CSRF" '{"label":"ghost"}'
+assert_eq "service menu accepts override for absent port" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
+assert_json "override for absent port never renders" '[.data.groups[].children[]? | select(.port == 999999)] | length' "0"
+request PATCH "$ADMIN_HOST" "/_authz/api/menu-services/binding%3A999999" "$ADMIN_COOKIE" "$CSRF" '{"label":"x"}'
+assert_eq "service menu missing binding rejected" "$STATUS" "404"
+request PATCH "$ADMIN_HOST" "/_authz/api/menu-services/$MENU_SERVICE_KEY" "" "" '{"label":"x"}'
+assert_eq "service menu rename requires session" "$STATUS" "401"
+request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
+assert_eq "menu services reload for reorder" "$STATUS" "200"
+MENU_SVC_FIRST=$(jq -er '[.data.local[].menu_key] | .[-1]' "$TMP_DIR/body")
+request DELETE "$ADMIN_HOST" "/_authz/api/menu-services/$MENU_SVC_FIRST" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "reset service override" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
+assert_eq "menu services reload after reset" "$STATUS" "200"
+MENU_SVC_LAST=$(jq -er '[.data.local[].menu_key] | map(select(. != "'$MENU_SVC_FIRST'")) | .[0]' "$TMP_DIR/body")
+request PUT "$ADMIN_HOST" /_authz/api/menu-services/reorder "$ADMIN_COOKIE" "$CSRF" "{\"order\":[\"$MENU_SVC_FIRST\"]}"
+assert_eq "reorder service entries" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
+assert_json "reordered service moves to the top" '.data.local[0].menu_key' "$MENU_SVC_FIRST"
+assert_json "untouched services keep relative order" '.data.local[1].menu_key' "$MENU_SVC_LAST"
 
 # ── 文件浏览 API /_authz/api/files ─────────────────────────────
 request GET "$ADMIN_HOST" /_authz/api/files "$ADMIN_COOKIE"

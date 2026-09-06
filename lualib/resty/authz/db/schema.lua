@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS menu_entries(
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS menu_overrides(
+  menu_key TEXT PRIMARY KEY,
+  label TEXT NOT NULL DEFAULT '',
+  icon TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL
+);
 ]]
 
 return _M
