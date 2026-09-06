@@ -21,6 +21,16 @@
     /* 分组卡片两列平铺：系统应用与域名服务并列，节省纵向空间；窄屏自动回落单列。 */
     .group-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); gap: 14px; align-items: start; }
     .group-grid > .surface-card { margin-bottom: 0; }
+    /* 编辑弹窗：更宽卡片 + 更松的字段间距，标签不再与输入挤在一起。 */
+    .menu-form-card { width: min(560px, calc(100vw - 28px)); }
+    .menu-form-fields { display: grid; gap: 26px; padding-top: 6px; }
+    .icon-chooser { margin-top: 8px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255, 255, 255, .015); padding: 10px; display: grid; gap: 8px; }
+    .icon-chooser-preview { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+    .icon-chooser-preview .q-icon { color: var(--purple); }
+    .icon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); gap: 7px; max-height: 210px; overflow-y: auto; padding: 2px 2px 4px; scrollbar-width: thin; }
+    .icon-grid .icon-option { width: auto; height: 42px; }
+    .icon-grid .icon-option .q-icon { font-size: 21px; }
+    .icon-grid-empty { grid-column: 1 / -1; color: var(--muted); font-size: 12px; text-align: center; padding: 18px 0; }
   </style>
 </head>
 <body>
@@ -78,20 +88,29 @@
       </div>
 
       <q-dialog v-model="formOpen">
-        <q-card class="dialog-card">
+        <q-card class="dialog-card menu-form-card">
           <q-card-section><div class="dialog-title">{{ formTitle }}</div><div class="dialog-copy">{{ formCopy }}</div></q-card-section>
           <q-separator dark></q-separator>
-          <q-card-section class="q-gutter-md">
-            <q-input v-model="form.label" outlined dense dark :label="t.label" :placeholder="t.labelPlaceholder" :hint="isServiceEdit ? t.labelServiceHint : undefined" :rules="[v => isServiceEdit || !!v || t.required]"></q-input>
-            <q-select v-if="isItemForm && !isServiceEdit" v-model="form.parent" outlined dense dark :label="t.parentGroup" :options="groupOptions" option-label="label" emit-value map-options></q-select>
-            <q-input v-if="isItemForm && !isServiceEdit" v-model="form.url" outlined dense dark :label="t.url" :placeholder="t.urlPlaceholder" :rules="[v => !!v || t.required, v => urlValid(v) || t.urlRule]"></q-input>
-            <q-input v-model="form.icon" outlined dense dark :label="t.icon" :placeholder="t.iconPlaceholder" :hint="t.iconHint">
-              <template v-slot:append><q-icon :name="form.icon || 'mdi-link-variant'" size="20px"></q-icon></template>
-            </q-input>
-            <div class="icon-picker">
-              <div v-for="opt in iconOptions" :key="opt" class="icon-option" :class="{ 'icon-option-selected': form.icon === opt }" @click="pickIcon(opt)">
-                <q-icon :name="opt" size="18px"></q-icon>
-                <q-tooltip>{{ opt }}</q-tooltip>
+          <q-card-section class="menu-form-fields">
+            <q-input v-model="form.label" outlined dark :label="t.label" :placeholder="t.labelPlaceholder" :hint="isServiceEdit ? t.labelServiceHint : undefined" :rules="[v => isServiceEdit || !!v || t.required]"></q-input>
+            <q-select v-if="isItemForm && !isServiceEdit" v-model="form.parent" outlined dark :label="t.parentGroup" :options="groupOptions" option-label="label" emit-value map-options></q-select>
+            <q-input v-if="isItemForm && !isServiceEdit" v-model="form.url" outlined dark :label="t.url" :placeholder="t.urlPlaceholder" :rules="[v => !!v || t.required, v => urlValid(v) || t.urlRule]"></q-input>
+            <div>
+              <q-input v-model="form.icon" outlined dark :label="t.icon" :placeholder="t.iconPlaceholder" clearable>
+                <template v-slot:append><q-icon :name="form.icon || 'mdi-link-variant'" size="20px"></q-icon></template>
+              </q-input>
+              <div class="icon-chooser">
+                <q-input v-model="iconSearch" outlined dark :placeholder="t.iconSearchPlaceholder" clearable @clear-value="iconSearch = ''">
+                  <template v-slot:prepend><q-icon name="mdi-magnify" size="18px"></q-icon></template>
+                </q-input>
+                <div class="icon-chooser-preview"><q-icon :name="form.icon || 'mdi-link-variant'" size="20px"></q-icon><span>{{ form.icon || t.iconHint }}</span></div>
+                <div class="icon-grid">
+                  <div v-for="opt in iconChoices" :key="opt" class="icon-option" :class="{ 'icon-option-selected': form.icon === opt }" @click="pickIcon(opt)">
+                    <q-icon :name="opt" size="21px"></q-icon>
+                    <q-tooltip>{{ opt }}</q-tooltip>
+                  </div>
+                  <div v-if="!iconChoices.length" class="icon-grid-empty">{{ t.iconNoMatch }}</div>
+                </div>
               </div>
             </div>
           </q-card-section>
@@ -106,8 +125,9 @@
   </div>
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./vendor/mdi-names.js?v=1"></script>
   <script src="./api.js?v=16"></script>
-  <script src="./i18n.js?v=31"></script>
+  <script src="./i18n.js?v=32"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
 
@@ -125,6 +145,7 @@
         const editingId = ref(null)
         const isGroupForm = ref(false)
         const form = reactive({ label: '', url: '', icon: '', parent: null })
+        const iconSearch = ref('')
         let unsubscribeLocale
 
         // 分组折叠状态：默认展开，收起偏好记在本地，刷新后保持。
@@ -153,11 +174,33 @@
           : (isServiceEdit.value ? t.value.editServiceCopy : t.value.createCopy))
         const groupOptions = computed(() => editableGroups.value.map(g => ({ label: g.label, value: g.id })))
 
-        const iconOptions = [
-          'mdi-link-variant', 'mdi-web', 'mdi-monitor', 'mdi-server', 'mdi-application-outline',
-          'mdi-lan-connect', 'mdi-database', 'mdi-chart-line', 'mdi-shield-check', 'mdi-cog',
-          'mdi-console', 'mdi-code-braces', 'mdi-rocket-launch', 'mdi-book-open-variant', 'mdi-video', 'mdi-folder'
+        // 图标库：vendor/mdi-names.js 是从打包 MDI 字体提取的全量图标名（7000+），
+        // 保证网格里的每个名字都有真实字形。空搜索时展示精选收藏 + 顺序前缀，
+        // 有输入时按名称模糊匹配；DOM 里最多渲染 ICON_WINDOW 个，避免卡顿。
+        const ICON_WINDOW = 400
+        const iconFavorites = [
+          'mdi-link-variant', 'mdi-web', 'mdi-web-box', 'mdi-monitor', 'mdi-server', 'mdi-server-network',
+          'mdi-application-outline', 'mdi-apps', 'mdi-application-brackets', 'mdi-lan-connect',
+          'mdi-database', 'mdi-database-export', 'mdi-chart-line', 'mdi-chart-box-outline',
+          'mdi-shield-key-outline', 'mdi-shield-account-outline', 'mdi-key-outline', 'mdi-cog-outline',
+          'mdi-console', 'mdi-console-line', 'mdi-code-braces', 'mdi-code-tags', 'mdi-rocket-launch',
+          'mdi-book-open-variant', 'mdi-video', 'mdi-movie-open-outline', 'mdi-folder', 'mdi-folder-multiple',
+          'mdi-github', 'mdi-git', 'mdi-docker', 'mdi-aws', 'mdi-cloud-outline', 'mdi-fire',
+          'mdi-lightbulb-on-outline', 'mdi-gauge', 'mdi-view-dashboard', 'mdi-memory', 'mdi-chip',
+          'mdi-router-wireless', 'mdi-access-point', 'mdi-wifi-strength-4', 'mdi-printer', 'mdi-camera',
+          'mdi-music-box-outline', 'mdi-home', 'mdi-office-building', 'mdi-store', 'mdi-cart',
+          'mdi-briefcase-outline', 'mdi-account-group-outline', 'mdi-account-tie-outline', 'mdi-star-outline',
+          'mdi-heart-outline', 'mdi-flag-outline', 'mdi-puzzle', 'mdi-toy-brick-marker-outline',
+          'mdi-wrench-outline', 'mdi-hammer', 'mdi-palette-swatch-outline', 'mdi-robot',
+          'mdi-brain', 'mdi-crane', 'mdi-television-classic', 'mdi-gamepad-variant-outline'
         ]
+        const allIconNames = computed(() => (Array.isArray(window.mdiNames) ? window.mdiNames : []))
+        const iconChoices = computed(() => {
+          const query = iconSearch.value.trim().toLowerCase().replace(/^mdi-/, '')
+          if (!query) return iconFavorites.concat(allIconNames.value.filter(n => !iconFavorites.includes(n))).slice(0, ICON_WINDOW)
+          const hits = allIconNames.value.filter(n => n.includes(query))
+          return hits.slice(0, ICON_WINDOW)
+        })
         function pickIcon (opt) { form.icon = opt }
 
         function urlValid (value) {
@@ -204,7 +247,7 @@
           }
         }
 
-        function resetForm () { form.label = ''; form.url = ''; form.icon = ''; form.parent = null }
+        function resetForm () { form.label = ''; form.url = ''; form.icon = ''; form.parent = null; iconSearch.value = '' }
 
         function openCreate () {
           isGroupForm.value = false
@@ -370,7 +413,7 @@
 
         onBeforeUnmount(() => unsubscribeLocale?.())
 
-        return { childEnabled, editableGroups, editingId, form, formCopy, formOpen, formTitle, groupOptions, groups, isAdmin, isGroupOpen, isItemForm, isServiceEdit, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, iconOptions, remove, removeGroup, resetService, saveForm, saving, t, toggleEnabled, toggleGroupOpen, urlValid, error }
+        return { childEnabled, editableGroups, editingId, form, formCopy, formOpen, formTitle, groupOptions, groups, iconChoices, iconSearch, isAdmin, isGroupOpen, isItemForm, isServiceEdit, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, remove, removeGroup, resetService, saveForm, saving, t, toggleEnabled, toggleGroupOpen, urlValid, error }
       }
     })
 

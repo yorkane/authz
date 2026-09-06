@@ -664,9 +664,11 @@ assert_eq "menu editor page loads" "$STATUS" "200"
 assert_contains_all "menu editor page edits the tree and offers icon configuration" "$BODY" \
     "const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue" \
     'v-model="form.icon"' \
-    "iconOptions" \
+    "iconChoices" \
+    'v-model="iconSearch"' \
+    "vendor/mdi-names.js" \
     "function pickIcon (opt) { form.icon = opt }" \
-    'class="icon-picker"' \
+    'class="icon-grid"' \
     'v-for="group in editableGroups"' \
     'v-for="(child, idx) in group.children"' \
     "openCreateGroup" \
