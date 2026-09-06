@@ -1403,7 +1403,7 @@ APP_ID=$(jq -er '.data.bindings[] | select(.domain == "fixed.test.example") | .i
 request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" "{\"domain\":\"pfx\",\"port\":$UPSTREAM_PORT,\"enabled\":true}"
 assert_eq "create binding from a bare prefix" "$STATUS" "201"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
-assert_json "prefix binding stores prefix-node-zone domain" '.data.bindings[] | select(.domain == "pfx-admin.test.example") | .domain' "pfx-admin.test.example"
+assert_json "prefix binding stores the bare prefix" '.data.bindings[] | select(.domain == "pfx") | .domain' "pfx"
 request GET pfx-admin.otherzone.example / "$ADMIN_COOKIE"
 assert_eq "prefix binding reachable through another wildcard zone" "$STATUS" "200"
 assert_eq "cross-zone proxy body" "$BODY" "$MOCK_BODY"
@@ -1412,8 +1412,10 @@ assert_json "menu link keeps the stored zone on the home host" '[.data.groups[] 
 request GET admin.newzone.example /_authz/api/menu-tree "$ADMIN_COOKIE"
 assert_json "menu link rebuilds for the requesting zone" '[.data.groups[] | .children[]? | select(.domain == "pfx-admin.newzone.example")] | length' "1"
 assert_json "legacy exact binding keeps its domain" '[.data.groups[] | .children[]? | select(.domain == "fixed.test.example")] | length' "1"
+request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
+assert_json "editor shows the rebuilt entry domain for prefix bindings" '[.data.domains[] | select(.domain == "pfx-admin.test.example")] | length' "1"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
-PFX_ID=$(jq -er '.data.bindings[] | select(.domain == "pfx-admin.test.example") | .id' "$TMP_DIR/body")
+PFX_ID=$(jq -er '.data.bindings[] | select(.domain == "pfx") | .id' "$TMP_DIR/body")
 request DELETE "$ADMIN_HOST" "/_authz/api/applications/$PFX_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "delete prefix binding" "$STATUS" "200"
 

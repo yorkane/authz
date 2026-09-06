@@ -164,7 +164,7 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 
 | 字段 | 必填 | 说明 |
 |---|---:|---|
-| `domain` | 是 | 推荐只填最后一级前缀，例如 `code`；也接受完整域名 |
+| `domain` | 是 | 填最后一级前缀（如 `code`），入口域名按请求 Host 动态拼接；API 也接受完整精确域名（非泛域场景） |
 | `target_ip` | 否 | 上游服务的 IPv4 或 IPv6 地址，默认 `127.0.0.1`；不接受 URL、协议或主机名 |
 | `port` | 是 | 上游服务端口，必须位于配置的允许范围 |
 | `menu_name` | 否 | 左侧菜单显示名称，最多 128 字符 |
@@ -184,8 +184,9 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 | `upstream_ssl_verify` | 否 | HTTPS 上游是否校验证书，默认 `true`；设为 `false` 忽略证书校验，仅建议用于受控内网或自签名证书 |
 | `upstream_path` | 否 | 上游路径改写，默认空值表示保留请求路径；例如 `/v1/index.html` 会把任意请求转发到 `/v1/index.html`，查询参数原样保留；不接受 query、fragment、连续斜杠或 `..` |
 
-前缀会按当前实例域名生成完整入口。例如实例基域名为 `m.ws.example.com`，`domain: "code"` 保存为
-`code-m.ws.example.com`。域名必须唯一，重复返回 `409`。
+前缀按约定原样存库（`domain: "code"` 保存 `code`）；代理与菜单在运行时按当前请求 Host 拼出
+`<前缀>-<节点>.<请求域>`（如经 `a-241.ai-t.wtvdev.com` 访问时解析 `code-241.ai-t.wtvdev.com`，
+经 `a-241.ws.gatepro.cn` 访问时解析 `code-241.ws.gatepro.cn`）。域名必须唯一，重复返回 `409`。
 
 ### `PATCH /applications/:id`
 

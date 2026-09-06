@@ -45,7 +45,7 @@ Browser
 
 - HTTP 入口默认 6080，但默认模式（`AUTHZ_HTTP_MODE=redirect`）会把公网 HTTP 请求 308 到 HTTPS；`disabled` 只绑定回环，`serve` 仅供受控测试；显式绑定按记录代理到 `http://` 或 `https://<target_ip>:<port>`；
 - HTTPS 入口默认 6443，在网关终止客户端 TLS 后，仍按绑定记录选择 HTTP/HTTPS 上游；HTTPS 上游默认校验证书，可按绑定关闭校验；
-- 目标优先取启用的精确域名绑定，否则按 `<前缀>-<节点>` 回退匹配同前缀+节点的绑定（多入口域名，见下），再否则解析 `<port>-任意域名` 到 `127.0.0.1:<port>`；显式绑定还可保存绑定级 Host、Forwarded、Origin 和模拟本机访问配置；未绑定域名的动态端口入口默认启用模拟本机访问；
+- 目标优先取启用的精确域名绑定，否则按请求首级标签查裸前缀索引（`<前缀>` 或 `<前缀>-<节点>` 命中即接管，见下），遗留物化域名再按 `前缀|节点` 精确回退，最后解析 `<port>-任意域名` 到 `127.0.0.1:<port>`；显式绑定还可保存绑定级 Host、Forwarded、Origin 和模拟本机访问配置；未绑定域名的动态端口入口默认启用模拟本机访问；
 - 可代理端口下限强制不小于 2000；目标为网关自身端口时返回 508；
 - 上游收到 `X-Authz-User`、`X-Authz-Source`、`X-Authz-Identity`；显式绑定默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名，`<port>-任意域名` 动态入口默认模拟本机访问（Host/`X-Forwarded-Host` 为 `127.0.0.1:<port>`，`X-Real-IP`/`X-Forwarded-For` 为 `127.0.0.1`）。若最外层代理替换了端口，只在 Origin 与请求 Host 的主机名相同时恢复 Origin 中的公网端口。显式绑定可安全覆盖 `Host`、`X-Forwarded-Host/Proto/Port` 和 `Origin`，但不能改变真实 TCP peer。
 - 只要请求带有 `Upgrade: websocket`，所有已解析的动态代理目标都会转发升级头，并关闭缓冲、延长读写超时。`bindings.websocket` 保留为历史兼容字段，不再阻断升级请求。
@@ -55,15 +55,15 @@ Admin 菜单应用列表不依赖 `bindings` 表：`/_authz/api/applications` �
 短超时 `HEAD /`；只有返回 HTTP 状态行的端口才会列出。结果按 worker 缓存，默认 30 秒；容器需要使用
 host 网络或其他方式让目标服务位于网关容器的 `127.0.0.1` 网络命名空间内。
 
-多入口域名（一套系统适配多个 / 多级域名）：绑定遵循 `<前缀>-<节点>.<泛域>` 约定（如
-`code-241.ai-t.wtvdev.com`）。创建/编辑绑定时只需填最后一级前缀（`code`），后端用当前请求 Host 去掉
-`a-`/`<数字>-` 前缀后的主机名拼出 `<前缀>-<主机>` 存库；完整域名也直接接受。`lualib/resty/authz/domain.lua`
-提供拆解与重建：节点（`241`）在多台泛域入口（`ai-t.wtvdev.com`、`ws.gatepro.cn`…）之间稳定，zone 取决于
-浏览器从哪个入口进来。左侧菜单与 `/_authz/api/menu-services` 输出的 `domain` 会按当前请求 Host 的节点/zone
-重建（`code-241.ws.gatepro.cn`），因此同一绑定在任意入口域名下菜单链接都指向可达地址；不符合约定的历史
-精确域名（`nas.example.com`）、纯标签主机、IP 访问保持原值。代理侧配套：`gateway/cache.lua` 维护
-`前缀|节点` 回退索引，精确域名未命中时按前缀+节点解析（纯数字前缀不参与，留给 `<端口>-域名` 动态入口），
-两侧都只在同节点时生效。
+多入口域名（一套系统适配多个 / 多级域名）：绑定只保存最后一级裸前缀（`code`）。入口域名在运行时按
+当前请求 Host 拼出 `<前缀>-<节点>.<泛域>`：节点取请求首级标签最后一个 `-` 之后的片段（无 `-` 时整段），
+泛域随浏览器进入的入口（`ai-t.wtvdev.com`、`ws.gatepro.cn`…）。`lualib/resty/authz/domain.lua` 的
+`link()` 负责菜单/编辑器展示拼接（`code-241.ws.gatepro.cn`），`gateway/cache.lua` 建裸前缀索引、
+`gateway/resolver.lua` 用请求首级标签匹配 `<前缀>` 与 `<前缀>-<节点>` 两种形态（纯数字前缀不参与带节点
+后缀的回退，留给 `<端口>-域名` 动态入口）。管理界面的域名输入框因此只接受前缀；API 仍接受完整精确域名
+（原样存库、只精确匹配）供非泛域入口使用。历史遗留的物化 `<前缀>-<节点>.<泛域>` 完整域名（未迁移的库）
+保持原样精确匹配 + `前缀|节点` 跨 zone 回退；在管理界面把它改存为裸前缀即完成迁移（编辑表单提交裸前缀
+即可，PATCH 后行为与新建一致）。
 
 左侧菜单由存储的菜单树渲染（迁移 v7 起）：`menu_entries` 表以 `kind` 区分分组(`group`)与条目(`item`)，
 条目通过 `parent_id` 挂到分组下；`builtin` 标记内置页面(`users/authorization/menuEditor/files/nginxConf`)。

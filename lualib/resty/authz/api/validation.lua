@@ -103,13 +103,19 @@ local HEADER_OVERRIDE_BLOCKED = {
     te = true, trailer = true,
 }
 
-function _M.normalize_binding_domain(value)
+-- 域名前缀是绑定的推荐（管理界面唯一）填法：只存最后一级前缀（如 code），
+-- 入口域名由菜单和代理层按当前请求 Host 动态拼出 <前缀>-<节点>.<泛域>，
+-- 保存时不依赖请求域名，同一套绑定天然适配所有 / 多级入口域名。
+-- API 仍接受完整的精确域名（不物化、只精确匹配），供非泛域入口和存量数据
+-- 使用；编辑时允许把与库中一致的原值原样提交。
+function _M.normalize_binding_domain(value, existing_domain)
     local domain = tostring(value or ""):lower():gsub("%s+", ""):gsub(":%d+$", "")
+    if existing_domain and domain == tostring(existing_domain):lower() then
+        return domain
+    end
     if valid_host(domain) then return domain end
     if not valid_domain_prefix(domain) then return nil end
-    local host = tostring(ngx.var.host or ""):lower():gsub("^a%-", ""):gsub("^%d+%-", "")
-    local generated = domain .. "-" .. host
-    return valid_host(generated) and generated or nil
+    return domain
 end
 
 function _M.normalize_header_overrides(value)

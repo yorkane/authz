@@ -90,7 +90,7 @@ function _M.update(id, data)
     if not existing then return nil, "应用不存在", 404 end
     local fields, values = {}, {}
     if data.domain ~= nil then
-        local domain = validation.normalize_binding_domain(data.domain)
+        local domain = validation.normalize_binding_domain(data.domain, existing.domain)
         if not domain then return nil, "请输入最后一级域名前缀，例如 name1", 422 end
         if bindings.domain_exists(domain, id) then return nil, "域名已存在", 409 end
         fields[#fields + 1], values[#values + 1] = "domain = ?", domain

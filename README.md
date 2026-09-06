@@ -33,9 +33,10 @@
 
 管理端的“新增域名绑定”支持以下配置：
 
-- 只填写最后一级域名前缀，例如 `name1`；当前实例为 `m.ws.example.com` 时保存为 `name1-m.ws.example.com`；
-  一套系统有多个 / 多级入口域名时（如 `*.ai-t.wtvdev.com`、`*.ws.gatepro.cn`），左侧菜单链接会按
-  当前访问域名自动重建为 `name1-m.<当前域名>`，同一绑定无需按域名各建一份即可跨入口访问；
+- 域名输入框只填写最后一级前缀（如 `code`，不带任何点）：网关按当前请求 Host 动态拼出
+  `<前缀>-<节点>.<当前域名>`（如 `code-241.ai-t.wtvdev.com`、`code-241.ws.gatepro.cn`），
+  一套绑定在所有 / 多级泛域入口下都能代理与显示菜单，永不因入口域名不同而各建一份；
+  历史遗留的完整域名（非泛域精确入口）仍原样精确匹配；
 - 公网入口默认把 HTTP 永久重定向到 HTTPS（`AUTHZ_HTTP_MODE=redirect`）；需要临时暴露管理端时用防火墙白名单限制来源；
 - 多实例可启用共享会话模式（Redis），但只允许一个实例 `read-write`，其余实例 `read-only`；角色/策略仍各自本地管理，详见 `docs/maintenance-handbook.md` 6.1；
 - 目标 IP 默认 `127.0.0.1`，也可填写其他机器的 IPv4 或 IPv6 地址；上游协议可选择 HTTP 或 HTTPS，HTTPS 可选择是否忽略 SSL 证书校验；

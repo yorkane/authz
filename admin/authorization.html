@@ -30,7 +30,7 @@
         <q-card-section class="surface-heading"><div><div class="surface-title">{{ t.routesTitle }}</div><div class="surface-subtitle">{{ t.routesCopy }} · {{ portMin }}–{{ portMax }}</div></div><q-badge outline color="blue-3" :label="`${bindings.length} ${t.routeCount}`"></q-badge></q-card-section>
         <q-separator dark></q-separator>
         <q-table flat dark :rows="bindings" :columns="bindingColumns" row-key="id" :loading="loading" :rows-per-page-options="[8, 16, 0]" class="linear-table">
-          <template v-slot:body-cell-domain="props"><q-td :props="props"><div class="route-cell"><q-icon name="mdi-earth" size="18px"></q-icon><strong>{{ props.row.domain }}</strong></div></q-td></template>
+          <template v-slot:body-cell-domain="props"><q-td :props="props"><div class="route-cell"><q-icon name="mdi-earth" size="18px"></q-icon><strong>{{ entryDomain(props.row) }}</strong></div></q-td></template>
           <template v-slot:body-cell-target_ip="props"><q-td :props="props"><code class="code-pill">{{ props.row.target_ip || '127.0.0.1' }}</code></q-td></template>
           <template v-slot:body-cell-port="props"><q-td :props="props"><code class="code-pill">:{{ props.row.port }}</code></q-td></template>
           <template v-slot:body-cell-proxy="props"><q-td :props="props"><q-chip dense :class="props.row.simulate_local === 1 ? 'effect-allow' : (hasCustomProxy(props.row) ? 'role-chip' : '')" :icon="props.row.simulate_local === 1 ? 'mdi-laptop' : (hasCustomProxy(props.row) ? 'mdi-tune-variant' : 'mdi-arrow-right')">{{ proxySummary(props.row) }}</q-chip><q-tooltip><div v-for="line in proxyDetails(props.row)" :key="line">{{ line }}</div></q-tooltip></q-td></template>
@@ -49,9 +49,9 @@
           <template v-slot:body-cell-v1="props"><q-td :props="props">
             <div v-if="props.row.ptype === 'p'" class="policy-object-cell">
               <div class="policy-object-title"><q-icon :name="policyObjectIcon(props.row)" size="17px"></q-icon><strong>{{ policyObjectTitle(props.row) }}</strong><q-badge v-if="props.row.object_kind === 'shared'" outline color="amber-5" :label="`${policyBindings(props.row).length} ${t.sharedBindings}`"></q-badge><q-badge v-else-if="props.row.object_kind === 'unbound' || props.row.object_kind === 'invalid'" outline color="red-4" :label="props.row.object_kind === 'invalid' ? t.invalidObject : t.unboundObject"></q-badge></div>
-              <div v-if="policyPrimaryBinding(props.row)" class="policy-object-target"><span>{{ policyPrimaryBinding(props.row).domain }}</span><code>{{ policyPrimaryBinding(props.row).target_ip || '127.0.0.1' }}:{{ policyPrimaryBinding(props.row).port }}</code></div>
+              <div v-if="policyPrimaryBinding(props.row)" class="policy-object-target"><span>{{ entryDomain(policyPrimaryBinding(props.row)) }}</span><code>{{ policyPrimaryBinding(props.row).target_ip || '127.0.0.1' }}:{{ policyPrimaryBinding(props.row).port }}</code></div>
               <div class="policy-object-path"><span>{{ t.objectPath }}</span><code>{{ props.row.object_path || props.row.v1 }}</code></div>
-              <q-tooltip v-if="policyBindings(props.row).length > 1"><div v-for="binding in policyBindings(props.row)" :key="binding.id">{{ binding.domain }} → {{ binding.target_ip || '127.0.0.1' }}:{{ binding.port }}</div></q-tooltip>
+              <q-tooltip v-if="policyBindings(props.row).length > 1"><div v-for="binding in policyBindings(props.row)" :key="binding.id">{{ entryDomain(binding) }} → {{ binding.target_ip || '127.0.0.1' }}:{{ binding.port }}</div></q-tooltip>
             </div>
             <q-chip v-else dense class="role-chip" icon="mdi-account-key-outline">{{ props.row.v1 }}</q-chip>
           </q-td></template>
@@ -68,7 +68,7 @@
             <q-separator dark></q-separator>
             <q-card-section class="dialog-fields binding-dialog-fields">
               <div class="binding-grid">
-                <q-input v-model="bindingForm.domain" dark dense outlined :label="t.domain" :placeholder="t.domainPlaceholder" :hint="t.domainHint" :rules="[required]"></q-input>
+                <q-input v-model.trim="bindingForm.domain" dark dense outlined maxlength="63" :disable="bindingDomainLocked" :label="t.domain" :placeholder="t.domainPlaceholder" :rules="[bindingDomainRule]"></q-input>
                 <q-input v-model="bindingForm.menu_name" dark dense outlined hide-bottom-space maxlength="128" :label="t.menuName" :hint="t.menuNameHint"></q-input>
                 <q-input v-model.trim="bindingForm.target_ip" dark dense outlined hide-bottom-space maxlength="45" :label="t.targetIp" :placeholder="t.targetIpPlaceholder" :rules="[required]"></q-input>
                 <q-input v-model.number="bindingForm.port" dark dense outlined hide-bottom-space type="number" :label="t.port" :min="portMin" :max="portMax" :rules="[required]"></q-input>
@@ -134,7 +134,7 @@
   </div>
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
   <script src="./api.js?v=16"></script>
-  <script src="./i18n.js?v=29"></script>
+  <script src="./i18n.js?v=30"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
     
@@ -180,8 +180,8 @@
           const port = Number(binding.port)
           boundPorts.add(port)
           options.push({
-            label: binding.menu_name || binding.domain,
-            detail: `${binding.domain} · ${binding.target_ip || '127.0.0.1'}:${port}`,
+            label: binding.menu_name || entryDomain(binding),
+            detail: `${entryDomain(binding)} · ${binding.target_ip || '127.0.0.1'}:${port}`,
             value: `binding:${binding.id}`,
             bindingId: Number(binding.id),
             port,
@@ -293,7 +293,7 @@
       function policyObjectTitle (policy) {
         if (policy.object_kind === 'global') return t.value.allObjects
         const binding = policyPrimaryBinding(policy)
-        if (binding) return binding.menu_name || binding.domain
+        if (binding) return binding.menu_name || entryDomain(binding)
         return policy.object_port ? `${t.value.directPort} :${policy.object_port}` : t.value.invalidObject
       }
 
@@ -326,8 +326,44 @@
       function required (value) {
         if (Array.isArray(value)) return value.length > 0 || t.value.required
         return value !== '' && value !== null && value !== undefined || t.value.required
+      }
+
+      // 绑定只存最后一级前缀；这里镜像后端 domain.lua 的拼接规则，
+      // 按当前浏览器 Host 展示完整入口域名（遗留完整域名原样返回）。
+      function entryDomain (binding) {
+        const stored = String((binding && binding.domain) || '').toLowerCase()
+        if (!stored) return ''
+        const host = String(window.location.hostname || '').toLowerCase()
+        const dot = host.indexOf('.')
+        if (stored.includes('.')) {
+          if (dot < 0) return stored
+          const label = host.slice(0, dot)
+          const node = label.includes('-') ? label.split('-').pop() : label
+          const parts = stored.split('.')
+          const first = parts[0]
+          if (!first.includes('-')) return stored
+          const storedNode = first.split('-').pop()
+          if (storedNode !== node) return stored
+          return first + '.' + host.slice(host.indexOf('.') + 1)
         }
-    
+        if (dot < 0) return stored
+        const label = host.slice(0, dot)
+        const zone = host.slice(dot + 1)
+        if (label === stored) return stored + '.' + zone
+        const node = label.includes('-') ? label.split('-').pop() : label
+        return stored + '-' + node + '.' + zone
+      }
+
+      // 域名输入框只接受最后一级前缀；编辑遗留完整域名时允许原样保留。
+      let bindingOriginalDomain = ''
+      function bindingDomainRule (value) {
+        const input = String(value || '').trim().toLowerCase()
+        if (!input) return t.value.required
+        if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(input)) return true
+        if (input === bindingOriginalDomain) return true
+        return t.value.invalidDomainPrefix
+      }
+
         function notify (message, type = 'positive') {
           Quasar.Notify.create({ message, type, position: 'top-right', timeout: 2200 })
         }
@@ -371,12 +407,14 @@
         function openCreateBinding () {
           bindingEditingId.value = null
           Object.assign(bindingForm, bindingDefaults())
+          bindingOriginalDomain = ''
           bindingAdvancedOpen.value = false
           bindingOpen.value = true
         }
 
         function openEditBinding (binding) {
           bindingEditingId.value = binding.id
+          bindingOriginalDomain = String(binding.domain || '').toLowerCase()
           Object.assign(bindingForm, bindingDefaults(), { domain: binding.domain, target_ip: binding.target_ip || '127.0.0.1', port: binding.port, menu_name: binding.menu_name || '', note: binding.note || '', enabled: binding.enabled === 1, upstream_scheme: binding.upstream_scheme || 'http', upstream_ssl_verify: binding.upstream_ssl_verify !== 0, upstream_path: binding.upstream_path || '', upstream_host: binding.upstream_host || '', forwarded_host: binding.forwarded_host || '', forwarded_proto: binding.forwarded_proto || '', forwarded_port: Number(binding.forwarded_port) || '', origin_mode: binding.origin_mode || 'auto', custom_origin: binding.custom_origin || '', simulate_local: binding.simulate_local === 1, local_ip: binding.local_ip || '127.0.0.1' })
           bindingAdvancedOpen.value = binding.simulate_local === 1 || hasCustomProxy(binding)
           bindingOpen.value = true
@@ -399,7 +437,7 @@
         }
 
         function removeBinding (binding) {
-        Quasar.Dialog.create({ title: t.value.deleteBindingTitle, message: `${binding.domain} → ${binding.target_ip || '127.0.0.1'}:${binding.port} · ${t.value.deleteBindingConfirm}`, cancel: true, persistent: true, ok: { label: t.value.deleteAction, color: 'negative', flat: true } })
+        Quasar.Dialog.create({ title: t.value.deleteBindingTitle, message: `${entryDomain(binding)} → ${binding.target_ip || '127.0.0.1'}:${binding.port} · ${t.value.deleteBindingConfirm}`, cancel: true, persistent: true, ok: { label: t.value.deleteAction, color: 'negative', flat: true } })
           .onOk(() => mutate(() => window.adminApi.saveBinding({ _csrf: csrf.value, action: 'delete', id: binding.id }), t.value.bindingDeleted))
         }
     
@@ -468,7 +506,7 @@
 
       onBeforeUnmount(() => unsubscribeLocale?.())
     
-      return { actionList, allowCount, bindingAdvancedOpen, bindingColumns, bindingEditingId, bindingForm, bindingOpen, bindings, denyCount, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, required, resetPolicyFields, saveBindingForm, savePolicyForm, saving, selectedPolicyObject, setPolicyMethods, sourceLabel, t, toggleBinding, upstreamSchemeOptions }
+      return { actionList, allowCount, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, denyCount, entryDomain, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, required, resetPolicyFields, saveBindingForm, savePolicyForm, saving, selectedPolicyObject, setPolicyMethods, sourceLabel, t, toggleBinding, upstreamSchemeOptions }
       }
     })
     

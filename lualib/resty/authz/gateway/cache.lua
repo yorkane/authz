@@ -104,13 +104,22 @@ function _M.ensure(config)
     end
     state.enforcer = casbin.new_enforcer(lines)
     state.bindings = binding_map()
-    -- <前缀>-<节点>.<任意泛域> 回退索引：同一绑定在多个入口域名（zone）下可达。
+    -- 裸前缀索引：绑定只存前缀（code），resolver 用它匹配
+    -- <前缀>.<任意域名> 与 <前缀>-<节点>.<任意泛域> 两种入口形态。
     local by_prefix = {}
+    -- 历史遗留：改造前物化的 <前缀>-<节点>.<泛域> 完整域名（未迁移的库或
+    -- 迁移时撞名的行）仍按 前缀|节点 回退，保留跨 zone 可达行为。
+    local by_prefix_node = {}
     for host, binding in pairs(state.bindings) do
-        local key = domain.index_key(host)
-        if key and not by_prefix[key] then by_prefix[key] = binding end
+        if not host:find(".", 1, true) then
+            by_prefix[host] = binding
+        else
+            local key = domain.index_key(host)
+            if key and not by_prefix_node[key] then by_prefix_node[key] = binding end
+        end
     end
     state.bindings_by_prefix = by_prefix
+    state.bindings_by_prefix_node = by_prefix_node
     state.rev = revision
     return state
 end

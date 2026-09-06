@@ -10,7 +10,7 @@ local applications = require "resty.authz.api.services.applications"
 local common = require "resty.authz.api.common"
 local validation = require "resty.authz.api.validation"
 local menu_overrides = require "resty.authz.repository.menu_overrides"
-local menu_domain = require "resty.authz.domain"
+local domain = require "resty.authz.domain"
 
 local _M = {}
 
@@ -36,12 +36,17 @@ function _M.service_entries()
         local menu_key = bound and application.id and ("binding:" .. tostring(application.id))
             or ("port:" .. tostring(application.port))
         local override = overrides[menu_key]
-        -- 菜单入口域名跟随当前请求的节点/泛域重建：<前缀>-<节点>.<当前域>，
-        -- 一套绑定适配多个入口域名（ai-t.wtvdev.com / ws.gatepro.cn / ...）。
+        -- 绑定只存前缀：菜单入口按当前请求 Host 拼出 <前缀>-<节点>.<当前域>，
+        -- 一套绑定适配多个入口域名（ai-t.wtvdev.com / ws.gatepro.cn / ...）；
+        -- 遗留完整域名原样保留，IP/单机访问无法拼接时回落存值展示。
         local link_domain = bound and application.domain and application.domain ~= ""
-            and menu_domain.menu_domain(application.domain, ngx.var.host) or application.domain
+            and (domain.link(application.domain, ngx.var.host) or application.domain)
+            or application.domain
         local label = bound
-            and (application.label or application.menu_name or application.domain or application.note or
+            -- applications.label 已按 menu_name > 存值 组装；裸前缀存值时
+            -- 展示拼接出的入口域名，避免菜单只剩一段前缀。
+            and (application.menu_name ~= nil and application.menu_name ~= "" and application.menu_name
+                or link_domain or application.label or application.note or
                 ("local:" .. application.port))
             or ("local:" .. application.port)
         entries[#entries + 1] = {

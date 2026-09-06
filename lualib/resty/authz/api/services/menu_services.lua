@@ -12,6 +12,7 @@ local db = require "resty.authz.db"
 local bindings = require "resty.authz.repository.bindings"
 local menu_overrides = require "resty.authz.repository.menu_overrides"
 local common = require "resty.authz.api.common"
+local domain = require "resty.authz.domain"
 
 local _M = {}
 
@@ -41,12 +42,14 @@ function _M.resolve(menu_key)
     if binding_id then
         local row = bindings.by_id(tonumber(binding_id))
         if not row then return nil end
+        -- 编辑器与菜单一致：显示按当前请求域名拼接出的入口域名。
+        local shown = domain.link(row.domain, ngx.var.host) or row.domain
         return {
             kind = "binding",
             id = tonumber(binding_id),
-            domain = row.domain,
+            domain = shown,
             port = tonumber(row.port),
-            label = row.menu_name ~= "" and row.menu_name or row.domain,
+            label = row.menu_name ~= "" and row.menu_name or shown,
             note = row.note,
             target_ip = row.target_ip,
         }
