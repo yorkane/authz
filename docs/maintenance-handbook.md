@@ -56,11 +56,19 @@ Admin 菜单应用列表不依赖 `bindings` 表：`/_authz/api/applications` �
 host 网络或其他方式让目标服务位于网关容器的 `127.0.0.1` 网络命名空间内。
 
 左侧菜单由存储的菜单树渲染（迁移 v7 起）：`menu_entries` 表以 `kind` 区分分组(`group`)与条目(`item`)，
-条目通过 `parent_id` 挂到分组下；`builtin` 标记内置页面(`users/authorization/menuEditor/files/nginxConf`)，
-`builtin='local'` 的分组在渲染时自动注入动态发现的本机服务。`/_authz/api/menu-tree` 输出两级树供左侧菜单渲染
-（只含启用项；编辑器通过 `/_authz/api/menu-entries` 读取全量含停用项）。`menu-editor.html` 提供树状编辑：
-新增/编辑分组与条目、上移下移、显隐开关、图标选择与分组归属调整。非空分组不可删除（先移走或删除条目）。
-迁移 v7 会把旧扁平布局种子化为「系统应用」与「本机应用」两个分组。
+条目通过 `parent_id` 挂到分组下；`builtin` 标记内置页面(`users/authorization/menuEditor/files/nginxConf`)。
+`/_authz/api/menu-tree` 输出两级树供左侧菜单渲染（只含启用项；编辑器通过 `/_authz/api/menu-entries` 读取全量
+含停用项）。`menu-editor.html` 提供树状编辑：新增/编辑分组与条目、上移下移、显隐开关、图标选择与分组归属
+调整。非空分组不可删除（先移走或删除条目）。迁移 v7 把旧扁平布局种子化为「系统应用」分组，v13 拆出三个分组：
+系统应用、`builtin='domains'`（域名服务）与 `builtin='local'`（本地服务）。后两者的条目由 `/_authz/api/applications`
+在渲染时注入（已绑定域名的应用进域名服务，其余端口探测结果进本地服务），本身不落 `menu_entries`。
+
+这类注入条目通过 `menu_overrides` 表（迁移 v14）按稳定服务键 `binding:<id>` / `port:<port>` 保存菜单定制
+（label / icon / sort_order / enabled）。域名条目改名会回写 `bindings.menu_name`（与代理层共用同一事实来源），
+其余字段与端口条目全部存在覆盖表里；隐藏只把条目移出左侧菜单，不改变绑定或探测本身。编辑器经
+`GET /_authz/api/menu-services` 拿到含隐藏项的可编辑视图，`PATCH` 改名/图标/显隐、`PUT .../reorder` 排序、
+`DELETE` 恢复默认（均为 admin + CSRF）；删除绑定会联动清理其覆盖行。键只接受 `binding:<数字>` / `port:<数字>`
+（浏览器 `%3A` 编码会被安全解码后严格校验）。
 
 Agent/API 控制面接入：设置 `AUTHZ_AGENT_API_KEY` 环境变量后启动，会 seed 名为 `agent-default` 的
 API Key（角色 admin、`loopback_only=1`），只能从网关宿主机本机调用 `/_authz/api/*`，非回环来源 401。
@@ -92,6 +100,8 @@ API Key（角色 admin、`loopback_only=1`），只能从网关宿主机本机�
 | `lualib/resty/authz/nocobase.lua` | NocoBase 用户名密码认证 |
 | `lualib/resty/authz/oauth.lua` | OAuth Code + PKCE、token/userinfo、身份记录 |
 | `lualib/resty/authz/discovery.lua` | 读取本机监听端口并用短超时 HTTP HEAD 发现本地服务 |
+| `lualib/resty/authz/api/services/menu_services.lua` | 注入条目（binding:/port: 键）的菜单覆盖读写：改名/图标/排序/显隐/恢复默认 |
+| `lualib/resty/authz/repository/menu_overrides.lua` | `menu_overrides` 表读写（须在事务内调用，读绕过 mlcache） |
 | `admin/` | 无构建步骤的 Vue 3 + Quasar UMD Admin UI |
 | `lualib/klib/` | 项目代码注册式 Router 和请求上下文框架 |
 
