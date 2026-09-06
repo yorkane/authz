@@ -66,10 +66,15 @@ host 网络或其他方式让目标服务位于网关容器的 `127.0.0.1` 网�
 即可，PATCH 后行为与新建一致）。
 
 左侧菜单由存储的菜单树渲染（迁移 v7 起）：`menu_entries` 表以 `kind` 区分分组(`group`)与条目(`item`)，
-条目通过 `parent_id` 挂到分组下；`builtin` 标记内置页面(`users/authorization/menuEditor/files/nginxConf`)。
+条目通过 `parent_id` 挂到分组下；`builtin` 标记内置节点：内置页面条目
+(`users/authorization/menuEditor/files/nginxConf`)、内置分组（迁移 v15 起 `builtin='system'`
+的“系统应用”，以及 `domains`/`local` 两个动态分组）。凡 `builtin` 非空的分组与条目一律不可删除
+（API `409`，编辑器不显示删除按钮）。
 `/_authz/api/menu-tree` 输出两级树供左侧菜单渲染（只含启用项；编辑器通过 `/_authz/api/menu-entries` 读取全量
 含停用项）。`menu-editor.html` 提供树状编辑：新增/编辑分组与条目、上移下移、显隐开关、图标选择与分组归属
-调整。非空分组不可删除（先移走或删除条目）。迁移 v7 把旧扁平布局种子化为「系统应用」分组，v13 拆出三个分组：
+调整，分组卡片两列平铺（窄屏自动回落单列）以节省纵向空间。非空分组不可删除（先移走或删除条目），
+内置分组/条目不可删除。编辑器只呈现系统应用与域名服务两个分组：`builtin='local'`（本地服务）完全移出
+编辑器——其条目随端口探测动态变化，不支持编辑。迁移 v7 把旧扁平布局种子化为「系统应用」分组，v13 拆出三个分组：
 系统应用、`builtin='domains'`（域名服务）与 `builtin='local'`（本地服务）。后两者的条目由 `/_authz/api/applications`
 在渲染时注入（已绑定域名的应用进域名服务，其余端口探测结果进本地服务），本身不落 `menu_entries`。
 

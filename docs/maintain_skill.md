@@ -68,6 +68,7 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
 - 菜单应用列表通过 `resty.authz.discovery` 探测网关本机 `127.0.0.1` 的 HTTP 服务，仅扫描配置端口范围、排除网关端口，并使用短超时缓存结果；不要恢复仅依赖 `bindings` 表的菜单发现。
 - 左侧菜单固定绑定显示 `menu_name` 或按当前请求 Host 拼接出的入口域名（绑定只存裸前缀，见 `lualib/resty/authz/domain.lua`）；绑定备注只显示在菜单名称下方，悬浮菜单项时显示该菜单实际打开的完整域名地址；自动发现的 `local:<port>` 不伪造绑定备注。
 - 域名绑定保存前缀本身：禁止恢复"按当前请求域名物化完整域名"的旧行为；管理 UI 输入框只校验裸前缀，完整精确域名只允许经 API 传入并保持精确匹配；遗留物化域名保持只读兼容（可编辑为裸前缀完成迁移）。
+- 菜单编辑器只编辑系统应用与域名服务两个分组（分组卡片两列平铺）；`builtin='local'`（本地服务）完全移出编辑器。凡 `builtin` 非空的分组/条目（system/domains/local 分组与内置页面）不可删除：API 返回 `409`，UI 隐藏删除按钮，两侧保护不得移除。
 - Dockerfile 必须保留 `--with-http_ssi_module` 和 `ngx_brotli`；Brotli 动态等级 5，静态资源构建时生成等级 11 的 `.br`，由 `brotli_static` 提供。
 - `conf/nginx.conf.template` 只维护全局配置、HTTP/HTTPS listener 和 TLS；两个 server 必须共同 include 入口脚本生成的 `server.conf`，控制面 location 与代理参数只在 `conf/server.conf.template` 维护。
 - 显式绑定默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名；未绑定域名的 `<port>-任意域名` 动态入口固定指向本机 `127.0.0.1:<port>`，默认启用模拟本机访问（Host/Forwarded-Host 为目标地址，来源头为 `127.0.0.1`）。显式 binding 可按记录选择 HTTP/HTTPS 上游、关闭 HTTPS 证书校验、改写上游路径，或覆盖 Host、Forwarded、Origin、模拟本机 HTTP 请求头。不能恢复为 `$proxy_host` 全局默认。外层代理改写端口时，只能在 Origin 与请求 Host 的主机名相同后采用 Origin authority，不能信任异域 Origin；所有绑定级 authority/origin 必须拒绝 CR/LF 和 path/query，上游改写路径也必须拒绝 query/fragment、连续斜杠和 `..`。

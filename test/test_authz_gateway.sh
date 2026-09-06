@@ -452,7 +452,7 @@ assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group"
 
 cookie_header() {
     awk '
@@ -667,9 +667,11 @@ assert_contains_all "menu editor page edits the tree and offers icon configurati
     "iconOptions" \
     "function pickIcon (opt) { form.icon = opt }" \
     'class="icon-picker"' \
-    'v-for="group in groups"' \
+    'v-for="group in editableGroups"' \
     'v-for="(child, idx) in group.children"' \
     "openCreateGroup" \
+    "builtinUndeletable" \
+    "filter(g => g.builtin !== 'local')" \
     "window.adminApi.menuEntries()" \
     "window.adminApi.saveMenuEntry" \
     "urlValid" \
@@ -1643,6 +1645,9 @@ MENU_GROUP_ID=$(jq -er '.data[] | select(.kind == "group" and .label == "系统�
 assert_json "menu entries expose parent linkage" '[.data[] | select(.kind == "item")] | map(has("parent_id")) | all | tostring' "true"
 [[ -n "$MENU_GROUP_ID" ]] || fail "seeded system group not found"
 pass "seeded system group id resolved"
+assert_json "system group carries the builtin marker" '.data[] | select(.id == '$MENU_GROUP_ID') | .builtin' "system"
+request DELETE "$ADMIN_HOST" "/_authz/api/menu-entries/$MENU_GROUP_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "built-in system group cannot be deleted" "$STATUS" "409"
 
 request POST "$ADMIN_HOST" /_authz/api/menu-entries "$ADMIN_COOKIE" "$CSRF" '{"kind":"group","label":"工具集","icon":"mdi-toolbox"}'
 assert_eq "create menu group" "$STATUS" "201"

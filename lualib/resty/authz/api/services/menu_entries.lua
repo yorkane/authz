@@ -148,6 +148,9 @@ end
 function _M.delete(id)
     local existing = menu_entries.by_id(id)
     if not existing then return nil, "菜单不存在", 404 end
+    -- 内置结构节点（系统应用/域名服务/本地服务分组及内置页面条目）不可删除：
+    -- 删除会破坏控制面入口和动态服务注入。
+    if existing.builtin ~= "" then return nil, "内置菜单不能删除", 409 end
     if existing.kind == "group" then
         local children = db.query(
             "SELECT COUNT(*) AS c FROM menu_entries WHERE parent_id = ?", id)
@@ -165,4 +168,3 @@ function _M.delete(id)
 end
 
 return _M
-

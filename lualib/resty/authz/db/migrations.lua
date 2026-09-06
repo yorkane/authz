@@ -331,6 +331,19 @@ _M.list = {
             )]]))
         end,
     },
+    {
+        version = 15,
+        name = "mark_builtin_system_group",
+        up = function(db)
+            -- “系统应用”分组补上 builtin 标记：内置分组/条目（builtin 非空）
+            -- 一律不可删除，编辑器据此隐藏删除入口、API 拒绝删除。
+            -- 判据取“包含内置页面条目的分组”，比按 label 匹配更稳（用户可改名）。
+            must(db.exec([[UPDATE menu_entries SET builtin = 'system'
+                WHERE kind = 'group' AND builtin = '' AND id IN (
+                    SELECT DISTINCT parent_id FROM menu_entries
+                    WHERE kind = 'item' AND builtin <> '' AND parent_id IS NOT NULL)]]))
+        end,
+    },
 }
 
 function _M.run(db)

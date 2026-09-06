@@ -18,6 +18,9 @@
     .tree-row .q-item__section--side.tree-actions { flex-direction: row; align-items: center; }
     .menu-tree-body { padding-top: 0; padding-bottom: 6px; }
     .menu-tree-body .q-list--separator > .q-item + .q-item { border-color: rgba(139, 145, 184, .08); }
+    /* 分组卡片两列平铺：系统应用与域名服务并列，节省纵向空间；窄屏自动回落单列。 */
+    .group-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); gap: 14px; align-items: start; }
+    .group-grid > .surface-card { margin-bottom: 0; }
   </style>
 </head>
 <body>
@@ -30,9 +33,10 @@
 
       <q-banner v-if="error" rounded class="error-banner q-mb-lg"><template v-slot:avatar><q-icon name="mdi-alert-circle-outline"></q-icon></template>{{ error }}<template v-slot:action><q-btn flat dense no-caps :label="t.retry" @click="load"></q-btn></template></q-banner>
 
-      <div v-if="!loading && !groups.length" class="surface-card q-pa-xl row flex-center empty-state"><q-icon name="mdi-menu-open" size="30px"></q-icon><span>{{ t.noEntries }}</span></div>
+      <div v-if="!loading && !editableGroups.length" class="surface-card q-pa-xl row flex-center empty-state"><q-icon name="mdi-menu-open" size="30px"></q-icon><span>{{ t.noEntries }}</span></div>
 
-      <q-card v-for="group in groups" :key="group.id" flat class="surface-card q-mb-md">
+      <div class="group-grid">
+      <q-card v-for="group in editableGroups" :key="group.id" flat class="surface-card q-mb-md">
         <q-card-section class="surface-heading group-heading">
           <div class="row items-center no-wrap q-gutter-sm">
             <q-btn flat round dense class="group-chevron" :icon="isGroupOpen(group) ? 'mdi-chevron-down' : 'mdi-chevron-right'" :aria-label="isGroupOpen(group) ? t.collapse : t.expand" @click="toggleGroupOpen(group)"><q-tooltip>{{ isGroupOpen(group) ? t.collapse : t.expand }}</q-tooltip></q-btn>
@@ -44,14 +48,13 @@
             <q-btn flat round dense icon="mdi-arrow-down" size="sm" @click="moveGroup(group, 1)"><q-tooltip>{{ t.moveDown }}</q-tooltip></q-btn>
             <q-btn flat round dense size="sm" :icon="group.enabled === 1 ? 'mdi-eye-outline' : 'mdi-eye-off-outline'" :color="group.enabled === 1 ? '' : 'grey-6'" @click="toggleEnabled(group)"><q-tooltip>{{ group.enabled === 1 ? t.disableToggle : t.enableToggle }}</q-tooltip></q-btn>
             <q-btn flat round dense icon="mdi-pencil-outline" @click="openEditGroup(group)"><q-tooltip>{{ t.editGroupTitle }}</q-tooltip></q-btn>
-            <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeGroup(group)"><q-tooltip>{{ t.deleteGroupTitle }}</q-tooltip></q-btn>
+            <q-btn v-if="!group.builtin" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeGroup(group)"><q-tooltip>{{ t.deleteGroupTitle }}</q-tooltip></q-btn>
           </div>
         </q-card-section>
         <template v-if="isGroupOpen(group)">
         <q-separator dark></q-separator>
         <q-card-section class="menu-tree-body">
           <div v-if="group.builtin === 'domains'" class="tree-hint"><q-icon name="mdi-information-outline" size="16px"></q-icon><span>{{ t.domainsGroupHint }}</span></div>
-          <div v-else-if="group.builtin === 'local'" class="tree-hint"><q-icon name="mdi-information-outline" size="16px"></q-icon><span>{{ t.dynamicGroupHint }}</span></div>
           <q-list separator>
             <q-item v-for="(child, idx) in group.children" :key="child.id || child.menu_key" class="tree-row">
               <q-item-section avatar><q-icon :name="child.icon || 'mdi-link-variant'" size="18px" color="blue-3"></q-icon></q-item-section>
@@ -63,8 +66,8 @@
                <q-btn flat round dense icon="mdi-arrow-up" size="sm" :disable="idx === 0" @click="moveChild(group, child, -1)"><q-tooltip>{{ t.moveUp }}</q-tooltip></q-btn>
                <q-btn flat round dense icon="mdi-arrow-down" size="sm" :disable="idx === group.children.length - 1" @click="moveChild(group, child, 1)"><q-tooltip>{{ t.moveDown }}</q-tooltip></q-btn>
                 <q-btn flat round dense size="sm" :icon="childEnabled(child) ? 'mdi-eye-outline' : 'mdi-eye-off-outline'" :color="childEnabled(child) ? '' : 'grey-6'" @click="toggleEnabled(child)"><q-tooltip>{{ childEnabled(child) ? t.disableToggle : t.enableToggle }}</q-tooltip></q-btn>
-               <q-btn flat round dense icon="mdi-pencil-outline" @click="openEdit(child, group)"><q-tooltip>{{ t.editTitle }}</q-tooltip></q-btn>
-               <q-btn v-if="!child.menu_key" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="remove(child)"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
+                <q-btn flat round dense icon="mdi-pencil-outline" @click="openEdit(child, group)"><q-tooltip>{{ t.editTitle }}</q-tooltip></q-btn>
+                <q-btn v-if="!child.menu_key && !child.builtin" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="remove(child)"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
              </q-item-section>
             </q-item>
             <q-item v-if="!group.children.length" class="empty-state row flex-center"><span>{{ t.noEntries }}</span></q-item>
@@ -72,6 +75,7 @@
         </q-card-section>
         </template>
       </q-card>
+      </div>
 
       <q-dialog v-model="formOpen">
         <q-card class="dialog-card">
@@ -136,6 +140,9 @@
         }
 
         const isItemForm = computed(() => !isGroupForm.value)
+        // “本地服务”分组完全移出编辑器：条目随端口探测动态变化，不支持编辑；
+        // 域名服务与系统应用留在编辑器中（内置分组/条目不可删除）。
+        const editableGroups = computed(() => groups.value.filter(g => g.builtin !== 'local'))
         // 编辑对象是运行时注入的服务条目（binding:<id> / port:<port>）。
         const isServiceEdit = computed(() => /^(binding|port):/.test(String(editingId.value || '')))
         const formTitle = computed(() => isGroupForm.value
@@ -144,7 +151,7 @@
             : (editingId.value ? t.value.editTitle : t.value.createTitle)))
         const formCopy = computed(() => isGroupForm.value ? t.value.createGroupCopy
           : (isServiceEdit.value ? t.value.editServiceCopy : t.value.createCopy))
-        const groupOptions = computed(() => groups.value.map(g => ({ label: g.label, value: g.id })))
+        const groupOptions = computed(() => editableGroups.value.map(g => ({ label: g.label, value: g.id })))
 
         const iconOptions = [
           'mdi-link-variant', 'mdi-web', 'mdi-monitor', 'mdi-server', 'mdi-application-outline',
@@ -203,7 +210,7 @@
           isGroupForm.value = false
           editingId.value = null
           resetForm()
-          form.parent = groups.value.length ? groups.value[0].id : null
+          form.parent = editableGroups.value.length ? editableGroups.value[0].id : null
           formOpen.value = true
         }
 
@@ -336,6 +343,10 @@
         }
 
         function removeGroup (group) {
+          if (group.builtin) {
+            Quasar.Notify.create({ type: 'warning', message: t.value.builtinUndeletable, position: 'bottom' })
+            return
+          }
           if (group.children.length) {
             Quasar.Notify.create({ type: 'warning', message: t.value.cannotDeleteGroup, position: 'bottom' })
             return
@@ -359,7 +370,7 @@
 
         onBeforeUnmount(() => unsubscribeLocale?.())
 
-        return { childEnabled, editingId, form, formCopy, formOpen, formTitle, groupOptions, groups, isAdmin, isGroupOpen, isItemForm, isServiceEdit, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, iconOptions, remove, removeGroup, resetService, saveForm, saving, t, toggleEnabled, toggleGroupOpen, urlValid, error }
+        return { childEnabled, editableGroups, editingId, form, formCopy, formOpen, formTitle, groupOptions, groups, isAdmin, isGroupOpen, isItemForm, isServiceEdit, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, iconOptions, remove, removeGroup, resetService, saveForm, saving, t, toggleEnabled, toggleGroupOpen, urlValid, error }
       }
     })
 
