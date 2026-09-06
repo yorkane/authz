@@ -1,6 +1,7 @@
 local api_key = require "resty.authz.api_key"
 local casbin = require "resty.authz.casbin"
 local identity = require "resty.authz.identity"
+local domain = require "resty.authz.domain"
 local target = require "resty.authz.target"
 local api_keys = require "resty.authz.repository.api_keys"
 local bindings = require "resty.authz.repository.bindings"
@@ -103,6 +104,13 @@ function _M.ensure(config)
     end
     state.enforcer = casbin.new_enforcer(lines)
     state.bindings = binding_map()
+    -- <前缀>-<节点>.<任意泛域> 回退索引：同一绑定在多个入口域名（zone）下可达。
+    local by_prefix = {}
+    for host, binding in pairs(state.bindings) do
+        local key = domain.index_key(host)
+        if key and not by_prefix[key] then by_prefix[key] = binding end
+    end
+    state.bindings_by_prefix = by_prefix
     state.rev = revision
     return state
 end

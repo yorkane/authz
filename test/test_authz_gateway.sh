@@ -645,7 +645,7 @@ assert_contains_all "app.js renders the stored menu tree" "$BODY" \
     "menuEditor: 'menu-editor.html" \
     "function nodeUrl (node)" \
     "groupOpen[group.id]"
-request GET "$ADMIN_HOST" '/_authz/apps/i18n.js?v=28' "$ADMIN_COOKIE"
+request GET "$ADMIN_HOST" '/_authz/apps/i18n.js?v=29' "$ADMIN_COOKIE"
 assert_contains_all "i18n exposes menu group labels and hints" "$BODY" \
     "localApps: '本地服务'" \
     "自动发现的本机 HTTP 端口（未绑定域名）" \
@@ -1398,6 +1398,24 @@ request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "
 assert_eq "restore edited binding" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
 APP_ID=$(jq -er '.data.bindings[] | select(.domain == "fixed.test.example") | .id' "$TMP_DIR/body")
+
+# ── 多入口域名：前缀绑定 + 跨 zone 访问 / 菜单域名重建 ───────────
+request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" "{\"domain\":\"pfx\",\"port\":$UPSTREAM_PORT,\"enabled\":true}"
+assert_eq "create binding from a bare prefix" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+assert_json "prefix binding stores prefix-node-zone domain" '.data.bindings[] | select(.domain == "pfx-admin.test.example") | .domain' "pfx-admin.test.example"
+request GET pfx-admin.otherzone.example / "$ADMIN_COOKIE"
+assert_eq "prefix binding reachable through another wildcard zone" "$STATUS" "200"
+assert_eq "cross-zone proxy body" "$BODY" "$MOCK_BODY"
+request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
+assert_json "menu link keeps the stored zone on the home host" '[.data.groups[] | .children[]? | select(.domain == "pfx-admin.test.example")] | length' "1"
+request GET admin.newzone.example /_authz/api/menu-tree "$ADMIN_COOKIE"
+assert_json "menu link rebuilds for the requesting zone" '[.data.groups[] | .children[]? | select(.domain == "pfx-admin.newzone.example")] | length' "1"
+assert_json "legacy exact binding keeps its domain" '[.data.groups[] | .children[]? | select(.domain == "fixed.test.example")] | length' "1"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+PFX_ID=$(jq -er '.data.bindings[] | select(.domain == "pfx-admin.test.example") | .id' "$TMP_DIR/body")
+request DELETE "$ADMIN_HOST" "/_authz/api/applications/$PFX_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "delete prefix binding" "$STATUS" "200"
 
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"upstream_path":"/backend"}'
 assert_eq "save upstream path rewrite" "$STATUS" "200"

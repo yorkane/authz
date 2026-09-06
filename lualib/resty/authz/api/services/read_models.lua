@@ -10,6 +10,7 @@ local applications = require "resty.authz.api.services.applications"
 local common = require "resty.authz.api.common"
 local validation = require "resty.authz.api.validation"
 local menu_overrides = require "resty.authz.repository.menu_overrides"
+local menu_domain = require "resty.authz.domain"
 
 local _M = {}
 
@@ -35,6 +36,10 @@ function _M.service_entries()
         local menu_key = bound and application.id and ("binding:" .. tostring(application.id))
             or ("port:" .. tostring(application.port))
         local override = overrides[menu_key]
+        -- 菜单入口域名跟随当前请求的节点/泛域重建：<前缀>-<节点>.<当前域>，
+        -- 一套绑定适配多个入口域名（ai-t.wtvdev.com / ws.gatepro.cn / ...）。
+        local link_domain = bound and application.domain and application.domain ~= ""
+            and menu_domain.menu_domain(application.domain, ngx.var.host) or application.domain
         local label = bound
             and (application.label or application.menu_name or application.domain or application.note or
                 ("local:" .. application.port))
@@ -45,7 +50,7 @@ function _M.service_entries()
             bound = bound,
             label = (override and override.label ~= "" and override.label) or label,
             port = application.port,
-            domain = application.domain and application.domain or cjson.null,
+            domain = link_domain and link_domain or cjson.null,
             binding = bound or nil,
             note = bound and (application.note ~= "" and application.note or cjson.null) or cjson.null,
             icon = (override and override.icon ~= "" and override.icon)
