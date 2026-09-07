@@ -36,11 +36,13 @@ function _M.service_entries()
         local menu_key = bound and application.id and ("binding:" .. tostring(application.id))
             or ("port:" .. tostring(application.port))
         local override = overrides[menu_key]
-        -- 绑定只存前缀：菜单入口按当前请求 Host 拼出 <前缀>-<节点>.<当前域>，
-        -- 一套绑定适配多个入口域名（ai-t.wtvdev.com / ws.gatepro.cn / ...）；
+        -- 绑定只存前缀：菜单入口按入口域名拼出 <前缀>-<节点>.<当前域>，
+        -- 一套绑定适配多个入口域名（ai-t.wtvdev.com / ws.gatepro.cn / ...）。
+        -- 入口域名取 display_host()：外层入口改写 Host 时优先信任边缘回填的
+        -- X-Forwarded-Host，链接跟随浏览器实际进入的 zone；
         -- 遗留完整域名原样保留，IP/单机访问无法拼接时回落存值展示。
         local link_domain = bound and application.domain and application.domain ~= ""
-            and (domain.link(application.domain, ngx.var.host) or application.domain)
+            and (domain.link(application.domain, domain.display_host()) or application.domain)
             or application.domain
         local label = bound
             -- applications.label 已按 menu_name > 存值 组装；裸前缀存值时

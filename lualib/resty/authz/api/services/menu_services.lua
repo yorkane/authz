@@ -43,7 +43,7 @@ function _M.resolve(menu_key)
         local row = bindings.by_id(tonumber(binding_id))
         if not row then return nil end
         -- 编辑器与菜单一致：显示按当前请求域名拼接出的入口域名。
-        local shown = domain.link(row.domain, ngx.var.host) or row.domain
+        local shown = domain.link(row.domain, domain.display_host()) or row.domain
         return {
             kind = "binding",
             id = tonumber(binding_id),

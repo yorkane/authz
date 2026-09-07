@@ -496,11 +496,12 @@ save_session_cookie() {
 }
 
 request() {
-    local method=$1 host=$2 path=$3 cookie=${4:-} csrf=${5:-} data=${6:-} api_key=${7:-}
+    local method=$1 host=$2 path=$3 cookie=${4:-} csrf=${5:-} data=${6:-} api_key=${7:-} extra=${8:-}
     local args=(--silent --show-error --max-time 5 --request "$method" --resolve "$host:$HTTP_PORT:127.0.0.1" -H 'Accept: application/json' -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}')
     [[ -n "$cookie" ]] && args+=(-H "Cookie: $(cookie_header "$cookie")")
     [[ -n "$csrf" ]] && args+=(-H "X-CSRF-Token: $csrf")
     [[ -n "$api_key" ]] && args+=(-H "x-authz-key: $api_key")
+    [[ -n "$extra" ]] && args+=(-H "$extra")
     if [[ -n "$data" ]]; then args+=(-H 'Content-Type: application/json' --data "$data"); fi
     STATUS=$(curl "${args[@]}" "http://$host:$HTTP_PORT$path")
     BODY=$(<"$TMP_DIR/body")
@@ -1443,6 +1444,8 @@ request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
 assert_json "menu link keeps the stored zone on the home host" '[.data.groups[] | .children[]? | select(.domain == "pfx-admin.test.example")] | length' "1"
 request GET admin.newzone.example /_authz/api/menu-tree "$ADMIN_COOKIE"
 assert_json "menu link rebuilds for the requesting zone" '[.data.groups[] | .children[]? | select(.domain == "pfx-admin.newzone.example")] | length' "1"
+request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE" "$CSRF" "" "" "X-Forwarded-Host: pfx-admin.xffzone.example"
+assert_json "menu link follows X-Forwarded-Host entry zone" '[.data.groups[] | .children[]? | select(.domain == "pfx-admin.xffzone.example")] | length' "1"
 assert_json "legacy exact binding keeps its domain" '[.data.groups[] | .children[]? | select(.domain == "fixed.test.example")] | length' "1"
 request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
 assert_json "editor shows the rebuilt entry domain for prefix bindings" '[.data.domains[] | select(.domain == "pfx-admin.test.example")] | length' "1"

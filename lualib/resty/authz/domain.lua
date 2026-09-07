@@ -23,6 +23,20 @@ local function host_parts(host)
     return label, zone
 end
 
+-- Host used to build links/menu display domains. Outer entries may rewrite
+-- Host to a canonical zone, but a trusted edge preserves the browser-entered
+-- host in X-Forwarded-Host; prefer its first value so one prefix set still
+-- produces links on the zone the user actually typed. Proxy resolution does
+-- not use this and a spoofed value only changes the requester's own links.
+function _M.display_host()
+    local xfh = ngx.var.http_x_forwarded_host
+    if xfh and xfh ~= "" then
+        local first = xfh:match("^[^,]+")
+        if first then return first:match("^%s*(.-)%s*$") end
+    end
+    return ngx.var.host
+end
+
 -- Build the entry domain for a stored value plus the current request host.
 -- Bare prefixes are rebuilt against the current host; legacy dotted domains
 -- that still follow the <prefix>-<node>.<zone> convention are rebuilt when
