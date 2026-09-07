@@ -244,15 +244,11 @@ body {
 
 .admin-drawer-mini #admin-menu .menu-shell { padding-right: 0; padding-left: 0; }
 .admin-drawer-mini #admin-menu .menu-copy { display: none !important; }
-.admin-drawer-mini #admin-menu .brand-row { width: 40px; justify-content: flex-start; padding: 0 0 8px; }
+.admin-drawer-mini #admin-menu .brand-row { width: 100%; justify-content: flex-start; padding: 0 0 14px; }
 .admin-drawer-mini #admin-menu .brand-mark { display: none; }
-.admin-drawer-mini #admin-menu .collapse-button,
-.admin-drawer-mini #admin-menu .footer-action { width: 40px; min-width: 40px; max-width: 40px; padding-right: 0; padding-left: 0; }
-.admin-drawer-mini #admin-menu .collapse-button { flex: 0 0 40px; }
-.admin-drawer-mini #admin-menu .collapse-button .q-btn__content,
-.admin-drawer-mini #admin-menu .footer-action .q-btn__content { width: 40px; min-width: 40px; max-width: 40px; }
-.admin-drawer-mini #admin-menu .collapse-button .q-icon,
-.admin-drawer-mini #admin-menu .footer-action .q-icon {
+.admin-drawer-mini #admin-menu .collapse-button { width: 40px; min-width: 40px; max-width: 40px; padding-right: 0; padding-left: 0; flex: 0 0 40px; }
+.admin-drawer-mini #admin-menu .collapse-button .q-btn__content { width: 40px; min-width: 40px; max-width: 40px; }
+.admin-drawer-mini #admin-menu .collapse-button .q-icon {
   width: 40px;
   min-width: 40px;
   max-width: 40px;
@@ -260,7 +256,7 @@ body {
   padding-left: 8px;
   text-align: left;
 }
-.admin-drawer-mini #admin-menu .menu-item { min-height: 42px; padding: 0; justify-content: flex-start; }
+.admin-drawer-mini #admin-menu .menu-item { padding: 0; justify-content: flex-start; }
 .admin-drawer-mini #admin-menu .menu-item .q-item__section--avatar {
   width: 40px;
   min-width: 40px;
@@ -271,12 +267,10 @@ body {
   padding: 0 0 0 4px;
 }
 .admin-drawer-mini #admin-menu .menu-item .q-icon { display: block; flex: 0 0 auto; color: currentColor; opacity: 1; }
-.admin-drawer-mini #admin-menu .menu-group-header { flex-direction: column; gap: 2px; min-height: 54px; padding: 6px 0 4px; }
 .admin-drawer-mini #admin-menu .group-toggle-inline { display: none; }
 .admin-drawer-mini #admin-menu .group-toggle-icon { flex: 0 0 auto; width: 40px; }
 #admin-menu .admin-mini-hidden { display: none; }
-.admin-drawer-mini #admin-menu .menu-footer-actions { flex-direction: column; gap: 3px; }
-.admin-drawer-mini #admin-menu .footer-action { min-height: 38px; }
+.admin-drawer-mini #admin-menu .footer-action .q-icon { padding-left: 0; }
 
 @media (max-width: 420px) {
   #admin-menu .menu-shell { padding-top: 10px; }

@@ -8,3 +8,6 @@ data/
 *.log
 
 admin/videos/
+
+# Agent 本地会话数据
+.opencode/
