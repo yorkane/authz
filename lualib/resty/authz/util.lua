@@ -57,6 +57,27 @@ function _M.sha256_hex(value)
     return str_util.to_hex(result)
 end
 
+-- HMAC-SHA256 十六进制签名（共享会话等需要跨实例校验完整性的场景）。
+function _M.hmac_hex(key, value)
+    if type(key) ~= "string" or key == "" then return nil, "hmac key required" end
+    if type(value) ~= "string" then return nil, "value must be a string" end
+    local mac = hmac_mod:new(key, hmac_mod.ALGOS.SHA256)
+    if not mac then return nil, "hmac init failed" end
+    return str_util.to_hex(mac:final(value))
+end
+
+-- 常量时间比较两个等长字符串（签名校验，避免计时侧信道）。
+function _M.constant_time_equals(left, right)
+    left, right = tostring(left or ""), tostring(right or "")
+    if #left ~= #right then return false end
+    local diff = 0
+    for i = 1, #left do
+        local d = string.byte(left, i) - string.byte(right, i)
+        diff = diff + d * d
+    end
+    return diff == 0
+end
+
 function _M.escape_html(s)
     if s == nil then return "" end
     s = tostring(s)

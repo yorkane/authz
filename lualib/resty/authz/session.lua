@@ -27,6 +27,9 @@ _M.redis = {
     username = "",
     password = "",
     prefix = "authz",
+    -- 共享记录 HMAC 签名密钥：公共 Redis 无法用 ACL 限制写入方时，
+    -- 未签名/签名不符的记录一律拒绝，防止其他写方伪造会话。
+    signing_key = "",
     connect_timeout = 2000,
     read_timeout = 2000,
 }
@@ -75,6 +78,27 @@ local function redis_key(token)
     return _M.redis.prefix .. ":session:" .. token
 end
 
+-- 签名信封：<json>.<hex(hmac-sha256(signing_key, token .. json))>。
+-- 签名覆盖 token，跨键搬运记录同样失效。
+local function pack_shared(token, payload)
+    local mac, err = util.hmac_hex(_M.redis.signing_key, token .. payload)
+    if not mac then return nil, err end
+    return payload .. "." .. mac
+end
+
+local function unpack_shared(token, raw)
+    -- hex HMAC-SHA256 固定 64 字符，分隔点在倒数第 65 位。
+    if #raw <= 65 or raw:byte(#raw - 64) ~= string.byte(".") then return nil end
+    local payload = raw:sub(1, #raw - 65)
+    local mac = raw:sub(#raw - 63)
+    local expected, err = util.hmac_hex(_M.redis.signing_key, token .. payload)
+    if not expected then
+        redis_log(ngx.ERR, "shared session signing unavailable: ", tostring(err))
+        return nil
+    end
+    return util.constant_time_equals(mac, expected) and payload or nil
+end
+
 local function redis_save(token, record)
     if not _M.shared_enabled then return true end
     if _M.redis.mode ~= "read-write" then return false, "shared_session_read_only" end
@@ -86,13 +110,18 @@ local function redis_save(token, record)
     local cjson = require "cjson.safe"
     -- Redis 只共享用户 ID 与来源; 角色、策略不共享, 由各实例本地管理。
     -- csrf / expires_at 是会话机制字段, 不属于权限数据。
-    local ok, set_err = red:setex(redis_key(token), _M.ttl,
-        cjson.encode({
-            username = record.username,
-            source = record.source,
-            csrf = record.csrf,
-            expires_at = record.expires_at,
-        }))
+    local envelope, pack_err = pack_shared(token, cjson.encode({
+        username = record.username,
+        source = record.source,
+        csrf = record.csrf,
+        expires_at = record.expires_at,
+    }))
+    if not envelope then
+        redis_release(red)
+        redis_log(ngx.ERR, "shared session signing failed: ", tostring(pack_err))
+        return false, "shared_session_unavailable"
+    end
+    local ok, set_err = red:setex(redis_key(token), _M.ttl, envelope)
     redis_release(red)
     if not ok then
         redis_log(ngx.ERR, "setex failed: ", tostring(set_err))
@@ -119,8 +148,14 @@ local function redis_load(token)
     if type(raw) ~= "string" or raw == "" then
         return nil, "not_found"
     end
+    -- 公共 Redis 不是可信边界：未签名、伪造或被篡改的记录一律拒绝。
+    local payload = unpack_shared(token, raw)
+    if not payload then
+        redis_log(ngx.WARN, "rejected unsigned or forged shared session record")
+        return nil, "not_found"
+    end
     local cjson = require "cjson.safe"
-    local record = cjson.decode(raw)
+    local record = cjson.decode(payload)
     if type(record) ~= "table" then return nil, "not_found" end
     return {
         username = tostring(record.username or ""),
@@ -179,7 +214,9 @@ local function redis_delete_all_for(username, source)
         for _, key in ipairs(res[2]) do
             local raw = red:get(key)
             if type(raw) == "string" then
-                local record = cjson.decode(raw)
+                local token = key:match("[a-f0-9]+$")
+                local payload = token and unpack_shared(token, raw) or nil
+                local record = payload and cjson.decode(payload) or nil
                 if type(record) == "table" and record.username == username and
                     record.source == source then
                     matched[#matched + 1] = key

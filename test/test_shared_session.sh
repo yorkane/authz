@@ -28,6 +28,7 @@ SHARED_WRITER_USER="authz-writer"
 SHARED_READER_USER="authz-reader"
 SHARED_WRITER_PASS="shared-writer-test-secret"
 SHARED_READER_PASS="shared-reader-test-secret"
+SHARED_SIGNING_KEY="shared-session-signing-key-for-tests-0123456789abcdef"
 
 cleanup() {
     if [[ -n "$SHARED_FIRST_CONTAINER" ]]; then
@@ -153,6 +154,7 @@ start_shared_gateway() {
         -e "AUTHZ_SESSION_REDIS_USERNAME=$redis_user" \
         -e "AUTHZ_SESSION_REDIS_PASSWORD=$redis_password" \
         -e AUTHZ_SESSION_REDIS_PREFIX=authz-test \
+        -e "AUTHZ_SESSION_SIGNING_KEY=$SHARED_SIGNING_KEY" \
         -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
         -v "$TMP_DIR/$name-data:/data" \
         -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
@@ -227,12 +229,26 @@ assert_contains "redis payload carries username" "$REDIS_PAYLOAD" '"username":"a
 assert_contains "redis payload carries source" "$REDIS_PAYLOAD" '"source":"local"'
 assert_not_contains "redis payload excludes roles" "$REDIS_PAYLOAD" "roles"
 
+# 公共 Redis 无法依赖 ACL 约束写入方：未签名与篡改的记录必须被 reader 拒绝。
+printf 'authz_session=%s' "$(printf 'f%.0s' {1..64})" > "$TMP_DIR/forged.cookie"
+redis_writer setex "authz-test:session:$(printf 'f%.0s' {1..64})" 120 \
+    '{"username":"admin","source":"local","csrf":"forged","expires_at":99999999999}' >/dev/null
+STATUS=$(shared_session "$SHARED_B_HOST" "$SHARED_B_HTTP_PORT" "$TMP_DIR/forged.cookie")
+assert_eq "reader rejects an unsigned forged session" "$STATUS" "401"
+
+# 篡改 writer 真实记录的 username（签名不再覆盖内容）同样必须失效。
+FORGED_RAW=$(redis_writer get "authz-test:session:$SHARED_ADMIN_TOKEN")
+FORGED_TAMPERED="${FORGED_RAW//\"username\":\"admin\"/\"username\":\"evil\"}"
+[[ "$FORGED_TAMPERED" != "$FORGED_RAW" ]] || fail "tampered payload identical to original"
+redis_writer setex "authz-test:session:$SHARED_ADMIN_TOKEN" 120 "$FORGED_TAMPERED" >/dev/null
+STATUS=$(shared_session "$SHARED_B_HOST" "$SHARED_B_HTTP_PORT" "$SHARED_ADMIN_COOKIE")
+assert_eq "reader rejects a tampered session payload" "$STATUS" "401"
+
 redis_writer del "authz-test:session:$SHARED_ADMIN_TOKEN" >/dev/null
 STATUS=$(shared_session "$SHARED_B_HOST" "$SHARED_B_HTTP_PORT" "$SHARED_ADMIN_COOKIE")
 assert_eq "reader clears a session missing from Redis" "$STATUS" "401"
 assert_contains "missing shared session clears browser cookie" "$(cat "$TMP_DIR/shared-headers")" \
     "authz_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-
 shared_login "$SHARED_A_HOST" "$SHARED_HTTP_PORT" admin admin123 "$SHARED_ADMIN_COOKIE"
 STATUS=$(shared_session "$SHARED_A_HOST" "$SHARED_HTTP_PORT" "$SHARED_ADMIN_COOKIE")
 assert_eq "writer admin session is valid" "$STATUS" "200"

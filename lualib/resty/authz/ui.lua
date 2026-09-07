@@ -83,6 +83,18 @@ local function session_create_error(context, err)
 end
 
 local function login_page(error_message, next_url)
+    -- 共享会话只由 writer 实例签发：reader 实例不展示登录表单，
+    -- 避免用户提交后才知道这里不签发会话。
+    if session.shared_enabled and session.redis.mode ~= "read-write" then
+        return [[<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>登录</title>
+<style>body{display:grid;min-height:100vh;margin:0;padding:16px;place-items:center;background:#191b2b;color:#f1f2f8;font:14px Roboto,sans-serif}
+.card{width:min(520px,calc(100vw - 32px));padding:26px 28px;border:1px solid rgba(139,145,184,.18);border-radius:16px;background:#202337}
+h1{margin:0 0 12px;font-size:17px}p{margin:0;color:#a7abc6;line-height:1.6}</style></head>
+<body><main class=\"card\"><h1>请在认证主实例登录</h1>
+<p>本实例只读取共享会话，不签发登录。请在认证主实例完成登录后回到这里，登录状态会自动共享。</p>
+</main></body></html>]]
+    end
     local error_html = error_message and
         ("<div class='error'>" .. escape_html(error_message) .. "</div>") or ""
     local provider_links = {}

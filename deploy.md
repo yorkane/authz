@@ -207,6 +207,9 @@ AUTHZ_SESSION_REDIS_USERNAME=authz-reader
 AUTHZ_SESSION_REDIS_PASSWORD=<redis-password>
 AUTHZ_SESSION_REDIS_DB=0
 AUTHZ_SESSION_REDIS_PREFIX=authz    # 多套集群共用同一 Redis 时用于隔离，如 authz-cluster1
+# 共享记录 HMAC-SHA256 签名密钥（>=32 字符，所有共享实例必须一致）。
+# 生成: openssl rand -hex 32
+AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 ```
 
 语义：
@@ -214,7 +217,12 @@ AUTHZ_SESSION_REDIS_PREFIX=authz    # 多套集群共用同一 Redis 时用于�
 - 会话命中后仍会用本地 `users` / `remote_users` 校验身份，本地不存在或已禁用即仅清除本机登录；
 - Redis 中会话不存在或 Redis 不可达时立即失败关闭，不从 SQLite 恢复旧 token；
 - 登录、全局登出、密码重置和用户禁用必须进入 `read-write` 主实例；reader 的 Redis ACL 只授予 `GET`/`PING`；
-- Redis ACL、网络白名单和传输保护完成前保持 `AUTHZ_SESSION_SHARED=false`。
+- 共享记录以 `<JSON>.<HMAC-SHA256 hex>` 信封存储，HMAC 覆盖 `token + JSON`；
+  reader 对未签名、伪造或篡改的记录一律按未登录处理。因此即使共享 Redis
+  没有 ACL（托管实例无法限制写入方），其他写入方也无法伪造会话；
+  签名密钥泄漏等同于会话密钥泄漏，与其他 secret 同等保管；
+- 网络白名单和传输保护（TLS 或内网）完成前保持 `AUTHZ_SESSION_SHARED=false`；
+  有 ACL 时仍应配置 reader 只读账号，HMAC 是叠加防线而非 ACL 的替代。
 
 ## 8. 故障排查速查
 

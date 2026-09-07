@@ -308,7 +308,7 @@ NocoBase OAuth 的 `/api/idpOAuth/me` 只提供标准身份 claim，不使用 Ba
 
 - 只允许**一个认证主实例**使用 `AUTHZ_SESSION_REDIS_MODE=read-write`；
   其余所有实例必须使用 `read-only`（这是默认值），登录在只读实例上直接返回 503
-  并提示去主实例登录；
+  并提示去主实例登录；只读实例的登录页不渲染登录表单，直接显示"请在认证主实例登录"提示页；
 - Redis 侧必须用 ACL 强化同一约束：writer 用户授予会话前缀下
   `GET/SETEX/DEL/SCAN/EXISTS/PING`，reader 用户只授予 `GET/PING`；
 - Redis 只保存 `username`、`source` 与纯会话机制字段（`csrf`、`expires_at`）；
@@ -320,7 +320,12 @@ NocoBase OAuth 的 `/api/idpOAuth/me` 只提供标准身份 claim，不使用 Ba
   避免已撤销的 bearer token 复活；
 - 登录、全局登出、密码重置、用户禁用等写/撤销操作必须进入 `read-write` 主实例；
   只有主实例会执行 `SETEX/DEL/SCAN`，只读实例绝不尝试写共享键；
-- 共享会话在 Redis ACL、网络隔离和传输保护落实前保持关闭（`AUTHZ_SESSION_SHARED=false`）。
+- 每条共享记录都是 `<JSON>.<HMAC-SHA256 hex>` 签名信封（密钥 `AUTHZ_SESSION_SIGNING_KEY`，
+  HMAC 覆盖 `token + JSON`）。reader 对未签名、伪造、篡改或跨键搬运的记录一律按
+  未登录处理。因此即使共享 Redis 是禁 ACL 的托管实例、其他服务也能写入，
+  也无法伪造会话。签名密钥泄漏等同于会话密钥泄漏，须与其他 secret 同等保管；
+- 网络隔离和传输保护落实前保持关闭（`AUTHZ_SESSION_SHARED=false`）；
+  Redis 有 ACL 时仍应配置 reader 只读账号——HMAC 是叠加防线，不是 ACL 的替代。
 
 配置（各实例 `.env`）：
 
@@ -332,11 +337,16 @@ AUTHZ_SESSION_REDIS_USERNAME=authz-reader     # writer/reader 使用不同 ACL �
 AUTHZ_SESSION_REDIS_PASSWORD=<password>
 AUTHZ_SESSION_REDIS_DB=0
 AUTHZ_SESSION_REDIS_PREFIX=authz              # 多套集群共用时用于隔离
+AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>  # >=32 字符，所有共享实例必须一致；
+                                                  # 缺失或过短会在启动时直接报错
 ```
 
 Redis 键格式：`<prefix>:session:<64位hex token>`，值为 JSON，TTL 与会话有效期
 （`AUTHZ_SESSION_TTL`）一致。`docker-compose.yml` 已透传上述变量；修改环境变量
 必须重建容器。
+
+> 键值实际存储为签名信封 `<JSON>.<64位hex HMAC>`，人工用 `redis-cli GET` 排查时
+> 看到的即为此格式，属正常现象。
 
 真实回归覆盖：双实例 + 独立带 ACL 的 Redis 容器，验证 writer 写入、reader 只读
 （登录被拒且 ACL 层面写入被 `NOPERM` 拒绝）、载荷不含角色、Redis 键删除后清除

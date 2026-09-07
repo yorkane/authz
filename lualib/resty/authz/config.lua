@@ -44,10 +44,16 @@ local function configure_session(c)
             not session.redis.prefix:match("^[A-Za-z0-9_.:-]+$") then
             error("AUTHZ_SESSION_REDIS_PREFIX is invalid")
         end
-        if session.redis.db < 0 or session.redis.db > 15 or session.redis.db % 1 ~= 0 then
-            error("AUTHZ_SESSION_REDIS_DB must be an integer from 0 to 15")
+       if session.redis.db < 0 or session.redis.db > 15 or session.redis.db % 1 ~= 0 then
+           error("AUTHZ_SESSION_REDIS_DB must be an integer from 0 to 15")
+       end
+        -- 共享 Redis 常常是多套服务公用的存储：会话记录必须携带 HMAC 签名，
+        -- 未签名或签名不符的记录一律失效，防止拥有 Redis 写权限的其他方伪造会话。
+        session.redis.signing_key = tostring(os.getenv("AUTHZ_SESSION_SIGNING_KEY") or "")
+        if #session.redis.signing_key < 32 then
+            error("AUTHZ_SESSION_SHARED requires AUTHZ_SESSION_SIGNING_KEY of at least 32 characters")
         end
-        session.redis.connect_timeout = tonumber(os.getenv("AUTHZ_SESSION_REDIS_CONNECT_TIMEOUT_MS")) or 2000
+       session.redis.connect_timeout = tonumber(os.getenv("AUTHZ_SESSION_REDIS_CONNECT_TIMEOUT_MS")) or 2000
         session.redis.read_timeout = tonumber(os.getenv("AUTHZ_SESSION_REDIS_READ_TIMEOUT_MS")) or 2000
         session.shared_enabled = true
         c.session_shared_mode = session.redis.mode

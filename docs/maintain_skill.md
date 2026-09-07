@@ -51,6 +51,8 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
   禁止恢复 `app:` 静态 Client、NocoBase 本地插件或 `resource` 参数方案。
 - 多实例共享会话只允许一个实例 `read-write`，其余实例必须 `read-only`；reader ACL 只授予 GET/PING；
   Redis 不可达时共享会话必须失败关闭，禁止回退 SQLite；登录、登出、改密必须走主实例。
+  共享记录必须以 `<JSON>.<HMAC hex>` 信封签名（`AUTHZ_SESSION_SIGNING_KEY`，>=32 字符，HMAC 覆盖 token+JSON），
+  reader 拒绝未签名/伪造记录——公共 Redis 禁 ACL 时这是唯一防线，不得移除。
 - `authz_session` Cookie 只用于网关自身；代理上游时必须精确剥离该 Cookie 并保留业务 Cookie。
 - 公网入口默认把 HTTP 永久重定向到 HTTPS（`AUTHZ_HTTP_MODE=redirect`），临时维护只能用防火墙白名单，不得恢复明文登录入口。
 
