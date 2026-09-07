@@ -29,9 +29,11 @@ local function upstream_cookie()
     return table.concat(filtered, "; ")
 end
 
--- 绑定是否显式覆盖了某个请求头（大小写不敏感）。
-local function has_header_override(binding, lower_name)
-    for _, header in ipairs((binding and binding.header_overrides) or {}) do
+-- 请求改写是否显式设置了某个请求头（大小写不敏感）。用于判断网关自动
+-- 声明（如正文改写的 Accept-Encoding: identity）是否应让位于用户配置。
+local function request_sets_header(binding, lower_name)
+    local rr = binding and binding.request_rewrite
+    for _, header in ipairs(rr and rr.headers or {}) do
         if tostring(header.name or ""):lower() == lower_name then return true end
     end
     return false
@@ -89,19 +91,27 @@ local function apply_headers(binding, target_ip, port)
         ngx.var.authz_forwarded_for = forwarded_for()
         ngx.var.authz_forwarded = tostring(ngx.var.http_forwarded or "")
     end
+    -- 请求改写（request_rewrite）：删除与设置都在转发前生效。删除先于设置，
+    -- 同一头既删又设时以「保留设置」为准（set 显式表达了最终意图）；
+    -- 而 set 之后不再做删除检查，避免配置错误导致删不掉自己刚写进去的头。
+    -- Host/Cookie/X-Authz-*/X-Forwarded-* 等由 proxy_set_header 显式控制，
+    -- 校验层与缓存层双重禁止改写，这里直接应用缓存里已过滤的结构。
+    local rr = binding.request_rewrite
+    if rr then
+        for _, name in ipairs(rr.remove_headers or {}) do
+            ngx.req.clear_header(name)
+        end
+        for _, header in ipairs(rr.headers or {}) do
+            ngx.req.set_header(header.name, header.value)
+        end
+    end
     -- 正文改写只能在未压缩的字节上进行：上游看到 Accept-Encoding 就会自行压缩，
     -- 压缩字节无法做文本替换（网关会跳过并标记 skipped=encoded）。因此当绑定
-    -- 配置了正文改写时，向上游声明不接受压缩；用户在「Header 覆盖」里显式写
+    -- 配置了正文改写时，向上游声明不接受压缩；「改写请求」里显式写了
     -- Accept-Encoding 时以其为准，便于上游必须压缩的特殊场景自行权衡。
-    if rewrite.writes_body(binding.response_rewrite) and
-        not has_header_override(binding, "accept-encoding") then
+    if rewrite.writes_body(binding.response_rewrite)
+        and not request_sets_header(binding, "accept-encoding") then
         ngx.req.set_header("Accept-Encoding", "identity")
-    end
-    -- 绑定级 header 覆盖：逐条改写随请求透传给上游的头（如 Authorization、自定义业务头）。
-    -- Host/Cookie/X-Authz-*/X-Forwarded-* 等由 proxy_set_header 显式控制且校验层已禁止覆盖，
-    -- 不会在此被篡改；未列在 server.conf proxy_set_header 中的客户端头经此透传。
-    for _, header in ipairs(binding.header_overrides or {}) do
-        ngx.req.set_header(header.name, header.value)
     end
 end
 
@@ -120,9 +130,9 @@ end
 
 function _M.prepare(binding, target_ip, port)
     local scheme = binding and binding.upstream_scheme or "http"
-    local rewrite = binding and binding.upstream_path or ""
+    local path_override = binding and binding.upstream_path or ""
     local request_path = tostring(ngx.var.uri or "/")
-    local path = encode_upstream_path(rewrite ~= "" and rewrite or request_path)
+    local path = encode_upstream_path(path_override ~= "" and path_override or request_path)
     local query = ngx.var.args
     local query_suffix = query and query ~= "" and "?" .. query or ""
     ngx.var.authz_target = scheme .. "://" .. target.url_host(target_ip) .. ":" .. port .. path .. query_suffix
@@ -136,6 +146,14 @@ function _M.prepare(binding, target_ip, port)
     ngx.var.authz_websocket = websocket_request and "1" or "0"
     ngx.var.authz_upgrade = websocket_request and requested_upgrade or ""
     ngx.var.authz_connection = websocket_request and "upgrade" or ""
+    -- 请求正文改写：必须在转发前、于 access 阶段完成（缓冲 -> 改写 -> 重新
+    -- 设置 Content-Length）。放在 websocket 标记之后，升级请求一律跳过；
+    -- 可改写性判断（方法/分帧/类型/体积）统一在 request_body_mode 内完成。
+    local rr = binding and binding.request_rewrite
+    if rr then
+        local mode = rewrite.request_body_mode(rr)
+        if mode then rewrite.body_rewrite(mode, rr) end
+    end
     return scheme
 end
 

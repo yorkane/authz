@@ -1,3 +1,4 @@
+local cjson = require "cjson.safe"
 local api_key = require "resty.authz.api_key"
 local casbin = require "resty.authz.casbin"
 local identity = require "resty.authz.identity"
@@ -38,27 +39,9 @@ end
 
 local function binding_map()
     local map = {}
-    local function parse_header_overrides(raw)
-        local blocked = { host = true, cookie = true, origin = true,
-            ["x-authz-user"] = true, ["x-authz-source"] = true, ["x-authz-identity"] = true,
-            ["x-authz-key"] = true, ["x-real-ip"] = true, ["x-forwarded-for"] = true,
-            ["x-forwarded-host"] = true, ["x-forwarded-proto"] = true, ["x-forwarded-port"] = true,
-            ["content-length"] = true, ["transfer-encoding"] = true, connection = true,
-            ["keep-alive"] = true, upgrade = true, te = true, trailer = true }
-        local headers = {}
-        for line in (tostring(raw or "") .. "\n"):gmatch("([^\r\n]*)[\r\n]") do
-            local name, value = line:match("^%s*([^:]+):%s*(.-)%s*$")
-            if name and value ~= "" then
-                local lower = name:lower()
-                -- "x-authz-" 长 8 字符：此前按 7 位比较，前缀过滤实际从未生效。
-                if not blocked[lower] and lower:sub(1, 8) ~= "x-authz-" and
-                    lower:sub(1, 6) ~= "proxy-" and not value:find("%c") then
-                    headers[#headers + 1] = { name = name, value = value }
-                end
-            end
-        end
-        return headers
-    end
+    -- 请求改写（request_rewrite）运行期整形统一交给 rewrite.parse_request：
+    -- JSON 解码 + 白名单过滤 + base64 正文解出，缓存里放结构化结果，
+    -- proxy/access 阶段直接应用，避免每个请求重复解码。
     for _, binding in ipairs(bindings.runtime_rows()) do
         map[binding.domain] = {
             target_ip = target.normalize_ip(binding.target_ip) or "127.0.0.1",
@@ -78,7 +61,7 @@ local function binding_map()
             upstream_scheme = binding.upstream_scheme == "https" and "https" or "http",
             upstream_ssl_verify = tonumber(binding.upstream_ssl_verify) ~= 0,
             upstream_path = target.normalize_upstream_path(binding.upstream_path) or "",
-            header_overrides = parse_header_overrides(binding.header_overrides),
+            request_rewrite = rewrite.parse_request(binding.request_rewrite),
             -- 响应改写规则随绑定一起缓存（JSON 解码 + 运行期白名单整形在 rewrite.parse 完成）。
             response_rewrite = rewrite.parse(binding.response_rewrite),
         }

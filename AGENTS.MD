@@ -200,6 +200,34 @@ lualib/tracker/
 
 模块拆分使用 Router 和 `merge`，不增加 API 专属 location。
 
+## ngx.re 正则约定
+
+所有匹配、替换、校验一律使用 OpenResty 内置 `ngx.re`（PCRE 标准正则），不使用 Lua 原生
+模式（string.find/gsub/match 的 `%d`、`()` 一类）承载业务语义。Lua 原生查找仅允许用于
+固定字符串判断（如 `:find("%c")` 控制字符探测）。
+
+- 标志位统一 `"jo"`：PCRE 语法 + `ngx.re` 编译缓存。
+- 输入校验：保存前用 `ngx.re.find("authz-probe", source, "jo")` 做 PCRE 编译探测，第三个
+  返回值非 nil 即非法正则，直接 422 拒绝。
+- 字面量匹配也交给 `ngx.re`：源文本用 `\Q...\E` 逐字引用（文本自带 \E 时按
+  「结束引用 + \\E（引用外两个反斜杠=匹配一个字面反斜杠）+ E + \E 重新进入引用」
+  规范化）。已在目标引擎（OpenResty 1.31.1.1 / PCRE2）实测：a.b 不匹配 axb，a|b、
+  a\Eb 逐字命中。
+- 字面量规则的替换值必须经回调原样插回：`ngx.re.gsub(body, quoted, function() return
+  replacement end, "jo")`。字符串形式的替换目标会展开 `$N`，写进替换值里的 `$1` 会被吃掉。
+- 正则规则用字符串替换目标，`$N` 为捕获组引用（APISIX/nginx 语义），未定义的组展开为空
+  串；这是标准行为，文档和 UI 提示里要写明。
+- `ngx.re.gsub` 返回 `value, substitutions, err` 三个值：取错误必须接满三个返回值；无匹配
+  时返回原文、`substitutions=0`、`err=nil`，不是错误。
+- 引用 `\Q`/`\E` 等 Lua 5.1 不认识的转义序列时用 `string.char(92)` 拼接，避免
+  `invalid escape sequence` 编译错误。
+- 语义疑问用一次性 nginx 配置实测而不是猜：`http { init_worker_by_lua_file ... }` +
+  `ngx.timer.at(0, ...)` + `error_log /dev/stderr info`，`--entrypoint openresty` 直跑
+  （authz 镜像的 `resty` 缺 perl shebang，镜像 entrypoint 会接管命令）。
+
+已验证实现：`lualib/resty/authz/gateway/rewrite.lua` 的 `apply_rewrites`（请求/响应正文
+改写共用），回归用例在 `test/test_authz_gateway.sh`（关键词 `rewrite-pcre`）。
+
 ## 请求、安全与错误处理
 
 推荐处理顺序：
@@ -303,7 +331,7 @@ OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh        # authz
 三个脚本都会占用随机端口并起常驻 mock，**不要并发跑**（会互相污染日志与端口），也不要在脚本里用裸
 `wait` 等待后台请求——常驻 mock 会让 `wait` 永不返回。
 
-最近基线：Router 99、共享会话 29、authz 网关 635。
+最近基线：Router 99、共享会话 29、authz 网关 776。
 
 当前回归覆盖 Router/ctxvar、请求体 helper、框架错误处理和 merge 原子性。最近维护基线为
 99 项检查；测试数量会随覆盖增长，应以脚本最终输出为准，包括：
@@ -349,7 +377,6 @@ ssh 241.t 'cd /data/app/authz-test && sudo docker compose up -d --force-recreate
 - 退出登录只在 writer 上做，reader 会在下一次请求立刻拒绝该 token（已验证跨实例撤销生效）。
 
 ## Code Review Checklist
-## Code Review Checklist
 
 - [ ] APP 是否只有一个 Router 入口 location？
 - [ ] location 前缀是否与 `root_entry` 一致？
@@ -365,4 +392,6 @@ ssh 241.t 'cd /data/app/authz-test && sudo docker compose up -d --force-recreate
 - [ ] 认证、授权和异常是否 fail-closed？
 - [ ] 模板是否来自受信任代码？
 - [ ] 是否通过 `test/test_klib_router_ctxvar.sh`？
+- [ ] 正则/替换是否全部走 `ngx.re`（"jo"），字面量是否 \Q 引用、替换值是否回调插入？
+- [ ] 非法正则是否在保存时以 PCRE 编译探测拒绝（而不是运行期才失败）？
 - [ ] Dockerfile 是否包含新增 lualib 模块？

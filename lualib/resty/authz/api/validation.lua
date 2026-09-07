@@ -17,7 +17,7 @@ local BINDING_PROXY_FIELDS = {
     "upstream_host", "forwarded_host", "forwarded_proto", "forwarded_port",
     "origin_mode", "custom_origin", "simulate_local", "local_ip", "upstream_scheme",
     "upstream_ssl_verify", "upstream_path",
-    "header_overrides",
+    "request_rewrite",
     "response_rewrite",
 }
 local FORWARDED_PROTO_SET = { [""] = true, http = true, https = true }
@@ -99,10 +99,14 @@ local function valid_domain_prefix(prefix)
     return ngx.re.match(prefix, [[^[a-z0-9]([a-z0-9-]*[a-z0-9])?$]]) ~= nil
 end
 
--- 网关/代理链路专用头：由绑定专属字段或框架控制，不允许通过 header 覆盖篡改；
--- hop-by-hop 与报文分帧头会破坏代理语义，一并禁止。
-local HEADER_OVERRIDE_BLOCKED = {
-    host = true, cookie = true, origin = true,
+-- 请求改写：这些请求头由 server.conf 的 proxy_set_header 或绑定专属字段
+-- （upstream_host/forwarded_*/origin 等）统一管控，改写请求不允许触碰，
+-- 否则会出现「保存成功但永不生效」的幽灵配置。hop-by-hop 与分帧头
+-- （keep-alive/te/trailer）同样禁止，避免破坏代理语义。
+-- Accept-Encoding 特意不禁止：正文改写需要上游返回未压缩字节，而个别
+-- 上游只接受特定压缩协商时，允许用户显式覆盖。
+local REQUEST_HEADER_BLOCKED = {
+    host = true, cookie = true, origin = true, forwarded = true,
     ["x-authz-user"] = true, ["x-authz-source"] = true, ["x-authz-identity"] = true,
     ["x-authz-key"] = true, ["x-real-ip"] = true,
     ["x-forwarded-for"] = true, ["x-forwarded-host"] = true,
@@ -111,6 +115,15 @@ local HEADER_OVERRIDE_BLOCKED = {
     connection = true, ["keep-alive"] = true, upgrade = true,
     te = true, trailer = true,
 }
+
+local function request_header_allowed(name)
+    local lower = name:lower()
+    if REQUEST_HEADER_BLOCKED[lower] then return false end
+    if lower:sub(1, 8) == "x-authz-" then return false end
+    if lower:sub(1, 12) == "x-forwarded-" then return false end
+    if lower:sub(1, 6) == "proxy-" then return false end
+    return true
+end
 
 -- 域名前缀是绑定的推荐（管理界面唯一）填法：只存最后一级前缀（如 code），
 -- 入口域名由菜单和代理层按当前请求 Host 动态拼出 <前缀>-<节点>.<泛域>，
@@ -127,49 +140,188 @@ function _M.normalize_binding_domain(value, existing_domain)
     return domain
 end
 
-function _M.normalize_header_overrides(value)
-    if value == nil or value == cjson.null then return "" end
+-- 通用 JSON 解码：请求/响应改写共用。输入可以是 JSON 对象（管理 UI 提交），
+-- 容忍尾随逗号等宽松写法：先严格解码，失败时剥离尾随逗号重试；仍失败即拒绝。
+local function decode_response_rewrite(value)
+    if type(value) == "table" then return value end
     local raw = tostring(value)
-    local trim = function(text) return tostring(text):gsub("^%s+", ""):gsub("%s+$", "") end
-    if #raw > 8192 then return nil, "Header 覆盖总长度不能超过 8192 字符" end
-    local seen = {}
-    local count = 0
-    for line in (raw .. "\n"):gmatch("([^\r\n]*)[\r\n]") do
-        line = trim(line)
-        if line ~= "" then
-            local name, header_value = line:match("^([^:]+):(.*)$")
-            if not name then return nil, "Header 覆盖每行必须是 Header-Name: value 格式" end
-            name = trim(name)
-            header_value = trim(header_value)
-            if #name == 0 or #name > 128 or
-                not ngx.re.match(name, [[^[A-Za-z0-9][A-Za-z0-9_-]*$]]) then
-                return nil, "Header 名称只能包含字母、数字、下划线和中划线"
-            end
-            local lower = name:lower()
-            if HEADER_OVERRIDE_BLOCKED[lower] or lower:sub(1, 8) == "x-authz-" or
-                lower:sub(1, 6) == "proxy-" then
-                return nil, "Header 「" .. name .. "」由网关控制，不允许覆盖"
-            end
-            if header_value == "" then return nil, "Header 「" .. name .. "」的值不能为空" end
-            if #header_value > 1024 then return nil, "Header 「" .. name .. "」的值不能超过 1024 字符" end
-            if header_value:find("%c") then return nil, "Header 「" .. name .. "」的值不能包含控制字符" end
-            if not seen[lower] then
-                seen[lower] = { name = name, value = header_value }
-                count = count + 1
+    if raw:gsub("^%s+", ""):gsub("%s+$", "") == "" then return {} end
+    local decoded = cjson.decode(raw)
+    if type(decoded) == "table" then return decoded end
+    -- 括号必要：gsub 返回两个值，cjson.decode 的 C 检查会因多余参数直接抛错。
+    decoded = cjson.decode((raw:gsub(",(%s*[%]}])", "%1")))
+    if type(decoded) == "table" then return decoded end
+    return nil
+end
+
+-- 请求改写配置字段：改写到上游的请求头，JSON 结构与 response_rewrite 的
+-- headers 子集对齐。
+--   enabled         是否启用改写
+--   headers         请求头改写（对象，值为 null 表示删除）
+--   remove_headers 显式删除列表（数组）
+--   body            整体替换请求正文（仅对文本类请求生效，见网关实现）
+--   body_base64     body 以 base64 提供
+--   content_type    替换正文时写回上游的 Content-Type
+--   rewrites        正文过滤规则（与 response_rewrite 的 rewrites 同构）
+-- 没有 status 改写：请求侧不存在状态码语义。
+local REQUEST_REWRITE_FIELDS = {
+    enabled = true, headers = true, remove_headers = true,
+    body = true, body_base64 = true, content_type = true, rewrites = true,
+}
+
+-- 前向声明：正文规范化与 Content-Type 校验定义在响应改写一节，
+-- 请求/响应两侧共用（Lua local 可见性要求先声明后引用）。
+local normalize_rewrites, valid_content_type
+
+function _M.normalize_request_rewrite(value)
+    if value == nil or value == cjson.null then return "" end
+    if type(value) == "string" and #value > RESPONSE_REWRITE_MAX_JSON then
+        return nil, "请求改写配置过大", 422
+    end
+    local config = decode_response_rewrite(value)
+    if not config then return nil, "请求改写配置必须是合法的 JSON 对象", 422 end
+    for key in pairs(config) do
+        if not REQUEST_REWRITE_FIELDS[key] then
+            return nil, "请求改写不支持字段 「" .. tostring(key) .. "」", 422
+        end
+    end
+    local enabled = config.enabled
+    enabled = not (enabled == false or enabled == 0 or enabled == "false")
+
+    local set, remove, seen = {}, {}, {}
+    local function reject_name(name)
+        if #name < 1 or #name > 128 or
+            not ngx.re.match(name, [[^[A-Za-z0-9][A-Za-z0-9_-]*$]]) then
+            return "请求改写 Header 名称只能包含字母、数字、下划线和中划线"
+        end
+        if not request_header_allowed(name) then
+            return "请求改写不允许修改 Header 「" .. name .. "」（由网关控制）"
+        end
+        return nil
+    end
+    if config.headers ~= nil and config.headers ~= cjson.null then
+        if type(config.headers) ~= "table" then
+            return nil, "请求改写 headers 必须是对象", 422
+        end
+        for raw_name, raw_value in pairs(config.headers) do
+            local name = tostring(raw_name):gsub("^%s+", ""):gsub("%s+$", "")
+            if name ~= "" then
+                local err = reject_name(name)
+                if err then return nil, err, 422 end
+                local lower = name:lower()
+                if raw_value == nil or raw_value == cjson.null then
+                    -- 显式删除语义（等价于 remove_headers 里列出该头）。
+                    if not seen[lower] then seen[lower] = { name = name, value = nil } end
+                else
+                    local header_value = tostring(raw_value)
+                    if #header_value > 2048 then
+                        return nil, "请求改写 Header 「" .. name .. "」的值不能超过 2048 字符", 422
+                    end
+                    if header_value:find("%c") then
+                        return nil, "请求改写 Header 「" .. name .. "」的值不能包含控制字符", 422
+                    end
+                    seen[lower] = { name = name, value = header_value }
+                end
             end
         end
     end
-    if count > 32 then return nil, "Header 覆盖不能超过 32 条" end
-    local names = {}
-    for lower, item in pairs(seen) do
-        names[#names + 1] = { lower = lower, name = item.name, value = item.value }
+    if config.remove_headers ~= nil and config.remove_headers ~= cjson.null then
+        if type(config.remove_headers) ~= "table" then
+            return nil, "请求改写 remove_headers 必须是数组", 422
+        end
+        for _, raw_name in ipairs(config.remove_headers) do
+            local name = tostring(raw_name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if name ~= "" then
+                local err = reject_name(name)
+                if err then return nil, err, 422 end
+                seen[name:lower()] = { name = name, value = nil }
+            end
+        end
     end
-    table.sort(names, function(a, b) return a.lower < b.lower end)
-    local lines = {}
-    for _, item in ipairs(names) do
-        lines[#lines + 1] = item.name .. ": " .. item.value
+    local total = 0
+    for _, item in pairs(seen) do
+        total = total + 1
+        if item.value == nil then
+            remove[#remove + 1] = item.name
+        else
+            set[#set + 1] = { name = item.name, value = item.value }
+        end
     end
-    return table.concat(lines, "\n")
+    if total > 32 then return nil, "请求改写 Header 不能超过 32 条", 422 end
+
+    -- 正文改写：与 response_rewrite 的 body/rewrites 子集同构（复用同一套
+    -- 规范化与 PCRE 编译校验），语义换成「发往上游前生效」。
+    local body_base64 = config.body_base64 == true or config.body_base64 == 1
+    local body_text, body_is_json = nil, false
+    local body = config.body
+    if body ~= nil and body ~= cjson.null and body ~= "" then
+        if type(body) == "table" then
+            local encoded_body = cjson.encode(body)
+            if not encoded_body then return nil, "请求改写 body 无法编码为 JSON", 422 end
+            body_text, body_is_json = encoded_body, true
+            if body_base64 then return nil, "JSON body 不能同时标记 base64", 422 end
+        elseif type(body) == "string" then
+            if body_base64 then
+                if not ngx.decode_base64(body) then
+                    return nil, "请求改写 body 不是合法的 base64", 422
+                end
+            elseif #body > RESPONSE_REWRITE_MAX_BODY then
+                return nil, "请求改写 body 不能超过 " .. RESPONSE_REWRITE_MAX_BODY .. " 字符", 422
+            end
+            body_text = body
+        else
+            return nil, "请求改写 body 必须是文本、JSON 或留空", 422
+        end
+        -- 允许制表与换行；其余控制字符（含 NUL/ESC）一律拒绝，防止注入分帧字符。
+        if body_text ~= nil and body_text:gsub("[\r\n\t]", ""):find("%c") then
+            return nil, "请求改写 body 不能包含控制字符", 422
+        end
+    elseif body_base64 then
+        return nil, "请求改写 base64 需要同时提供 body", 422
+    end
+
+    local content_type = config.content_type
+    if content_type ~= nil and content_type ~= cjson.null then
+        content_type = tostring(content_type):gsub("^%s+", ""):gsub("%s+$", "")
+        if content_type ~= "" then
+            if #content_type > 128 or not valid_content_type(content_type) then
+                return nil, "请求改写 Content-Type 格式不合法", 422
+            end
+            if body_text == nil then
+                return nil, "请求改写 Content-Type 需要同时提供 body", 422
+            end
+        end
+    else
+        content_type = nil
+    end
+    if body_is_json and not content_type then content_type = "application/json; charset=utf-8" end
+
+    local rewrites, rewrites_err = normalize_rewrites(config.rewrites)
+    if not rewrites then return nil, rewrites_err, 422 end
+    if body_text ~= nil and #rewrites > 0 then
+        return nil, "请求改写 body 与 rewrites 不能同时使用", 422
+    end
+
+    if #set == 0 and #remove == 0 and body_text == nil and #rewrites == 0 then
+        return ""
+    end
+    table.sort(set, function(a, b) return a.name:lower() < b.name:lower() end)
+    table.sort(remove)
+    local out = {
+        enabled = enabled,
+        headers = set,
+        remove_headers = #remove > 0 and remove or cjson.empty_array,
+    }
+    if body_text ~= nil then
+        out.body = body_text
+        out.body_base64 = body_base64 or nil
+        out.content_type = content_type
+    end
+    if #rewrites > 0 then out.rewrites = rewrites end
+    local encoded = cjson.encode(out)
+    if not encoded then return nil, "请求改写配置编码失败", 422 end
+    if #encoded > RESPONSE_REWRITE_MAX_JSON then return nil, "请求改写配置过大", 422 end
+    return encoded
 end
 
 -- 响应改写：只允许覆盖“透传类”响应头。网关身份头、hop-by-hop 与分帧头一律拒绝，
@@ -192,20 +344,6 @@ local function response_header_allowed(name)
     if lower:sub(1, 12) == "x-forwarded-" then return false end
     if lower:sub(1, 6) == "proxy-" then return false end
     return true
-end
-
--- 输入可以是 JSON 对象（管理 UI 提交），容忍尾随逗号等宽松写法：
--- 先严格解码，失败时退一步剥离尾随逗号重试；仍失败即拒绝，不猜测用户意图。
-local function decode_response_rewrite(value)
-    if type(value) == "table" then return value end
-    local raw = tostring(value)
-    if raw:gsub("^%s+", ""):gsub("%s+$", "") == "" then return {} end
-    local decoded = cjson.decode(raw)
-    if type(decoded) == "table" then return decoded end
-    -- 括号必要：gsub 返回两个值，cjson.decode 的 C 检查会因多余参数直接抛错。
-    decoded = cjson.decode((raw:gsub(",(%s*[%]}])", "%1")))
-    if type(decoded) == "table" then return decoded end
-    return nil
 end
 
 -- 对齐 APISIX response-rewrite：headers 为改写（值为 null/空串表示删除），
@@ -274,7 +412,7 @@ local function normalize_rewrite_headers(headers, remove_headers)
     return set, remove
 end
 
-local function normalize_rewrites(value)
+normalize_rewrites = function(value)
     if value == nil or value == cjson.null then return {} end
     if type(value) ~= "table" then return nil, "响应改写 body 规则必须是数组" end
     local rules = {}
@@ -328,13 +466,13 @@ end
 --   body_base64     body 以 base64 提供（用于二进制内容）
 --   content_type    替换正文时写回的 Content-Type
 --   rewrites        正文过滤规则（source/target，~ 前缀或 regex=true 走 PCRE）
--- 返回规范化后的 JSON 字符串（空配置返回 ""），与 header_overrides 同构落库。
+-- 返回规范化后的 JSON 字符串（空配置返回 ""），与 request_rewrite 同构落库。
 local RESPONSE_REWRITE_FIELDS = {
     enabled = true, status = true, headers = true, remove_headers = true,
     body = true, body_base64 = true, content_type = true, rewrites = true,
 }
 
-local function valid_content_type(value)
+valid_content_type = function(value)
     return ngx.re.match(value,
         [[^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+([;,][^,;]*)*$]]) ~= nil
 end
@@ -494,8 +632,9 @@ function _M.normalize_binding_proxy(data)
     if upstream_path == nil then
         return nil, "上游改写路径必须是合法路径，不能包含查询参数、片段、连续斜杠或 .."
     end
-    local header_overrides, header_err = _M.normalize_header_overrides(optional(data.header_overrides, ""))
-    if not header_overrides then return nil, header_err, 422 end
+    local request_rewrite, rewrite_req_err =
+        _M.normalize_request_rewrite(optional(data.request_rewrite, ""))
+    if not request_rewrite then return nil, rewrite_req_err, 422 end
     local response_rewrite, rewrite_err, rewrite_status =
         _M.normalize_response_rewrite(optional(data.response_rewrite, ""))
     if not response_rewrite then return nil, rewrite_err, rewrite_status or 422 end
@@ -516,7 +655,7 @@ function _M.normalize_binding_proxy(data)
         upstream_ssl_verify = (ssl_verify == false or ssl_verify == 0 or ssl_verify == "0" or
             ssl_verify == "false") and 0 or 1,
         upstream_path = upstream_path,
-        header_overrides = header_overrides,
+        request_rewrite = request_rewrite,
         response_rewrite = response_rewrite,
     }
 end

@@ -98,6 +98,19 @@ assert_contains() {
     pass "$name"
 }
 
+# 与 assert_contains 相同语义但做大小写无关匹配：用于响应头在 OpenResty 内部
+# 大小写不敏感的表里、对外却可能保留「首次见到」的原始大小写形式（例：
+# upstream 设 X-Trace，gateway 把 ngx.header["x-trace"] 覆写后 wire 上仍可能是
+# X-Trace）。其它行为完全一致。
+assert_contains_lower() {
+    local name=$1 actual=$2 expected=$3
+    local lower_actual lower_expected
+    lower_actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
+    lower_expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+    [[ "$lower_actual" == *"$lower_expected"* ]] || fail "$name (missing '$expected')"
+    pass "$name"
+}
+
 assert_not_contains() {
     local name=$1 actual=$2 unexpected=$3
     [[ "$actual" != *"$unexpected"* ]] || fail "$name (unexpected '$unexpected')"
@@ -459,7 +472,7 @@ assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite"
 
 cookie_header() {
     awk '
@@ -1552,43 +1565,136 @@ assert_eq "HTTPS default WebSocket proxy" "$WS_STATUS" "101"
 assert_contains "HTTPS WebSocket upgrade response" \
     "$(cat "$TMP_DIR/https-websocket-headers")" "101 Switching Protocols"
 
-# ── 绑定级 header 覆盖（多行输入，逐行覆盖透传请求头）──
+# ── 绑定级请求改写（原「Header 覆盖」升级为 JSON 结构化配置）──
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
-    '{"header_overrides":"X-Probe-Header: from-binding\nAuthorization: Bearer fixed-token"}'
-assert_eq "save binding header overrides" "$STATUS" "200"
+    '{"request_rewrite":{"headers":{"X-Probe-Header":"from-binding","Authorization":"Bearer fixed-token"}}}'
+assert_eq "save request rewrite" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
-assert_json "header overrides normalize to one entry per line" \
-    '.data.bindings[] | select(.domain == "fixed.test.example") | .header_overrides' \
-    $'Authorization: Bearer fixed-token\nX-Probe-Header: from-binding'
+RR_STORED=$(jq -er '.data.bindings[] | select(.domain == "fixed.test.example") | .request_rewrite' "$TMP_DIR/body")
+assert_eq "request rewrite normalizes header set" \
+    "$(jq -er '[.headers[] | select(.name == "Authorization")] | .[0].value' <<<"$RR_STORED")" "Bearer fixed-token"
+assert_eq "request rewrite stores both headers" \
+    "$(jq -er '.headers | length' <<<"$RR_STORED")" "2"
 request GET fixed.test.example /identity "$ADMIN_COOKIE"
-assert_json "header override reaches upstream" '.probe' "from-binding"
-assert_json "Authorization override reaches upstream" '.authorization' "Bearer fixed-token"
-request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":"JustAName"}'
-assert_eq "header override without colon is rejected" "$STATUS" "422"
-request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":"X-Authz-User: evil"}'
-assert_eq "header override cannot touch gateway identity headers" "$STATUS" "422"
-request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":"X-Bad: bad\rvalue"}'
-assert_eq "header override rejects control characters" "$STATUS" "422"
-request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":"X-Empty:"}'
-assert_eq "header override rejects empty values" "$STATUS" "422"
-request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":null}'
-assert_eq "clear binding header overrides" "$STATUS" "200"
+assert_json "request rewrite header reaches upstream" '.probe' "from-binding"
+assert_json "request rewrite Authorization reaches upstream" '.authorization' "Bearer fixed-token"
+# 删除语义：remove_headers 里的头被清除，不再透传。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"X-Probe-Header":"from-binding"},"remove_headers":["X-Client-Token"]}}'
+assert_eq "store request rewrite with removal" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+RR_STORED=$(jq -er '.data.bindings[] | select(.domain == "fixed.test.example") | .request_rewrite' "$TMP_DIR/body")
+assert_eq "removal list is normalized" \
+    "$(jq -er '.remove_headers | join(",")' <<<"$RR_STORED")" "X-Client-Token"
+# 校验拒绝：网关身份头、控制字符、空对象字段。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"X-Authz-User":"evil"}}}'
+assert_eq "request rewrite cannot touch gateway identity headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"X-Bad":"bad\rvalue"}}}'
+assert_eq "request rewrite rejects control characters" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"Host":"evil.example"}}}'
+assert_eq "request rewrite cannot override Host" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"X-Forwarded-For":"1.1.1.1"}}}'
+assert_eq "request rewrite cannot override X-Forwarded-For" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"status":500}}'
+assert_eq "request rewrite rejects unknown fields" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":"[1,2]"}'
+assert_eq "request rewrite rejects a top-level array" "$STATUS" "422"
+# 清空：null 清除全部配置，探针恢复为 null。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"request_rewrite":null}'
+assert_eq "clear request rewrite" "$STATUS" "200"
 request GET fixed.test.example /identity "$ADMIN_COOKIE"
-assert_json "cleared header overrides stop overriding" '.probe | tostring' "null"
+assert_json "cleared request rewrite stops overriding" '.probe | tostring' "null"
+
+# ── 绑定级请求正文改写（发往上游前替换/过滤文本正文）──
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"body":{"replaced":true}}}'
+assert_eq "save request body replace" "$STATUS" "200"
+request POST fixed.test.example /echo-body "$ADMIN_COOKIE" "" '{"original":"payload","secret":"s3cret"}'
+assert_json "request body replace swaps the upstream body" '.body' '{"replaced":true}'
+assert_json "request body replace recalculates Content-Length" '.content_length' '17'
+assert_json "request body replace defaults JSON content type" '.content_type' "application/json; charset=utf-8"
+assert_not_contains "request body replace drops the original body" "$BODY" "s3cret"
+# 替换模式显式指定 Content-Type 时写回该类型。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"body":"plain-replacement","content_type":"text/plain; charset=utf-8"}}'
+assert_eq "save request body replace with content type" "$STATUS" "200"
+request POST fixed.test.example /echo-body "$ADMIN_COOKIE" "" '{"original":"payload"}'
+assert_json "request body replace writes the configured content type" '.content_type' "text/plain; charset=utf-8"
+assert_json "request body replace keeps raw text body" '.body' "plain-replacement"
+# GET 无正文：替换配置存在也原样透传，不得注入正文。
+request GET fixed.test.example /echo-body "$ADMIN_COOKIE"
+assert_json "request body replace skips GET requests" '.body' ""
+# 过滤模式：只替换匹配片段，其余正文保留。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"rewrites":[{"source":"s3cret","target":"[REDACTED]"},{"source":"~secret-(\\d+)","target":"token-$1","regex":true}]}}'
+assert_eq "save request body filters" "$STATUS" "200"
+request POST fixed.test.example /echo-body "$ADMIN_COOKIE" "" '{"password":"s3cret","note":"secret-42"}'
+assert_json "request body filter redacts the literal match" '.body' '{"password":"[REDACTED]","note":"token-42"}'
+assert_json "request body filter keeps Content-Length in sync" '.content_length' "43"
+# 过滤只对文本类 Content-Type 生效：二进制上传原样透传。
+STATUS=$(curl -sS --max-time 5 --request POST --resolve "fixed.test.example:$HTTP_PORT:127.0.0.1" \
+    -H "Cookie: $(cookie_header "$ADMIN_COOKIE")" \
+    -H 'Content-Type: application/octet-stream' --data-binary 's3cret-bytes' \
+    -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}' \
+    "http://fixed.test.example:$HTTP_PORT/echo-body")
+assert_eq "binary upload reaches upstream" "$STATUS" "200"
+assert_json "request body filter skips non-textual uploads" '.body' "s3cret-bytes"
+# 分块请求体（无 Content-Length）跳过改写：无法安全整体缓冲后重放。
+STATUS=$(curl -sS --max-time 5 --request POST --resolve "fixed.test.example:$HTTP_PORT:127.0.0.1" \
+    -H "Cookie: $(cookie_header "$ADMIN_COOKIE")" \
+    -H 'Content-Type: application/json' -H 'Transfer-Encoding: chunked' \
+    --data-binary '{"password":"s3cret"}' \
+    -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}' \
+    "http://fixed.test.example:$HTTP_PORT/echo-body")
+assert_eq "chunked upload reaches upstream" "$STATUS" "200"
+# 分块请求体（无 Content-Length）跳过改写：nginx 缓冲后按普通请求转发，
+# 但网关没有应用过滤——回显正文保持原值（未被 [REDACTED] 替换）即为证据。
+assert_json "request body filter skips chunked bodies" '.body' '{"password":"s3cret"}'
+# 校验拒绝：body 与 rewrites 互斥、控制字符、非法 base64、超大正文。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"body":"x","rewrites":[{"source":"a","target":"b"}]}}'
+assert_eq "request rewrite body and rewrites are exclusive" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"body":"bad\u0007value"}}'
+assert_eq "request rewrite body rejects control characters" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"body":"!!!not-base64!!!","body_base64":true}}'
+assert_eq "request rewrite rejects invalid base64 body" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"content_type":"text/plain"}}'
+assert_eq "request rewrite content type requires a body" "$STATUS" "422"
+# base64 正文：解码后的字节发往上游。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"body":"YmFzZTY0LXJlcGxhY2VtZW50","body_base64":true,"content_type":"application/octet-stream"}}'
+assert_eq "save base64 request body" "$STATUS" "200"
+request POST fixed.test.example /echo-body "$ADMIN_COOKIE" "" '{"original":"payload"}'
+assert_json "base64 request body is decoded before forwarding" '.body' "base64-replacement"
+# 清空请求改写：正文恢复透传。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"request_rewrite":null}'
+assert_eq "clear request body rewrite" "$STATUS" "200"
+request POST fixed.test.example /echo-body "$ADMIN_COOKIE" "" '{"original":"payload"}'
+assert_json "cleared request rewrite stops rewriting the body" '.body' '{"original":"payload"}'
+# HTTPS 上游 + 内部重定向到 insecure proxy 路径：请求改写同样生效。
 request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" \
-    '{"domain":"https-override.test.example","target_ip":"127.0.0.1","port":'$TLS_PORT',"upstream_scheme":"https","upstream_ssl_verify":false,"header_overrides":"X-Probe-Header: from-https-binding"}'
-assert_eq "create HTTPS binding with header overrides" "$STATUS" "201"
+    '{"domain":"https-override.test.example","target_ip":"127.0.0.1","port":'$TLS_PORT',"upstream_scheme":"https","upstream_ssl_verify":false,"request_rewrite":{"headers":{"X-Probe-Header":"from-https-binding"}}}'
+assert_eq "create HTTPS binding with request rewrite" "$STATUS" "201"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
 HTTPS_OVERRIDE_ID=$(jq -er '.data.bindings[] | select(.domain == "https-override.test.example") | .id' "$TMP_DIR/body")
 STATUS=$(curl -sS --max-time 5 --resolve "https-override.test.example:$HTTP_PORT:127.0.0.1" \
     -H "Cookie: $(cookie_header "$ADMIN_COOKIE")" \
     -o "$TMP_DIR/https-override-body" -w '%{http_code}' \
     "http://https-override.test.example:$HTTP_PORT/")
-assert_eq "HTTPS upstream with header override reaches insecure proxy path" "$STATUS" "200"
-assert_contains "header override survives internal redirect to insecure proxy" \
+assert_eq "HTTPS upstream with request rewrite reaches insecure proxy path" "$STATUS" "200"
+assert_contains "request rewrite survives internal redirect to insecure proxy" \
     "$(cat "$TMP_DIR/https-override-body")" "from-https-binding"
 request DELETE "$ADMIN_HOST" "/_authz/api/applications/$HTTPS_OVERRIDE_ID" "$ADMIN_COOKIE" "$CSRF"
-assert_eq "delete HTTPS header override binding" "$STATUS" "200"
+assert_eq "delete HTTPS request rewrite binding" "$STATUS" "200"
 
 request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" \
     "{\"domain\":\"https-fixed.test.example\",\"target_ip\":\"127.0.0.1\",\"port\":$TLS_PORT,\"upstream_scheme\":\"https\",\"upstream_ssl_verify\":false}"
@@ -1638,6 +1744,15 @@ assert_contains_all "literal and regex filters rewrite the body" "$BODY" "[REDAC
 assert_not_contains "literal filter removed the secret" "$BODY" "internal-secret-token"
 assert_contains "text filters keep the upstream status" "$STATUS" "200"
 
+# 响应正文过滤走 ngx.re（PCRE）：字面量匹配逐字执行，元字符不再是模式；
+# 正则替换支持 $N 捕获；替换值里的 $N 按标准会被展开。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"response_rewrite":{"rewrites":[{"source":"a.b","target":"[LIT]"},{"source":"a|b","target":"[ALT]"},{"source":"~swap-(\\d+)-(\\d+)","target":"swapped-$2-$1","regex":true},{"source":"cost$9","target":"PRICED$0"}]}}'
+assert_eq "store PCRE-semantics response filters" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-pcre "$ADMIN_COOKIE"
+assert_eq "response filters apply ngx.re quote/regex semantics" \
+    "$(cat "$TMP_DIR/body" | tr -d '\r' | tr '\n' '@')" "axb [LIT] [ALT] swapped-3-7 PRICED\$0@"
+
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"response_rewrite":{"rewrites":[{"source":"plain-text-inside-gzip","target":"SHOULD NOT APPEAR"}]}}'
 assert_eq "store a filter for the skip-case probes" "$STATUS" "200"
@@ -1671,14 +1786,14 @@ negotiated_request x 'gzip, deflate, br'
 assert_not_contains "body rewrite asks the upstream for uncompressed bytes" "$BODY" "negotiated-secret-token"
 assert_contains "negotiated upstream body is rewritten" "$BODY" "[REDACTED]"
 assert_not_contains "negotiated rewrite is not skipped" "$(cat "$TMP_DIR/headers")" "skipped="
-# 显式的 Accept-Encoding 覆盖优先于网关的 identity 声明：上游压缩，改写按设计跳过。
+# 请求改写里显式的 Accept-Encoding 优先于网关的 identity 声明：上游压缩，改写按设计跳过。
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
-    '{"header_overrides":"Accept-Encoding: gzip"}'
+    '{"request_rewrite":{"headers":{"Accept-Encoding":"gzip"}}}'
 assert_eq "override the upstream Accept-Encoding" "$STATUS" "200"
 request GET rewrite.test.example /rewrite-negotiated "$ADMIN_COOKIE"
 assert_contains "explicit compression override wins and skips the rewrite" "$(cat "$TMP_DIR/headers")" "skipped=encoded"
 assert_contains "explicit compression override keeps the compressed body" "$(cat "$TMP_DIR/headers")" "gzip"
-request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":""}'
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"request_rewrite":null}'
 assert_eq "clear the compression override" "$STATUS" "200"
 # 规范化后的 status:0（= 不改写状态码）必须能原样重新提交，否则绑定保存过改写规则后
 # 就再也 PATCH 不动了（历史上这里会 422，表现为"替换不生效"）。
@@ -1688,6 +1803,85 @@ assert_eq "status 0 means keep the upstream status" "$STATUS" "200"
 request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
 assert_eq "status 0 never rewrites the status code" "$STATUS" "200"
 assert_contains "status 0 keeps the body filter working" "$BODY" "[REDACTED]"
+
+# ── 复杂场景：UTF-8 / 捕获组 / 大小写不敏感 / base64 往返 / 多 filter 顺序 / 全字段组合 ──
+# UTF-8 多字节正文：字面量与正则捕获组同时生效；Content-Length 被撤除、走分块。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"\u4f60\u597d","target":"\u60a8\u597d"},{"source":"~token=(\\d+)","target":"\u6570\u5b57=[$1]"}]}}'
+assert_eq "store utf-8 literal + regex capture filters" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-utf8 "$ADMIN_COOKIE"
+assert_contains "utf-8 literal replacement rewrites multibyte bytes" "$BODY" $'\u60a8\u597d'
+assert_contains "regex capture group rewrites the trailing digits" "$BODY" $'\u6570\u5b57=[42]'
+assert_contains "utf-8 emoji upstream byte survives untouched" "$BODY" $'\U0001f310'
+assert_not_contains "rewritten utf-8 body drops the stale Content-Length" "$(cat "$TMP_DIR/headers")" "Content-Length:"
+assert_contains "rewritten body is chunked" "$(cat "$TMP_DIR/headers")" "Transfer-Encoding: chunked"
+UTF8_EXPECTED="$TMP_DIR/utf8_expected"
+python3 -c 'import sys; sys.stdout.buffer.write("Hello,\u60a8\u597d,\u4e16\u754c! \U0001f310 \u6570\u5b57=[42]\n".encode("utf-8"))' > "$UTF8_EXPECTED"
+assert_eq "utf-8 body matches byte-for-byte after rewrite" "$(cmp "$TMP_DIR/body" "$UTF8_EXPECTED" >/dev/null && echo byte_match || echo byte_diff)" "byte_match"
+
+# Header 大小写不敏感：
+# 1. headers 中用小写 `x-trace` 覆盖大写 `X-Trace`：OpenResty header 表大小写无关，
+#    `ngx.header["x-trace"]` 与 `ngx.header["X-Trace"]` 是同一个槽位。
+# 2. remove_headers 显式删除 X-Internal-Marker（与重写头不同名），用于验证 set 与
+#    remove 互不串扰；同名时 remove 优先（防御性语义，避免 add-then-strip 绕过）。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"x-trace":"replaced-lowercase","x-new-tag":"added"},"remove_headers":["X-Internal-Marker","x-other-marker"]}}'
+assert_eq "store header case-insensitive rewrite" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-chain "$ADMIN_COOKIE"
+CHAIN_HEADERS=$(<"$TMP_DIR/headers")
+assert_contains_lower "lowercase header name overwrites the existing trace" "$CHAIN_HEADERS" "x-trace: replaced-lowercase"
+assert_not_contains "header removed regardless of case" "$CHAIN_HEADERS" "X-Internal-Marker:"
+assert_contains_lower "newly inserted header survives the rewrite" "$CHAIN_HEADERS" "x-new-tag: added"
+assert_contains "header-only rewrite keeps upstream Content-Length" "$CHAIN_HEADERS" "Content-Length: 17"
+
+# 防御语义：headers 与 remove_headers 包含同名头时，remove 优先。
+# 这避免了「先 add 后 strip」的绕过路径：即便上游响应里没有该头，
+# 网关也会跳过 set、保证该头一定不会被写入响应。
+# 用独立绑定避免打乱 case-insensitive 绑定的状态。
+CONFLICT_DOMAIN="rewrite-conflict.test.example"
+request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" \
+    "{\"domain\":\"$CONFLICT_DOMAIN\",\"port\":$UPSTREAM_PORT,\"enabled\":true}"
+assert_eq "create conflict-rewrite binding" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+CONFLICT_APP_ID=$(jq -er '.data.bindings[] | select(.domain == "'"$CONFLICT_DOMAIN"'") | .id' "$TMP_DIR/body")
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$CONFLICT_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"x-secret-bypass":"value"},"remove_headers":["x-secret-bypass"]}}'
+assert_eq "store conflicting header + remove_headers" "$STATUS" "200"
+request GET "$CONFLICT_DOMAIN" /rewrite-chain "$ADMIN_COOKIE"
+CONFLICT_HEADERS=$(<"$TMP_DIR/headers")
+assert_not_contains "remove wins over same-named header (no value leak)" "$CONFLICT_HEADERS" "X-Secret-Bypass:"
+assert_not_contains "remove wins also strips case-insensitive variant" "$CONFLICT_HEADERS" "x-secret-bypass:"
+assert_contains_lower "other upstream headers survive the conflicting rule" "$CONFLICT_HEADERS" "x-trace: first-second-third"
+assert_contains_lower "unrelated upstream header is preserved" "$CONFLICT_HEADERS" "x-internal-marker: remove-me"
+request DELETE "$ADMIN_HOST" "/_authz/api/applications/$CONFLICT_APP_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "delete conflict-rewrite binding" "$STATUS" "200"
+
+# body_base64 二进制往返：上游返回已知 1024 字节，绑定 body_base64 携带等值 base64，客户端收到的字节必须与原始字节完全一致。
+BIN_B64=$(python3 -c 'import base64; print(base64.b64encode(bytes(range(256))*4).decode())')
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" "{\"response_rewrite\":{\"body\":\"${BIN_B64}\",\"body_base64\":true,\"content_type\":\"application/octet-stream\"}}"
+assert_eq "store binary body_base64 rewrite" "$STATUS" "200"
+BIN_EXPECTED="$TMP_DIR/bin_expected"
+python3 -c 'import sys; sys.stdout.buffer.write(bytes(range(256))*4)' > "$BIN_EXPECTED"
+request GET rewrite.test.example /rewrite-bin "$ADMIN_COOKIE"
+assert_eq "body_base64 round-trip preserves bytes exactly" "$(cmp "$TMP_DIR/body" "$BIN_EXPECTED" >/dev/null && echo byte_match || echo byte_diff)" "byte_match"
+assert_contains "body_base64 uses the configured content type" "$(cat "$TMP_DIR/headers")" "application/octet-stream"
+assert_not_contains "binary rewrite never advertises the upstream Content-Length" "$(cat "$TMP_DIR/headers")" "Content-Length: 1024"
+
+# 多 filter 顺序：literal-only 链式应用；上行的 target 不会成为下行的 source（只走一遍）。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"alpha","target":"A"},{"source":"beta","target":"B"},{"source":"gamma","target":"C"}]}}'
+assert_eq "store chained filter rewrite" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-chain "$ADMIN_COOKIE"
+# 字节级断言：$(<file) 会吞掉末尾换行，改与期望文件 cmp 才能核对到最后一个字节。
+printf 'A\nB\nC\n' > "$TMP_DIR/chain_expected"
+assert_eq "chained filters keep the alpha->A order (byte-exact)" \
+    "$(cmp "$TMP_DIR/body" "$TMP_DIR/chain_expected" >/dev/null && echo byte_match || echo byte_diff)" \
+    "byte_match"
+# 一次性组合：status + headers + body 替换同时生效。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"status":207,"headers":{"X-Pipeline":"status+body+headers"},"body":"FULL OVERRIDE","content_type":"text/plain"}}'
+assert_eq "store full pipeline rewrite" "$STATUS" "200"
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_eq "full pipeline writes the configured status" "$STATUS" "207"
+assert_eq "full pipeline writes the configured body" "$BODY" "FULL OVERRIDE"
+assert_contains "full pipeline carries the custom response header" "$(cat "$TMP_DIR/headers")" "X-Pipeline: status+body+headers"
+assert_contains "full pipeline uses the configured Content-Type" "$(cat "$TMP_DIR/headers")" "text/plain"
+assert_not_contains "full pipeline drops the upstream Content-Length" "$(cat "$TMP_DIR/headers")" "Content-Length:"
 
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"response_rewrite":{"rewrites":[{"source":"internal-secret-token","target":"[REDACTED]"}]}}'
@@ -1749,6 +1943,174 @@ assert_json "cleared response rewrite is empty" \
 request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
 assert_contains_all "cleared rewrite restores the upstream body" "$BODY" "Hello Rewrite" "internal-secret-token" "value=42"
 assert_contains "cleared rewrite restores the upstream header" "$(cat "$TMP_DIR/headers")" "X-Upstream-Trace: upstream-trace"
+
+# ── 复杂响应改写：Header 注入保护、多值头、Server 屏蔽、HTML/XSS 净化 ──
+# CRLF 注入在 header 名 / 值、rewrite source / target 里都会被拒绝。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"X-Crlf":"good\r\nX-Injected: yes"}}}'
+assert_eq "CRLF in header value is rejected" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"X-Crlf: bad\r\nX-Injected: yes":"value"}}}'
+assert_eq "CRLF in header name is rejected" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"a\nb","target":"x"}]}}'
+assert_eq "CRLF in rewrite source is rejected" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"a","target":"x\r\nSet-Cookie: forge=1"}]}}'
+assert_eq "CRLF in rewrite target is rejected" "$STATUS" "422"
+
+# 多值头：Vary 与 X-Trace 都是用逗号分多个值的头，验证重写时整组值替换语义。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"Vary":"Cookie","X-Trace":"only-one"},"rewrites":[{"source":"SECRET-mv","target":"[REDACTED]"}]}}'
+assert_eq "store multi-value header rewrite" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-multivalue "$ADMIN_COOKIE"
+MV_HEADERS=$(<"$TMP_DIR/headers")
+assert_contains "Vary header is fully replaced" "$MV_HEADERS" "Vary: Cookie"
+assert_not_contains "old multi-value Vary is gone" "$MV_HEADERS" "Accept-Encoding,"
+assert_contains "X-Trace is replaced with single value" "$MV_HEADERS" "X-Trace: only-one"
+assert_not_contains "old X-Trace multi-value is gone" "$MV_HEADERS" "X-Trace: a,"
+assert_contains "body filter still runs alongside header rewrite" "$BODY" "[REDACTED]"
+# 同一规则里的 literal filter 把 "SECRET-mv" 改成 "[REDACTED]"，证明头改写与正文过滤同时生效。
+assert_not_contains "literal filter removes the secret in multi-value test" "$BODY" "SECRET-mv"
+
+# Server 头改写：把上游技术栈从响应里抹掉，避免泄露内网指纹。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"Server":"gateway"}}}'
+assert_eq "store Server header rewrite" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-html-xss "$ADMIN_COOKIE"
+assert_contains "Server header is rewritten to the gateway value" "$(cat "$TMP_DIR/headers")" "Server: gateway"
+assert_not_contains "upstream Server fingerprint is hidden" "$(cat "$TMP_DIR/headers")" "upstream-internal/9.9"
+
+# HTML XSS 净化：用一个真实的多步 filter 把 <script>...</script>、onload=、
+# javascript: 链接与内部邮箱一并改掉。验证正则 / 字面量混用、跨多字节。
+# 注意：正则类 source 必须以 ~ 开头，否则按字面量匹配（onload 那条就是正则）。
+XSS_FILTER='{"rewrites":[{"source":"~<script[^>]*>[^<]*</script>","target":""},{"source":"~ onload=\"[^\"]*\"","target":""},{"source":"javascript:","target":"about:"},{"source":"admin@acme.example","target":"redacted@example.com"}]}'
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" "{\"response_rewrite\":$XSS_FILTER}"
+assert_eq "store XSS sanitization filters" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-html-xss "$ADMIN_COOKIE"
+assert_not_contains "script block is stripped" "$BODY" "<script>alert"
+assert_not_contains "script close tag is stripped" "$BODY" "</script>"
+assert_not_contains "SECRET inside script is gone" "$BODY" "xss-token-SECRET123"
+assert_not_contains "onload handler is removed" "$BODY" "onload="
+assert_not_contains "javascript: scheme is rewritten" "$BODY" "javascript:alert"
+assert_contains "remaining body keeps the title" "$BODY" "Hello &amp; welcome"
+assert_contains "redacted email replaces the internal one" "$BODY" "redacted@example.com"
+assert_not_contains "internal email is removed" "$BODY" "admin@acme.example"
+assert_contains "XSS sanitization keeps text/html content type" "$(cat "$TMP_DIR/headers")" "text/html"
+
+# JSON 字段过滤：保留 JSON 结构、改一个字段值；显式 content_type 也被尊重。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"~\\\"internal_secret\\\": \\\"[^\\\"]*\\\"","target":"\"internal_secret\": \"[REDACTED]\""}]}}'
+assert_eq "store JSON field filter" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-json "$ADMIN_COOKIE"
+JSON_HEADERS=$(<"$TMP_DIR/headers")
+assert_contains "JSON filter rewrites a top-level field" "$BODY" '"internal_secret": "[REDACTED]"'
+assert_not_contains "JSON filter removed the secret value" "$BODY" "leak-me-please"
+assert_contains "JSON filter keeps the other fields" "$BODY" '"service": "checkout"'
+assert_contains "JSON filter keeps endpoints array" "$BODY" '"/pay"'
+assert_contains "JSON content type is preserved" "$JSON_HEADERS" "application/json"
+assert_not_contains "JSON filter drops the upstream Content-Length" "$JSON_HEADERS" "Content-Length:"
+
+# JSON 整体替换 + content-type 改写：从 application/json 改成 application/xml。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"body":"<ok/>","content_type":"application/xml"}}'
+assert_eq "store JSON-to-XML body replacement" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-json "$ADMIN_COOKIE"
+assert_eq "body replacement overrides JSON content" "$BODY" "<ok/>"
+assert_contains "explicit content-type override is applied" "$(cat "$TMP_DIR/headers")" "application/xml"
+assert_not_contains "upstream application/json header is gone" "$(cat "$TMP_DIR/headers")" "application/json"
+
+# SVG：image/svg+xml 在允许列表里，可被过滤。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"SECRET-text","target":"REDACTED-svg"}]}}'
+assert_eq "store SVG filter" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-svg "$ADMIN_COOKIE"
+assert_contains "SVG text content is filtered" "$BODY" "REDACTED-svg"
+assert_not_contains "SVG secret token is gone" "$BODY" "SECRET-text"
+
+# XML：application/xml 同样允许过滤；多字节属性名应被字面量与正则替换保留。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"SECRET-xml","target":"REDACTED-xml"},{"source":"~<item name=\"[^\"]*\">","target":"<item name=\"redacted\">"}]}}'
+assert_eq "store XML filter" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-xml "$ADMIN_COOKIE"
+assert_contains "XML text is redacted" "$BODY" "REDACTED-xml"
+assert_not_contains "XML secret is gone" "$BODY" "SECRET-xml"
+assert_contains "XML attribute is normalized" "$BODY" 'name="redacted"'
+assert_contains "XML filter preserves UTF-8 attribute names" "$BODY" "产品"
+
+# CSS：text/css 在允许列表里，可被过滤。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"SECRET-css","target":"REDACTED-css"}]}}'
+assert_eq "store CSS filter" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-css "$ADMIN_COOKIE"
+assert_contains "CSS token is filtered" "$BODY" "REDACTED-css"
+assert_not_contains "CSS secret is gone" "$BODY" "SECRET-css"
+
+# text/csv 不在允许列表里：filter 应跳过且不修改正文（保证不被错改）。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"SECRET-csv","target":"SHOULD-NOT-APPEAR"}]}}'
+assert_eq "store CSV skip probe" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-csv "$ADMIN_COOKIE"
+assert_contains "CSV content-type triggers filter skip" "$(cat "$TMP_DIR/headers")" "skipped=type"
+assert_contains "CSV body is passed through untouched" "$BODY" "SECRET-csv"
+assert_not_contains "CSV filter must not rewrite the body" "$BODY" "SHOULD-NOT-APPEAR"
+
+# Content-Disposition 重写：把 attachment filename 改成白标名。
+# JSON 里 \" 即一个引号；多写一层反斜杠会被原样存库并发回客户端。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"Content-Disposition":"attachment; filename=\"white-label.pdf\""}}}'
+assert_eq "store Content-Disposition rewrite" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-disposition "$ADMIN_COOKIE"
+DISP_HEADERS=$(<"$TMP_DIR/headers")
+assert_contains "Content-Disposition is rewritten" "$DISP_HEADERS" 'Content-Disposition: attachment; filename="white-label.pdf"'
+assert_not_contains "old attachment filename is gone" "$DISP_HEADERS" "internal.pdf"
+# PDF 不在允许列表里，filter 跳过滤过且仅保留 header 改写。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"Content-Disposition":"attachment; filename=\"x.pdf\""},"rewrites":[{"source":"internal-pdf-token","target":"REDACTED-pdf"}]}}'
+assert_eq "store PDF filter (should skip body)" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-disposition "$ADMIN_COOKIE"
+assert_contains "PDF body filter is skipped" "$(cat "$TMP_DIR/headers")" "skipped=type"
+assert_not_contains "PDF body keeps the secret unchanged" "$BODY" "REDACTED-pdf"
+assert_contains "PDF body still contains original secret" "$BODY" "internal-pdf-token"
+
+# Location 头重写 + status 改写：302 → 301 + 新地址。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"status":301,"headers":{"Location":"https://public.example/new-path"}}}'
+assert_eq "store redirect rewrite" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-redirect "$ADMIN_COOKIE"
+assert_eq "redirect rewrite changes status to 301" "$STATUS" "301"
+assert_contains "Location header is rewritten" "$(cat "$TMP_DIR/headers")" "Location: https://public.example/new-path"
+assert_not_contains "old internal Location is gone" "$(cat "$TMP_DIR/headers")" "internal.example/old-path"
+
+# 分块流式响应：分片含 token，filter 应在所有分片累积完成后整体替换。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"SECRET-stream","target":"REDACTED-stream"}]}}'
+assert_eq "store streaming filter" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-stream "$ADMIN_COOKIE"
+assert_eq "chunks reassembled into a single body" "$BODY" $'part-A REDACTED-stream\npart-B plain\npart-C REDACTED-stream\npart-D end'
+assert_contains "stream filter rewrites both occurrences" "$BODY" "REDACTED-stream"
+assert_not_contains "stream body keeps no secret" "$BODY" "SECRET-stream"
+
+# 空正文 + filter：保留空正文、不把内容变成非空。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"missing-token","target":"x"}]}}'
+assert_eq "store empty-body filter" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-empty-body "$ADMIN_COOKIE"
+assert_eq "empty body stays empty when filter matches nothing" "$BODY" ""
+assert_contains "empty body preserves Content-Length 0" "$(cat "$TMP_DIR/headers")" "Content-Length: 0"
+
+# 整体替换大于原文：撤掉 Content-Length、走分块编码，客户端按新长度接收。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"body":"a-much-longer-body-than-original-five-bytes"}}'
+assert_eq "store grow replacement" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-grow "$ADMIN_COOKIE"
+assert_eq "grown body is delivered fully" "$BODY" "a-much-longer-body-than-original-five-bytes"
+assert_not_contains "grow rewrite drops the stale Content-Length" "$(cat "$TMP_DIR/headers")" "Content-Length: 5"
+assert_contains "grow rewrite switches to chunked encoding" "$(cat "$TMP_DIR/headers")" "Transfer-Encoding: chunked"
+
+# 整体替换小于原文：同样撤掉 Content-Length。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"body":"tiny"}}'
+assert_eq "store shrink replacement" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-shrink "$ADMIN_COOKIE"
+assert_eq "shrunk body is delivered fully" "$BODY" "tiny"
+assert_not_contains "shrink rewrite drops the stale Content-Length" "$(cat "$TMP_DIR/headers")" "Content-Length: 54"
+
+# 多绑定隔离：第二个绑定对相同响应不应"串改"到 rewrite.test.example 的请求。
+request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" \
+    "{\"domain\":\"rewrite-isolated.test.example\",\"port\":$UPSTREAM_PORT,\"enabled\":true,\"response_rewrite\":{\"headers\":{\"X-Binding-Tag\":\"only-on-this-binding\"}}}"
+assert_eq "create second rewrite binding" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+ISOLATED_APP_ID=$(jq -er '.data.bindings[] | select(.domain == "rewrite-isolated.test.example") | .id' "$TMP_DIR/body")
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_not_contains "rewrite binding does not leak headers across domains" "$(cat "$TMP_DIR/headers")" "X-Binding-Tag"
+request GET rewrite-isolated.test.example /rewrite "$ADMIN_COOKIE"
+assert_contains "isolated binding applies its own header" "$(cat "$TMP_DIR/headers")" "X-Binding-Tag: only-on-this-binding"
+# 隔离绑定占用了 mock 端口，必须删掉：残留绑定会让后续 discovery
+# 断言把 mock 端口当作已绑定端口排除出「本地服务」列表。
+request DELETE "$ADMIN_HOST" "/_authz/api/applications/$ISOLATED_APP_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "delete isolated rewrite binding" "$STATUS" "200"
 request DELETE "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "delete response rewrite binding" "$STATUS" "200"
 

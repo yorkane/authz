@@ -353,6 +353,44 @@ _M.list = {
                 "response_rewrite TEXT NOT NULL DEFAULT ''")
         end,
     },
+    {
+        version = 17,
+        name = "bindings_request_rewrite",
+        up = function(db)
+            -- 绑定级请求改写：把原「Header 覆盖」多行文本升级为 JSON 结构化配置，
+            -- 与 response_rewrite 对齐（headers 为改写、remove_headers 为删除）。
+            ensure_column(db, "bindings", "request_rewrite",
+                "request_rewrite TEXT NOT NULL DEFAULT ''")
+            if has_column(db, "bindings", "header_overrides") then
+                local cjson = require "cjson.safe"
+                local rows = db.query(
+                    "SELECT id, header_overrides FROM bindings WHERE header_overrides != ''") or {}
+                for _, row in ipairs(rows) do
+                    local headers = {}
+                    for line in (row.header_overrides .. "\n"):gmatch("([^\r\n]*)[\r\n]") do
+                        local name, value = line:match("^%s*([^:]+):%s*(.-)%s*$")
+                        if name and value ~= "" then headers[name] = value end
+                    end
+                    if next(headers) then
+                        local encoded = cjson.encode({ enabled = true, headers = headers })
+                        -- 仅在 request_rewrite 为空时写入，不覆盖已有配置。
+                        must(db.exec(
+                            "UPDATE bindings SET request_rewrite = ? WHERE id = ? AND request_rewrite = ''",
+                            encoded, row.id))
+                    end
+                end
+                -- SQLite 3.35+ 支持 DROP COLUMN；旧数据已迁出，删列收编 schema。
+                -- 删列是锦上添花：在老版本 SQLite 上失败时保留列但不再被读写，
+                -- 不能因此阻断容器启动，故尽力而为并仅告警。
+                local ok, err = db.exec("ALTER TABLE bindings DROP COLUMN header_overrides")
+                if not ok then
+                    ngx.log(ngx.WARN,
+                        "bindings_request_rewrite: keep header_overrides column (" ..
+                        tostring(err) .. "); data already migrated to request_rewrite")
+                end
+            end
+        end,
+    },
 }
 
 function _M.run(db)

@@ -1,0 +1,16 @@
+# 21.k 实例用 docker-compose (80 端口 + test@123)
+services:
+  gateway:
+    image: authz:21k
+    container_name: openresty-gateway-21k
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      OPENRESTY_TEMPLATE_DIR: /etc/openresty/templates
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+      - ${ADMIN_UI_DIR:-/home/aigc/ChatGPT/authz/admin}:/usr/local/openresty/nginx/html/admin:ro
+      - ${LUALIB_DIR:-/home/aigc/ChatGPT/authz/lualib}:/usr/local/openresty/site/lualib:ro
+      - ${NGINX_TEMPLATE_DIR:-/home/aigc/ChatGPT/authz/conf}:/etc/openresty/templates:ro

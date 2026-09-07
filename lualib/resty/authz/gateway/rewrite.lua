@@ -57,6 +57,7 @@ end
 -- 由 log_by_lua 调用：请求结束（含客户端断开、上游报错）时归还预留。
 function _M.release_buffer()
     release_state(ngx.ctx.authz_response_body)
+    release_state(ngx.ctx.authz_request_body)
 end
 
 -- 该规则是否会改写正文（替换或过滤）。正文改写必须在未压缩的字节上进行，
@@ -120,21 +121,13 @@ local function current_rule()
     return rule
 end
 
-local function literal_replace_all(haystack, needle, replacement)
-    if needle == "" then return haystack end
-    local out, from, found = {}, 1, false
-    while true do
-        local start_index, end_index = haystack:find(needle, from, true)
-        if not start_index then
-            out[#out + 1] = haystack:sub(from)
-            break
-        end
-        found = true
-        out[#out + 1] = haystack:sub(from, start_index - 1)
-        out[#out + 1] = replacement
-        from = end_index + 1
-    end
-    return table.concat(out), found
+-- PCRE 逐字引用：把任意文本包成 \Q...\E，元字符全部失去模式含义。
+-- 文本自带 \E 时无法在引用内表达（PCRE 规范），以「结束引用 + \E
+-- （引用外写两个反斜杠 = 匹配一个字面反斜杠）+ E + 重新进入引用」规范化。
+-- 已在目标 OpenResty（PCRE2）上验证：a.b 不再匹配 axb，a\\Eb、a|b 均逐字命中。
+local B = string.char(92)
+local function quote_literal(text)
+    return B .. "Q" .. text:gsub(B .. "E", B .. "E" .. B .. B .. "E" .. B .. "E") .. B .. "E"
 end
 
 local function apply_rewrites(rules, body)
@@ -143,12 +136,95 @@ local function apply_rewrites(rules, body)
             -- ngx.re.gsub 返回 value, substitutions, err。
             local replaced, _, err = ngx.re.gsub(body, rule.source, rule.target, "jo")
             if replaced and not err then body = replaced end
-        else
-            body = (literal_replace_all(body, rule.source, rule.target))
+        elseif rule.source ~= "" then
+            -- 字面量匹配同样交给 ngx.re（PCRE）执行而不是 Lua 原生字符串查找：
+            -- 替换文本经回调原样插回，$1 之类的引用不会在替换值里被二次展开。
+            local replacement = rule.target
+            local replaced, _, err = ngx.re.gsub(body, quote_literal(rule.source),
+                function() return replacement end, "jo")
+            if replaced and not err then body = replaced end
         end
     end
     return body
 end
+
+-- 请求正文改写的安全范围：请求没有响应那样的“跳过标记”可看（改写发生在
+-- 转发前，客户端看不到 X-Authz-Rewrite），所以条件收紧：
+--   * GET/HEAD 等无正文方法直接跳过；
+--   * Content-Length 缺失（分块传输）或超过缓冲上限时跳过——分块请求体
+--     无法安全地整体缓冲后重放；
+--   * filter 模式下非文本类 Content-Type 或声明了压缩的请求跳过，避免破坏
+--     二进制/上传内容（replace 模式整体替换，对原类型无要求）；
+--   * WebSocket 升级请求跳过。
+-- 复用与响应侧相同的 worker 级缓冲预算（release_buffer 在 log 阶段统一归还）。
+function _M.request_body_mode(rule)
+    if type(rule) ~= "table" or rule.enabled == false then return nil end
+    local method = ngx.req.get_method()
+    if method == "GET" or method == "HEAD" then return nil end
+    if tostring(ngx.var.authz_websocket or "") == "1" then return nil end
+    local length = tonumber(ngx.var.http_content_length or "") or -1
+    if length < 0 then return nil end
+    if length > MAX_BODY_BYTES then return nil end
+    local mode
+    if type(rule.body) == "string" and rule.body ~= "" then
+        mode = "replace"
+    elseif type(rule.rewrites) == "table" and #rule.rewrites > 0 then
+        mode = "filter"
+    else
+        return nil
+    end
+    if mode == "filter" then
+        local encoding = first_header_value(ngx.var.http_content_encoding):lower()
+        if encoding ~= "" and encoding ~= "identity" then return nil end
+        local key = first_header_value(ngx.var.http_content_type):lower():match("^[^;%s]+") or ""
+        if not TEXTUAL_CONTENT_TYPES[key] then return nil end
+    end
+    return mode
+end
+
+-- access 阶段执行请求正文改写（须在 proxy 转发前完成）：
+-- 缓冲整个请求体 -> 应用替换/过滤 -> 写回并同步 Content-Length。
+-- 与响应侧同样的“超限放弃”策略：宁可原样转发也不截断请求体。
+function _M.body_rewrite(mode, rule)
+    if not try_reserve(MAX_BODY_BYTES) then return false end
+    local state = { reserved = MAX_BODY_BYTES }
+    ngx.ctx.authz_request_body = state
+    local ok, err = pcall(function()
+        ngx.req.read_body()
+        local original = ngx.req.get_body_data()
+        if original == nil then
+            local file = ngx.req.get_body_file()
+            if file then
+                local handle = io.open(file, "rb")
+                if handle then
+                    original = handle:read(MAX_BODY_BYTES + 1)
+                    handle:close()
+                end
+            end
+        end
+        original = original or ""
+        if #original > MAX_BODY_BYTES then return end
+        local replacement
+        if mode == "replace" then
+            replacement = rule.body
+        else
+            local replaced = apply_rewrites(rule.rewrites, original)
+            -- 过滤结果为空回退原文，防止正则写错把请求体抹掉。
+            replacement = replaced ~= "" and replaced or original
+        end
+        if replacement == nil then return end
+        if replacement ~= original then
+            ngx.req.set_body_data(replacement)
+            ngx.req.set_header("Content-Length", tostring(#replacement))
+            if type(rule.content_type) == "string" and rule.content_type ~= "" then
+                ngx.req.set_header("Content-Type", rule.content_type)
+            end
+        end
+    end)
+    release_state(state)
+    return ok
+end
+
 
 function _M.header_filter()
     local rule = current_rule()
@@ -158,6 +234,9 @@ function _M.header_filter()
     if tonumber(rule.status) and tonumber(rule.status) > 0 then
         ngx.status = tonumber(rule.status)
     end
+    -- 防御语义：先写 headers 再执行 remove_headers，保证「删除优先」。
+    -- 若同一规则既 set 又 strip 同名头（配置错误），删除在后生效，
+    -- 该头最终不会出现在响应里——宁可漏掉一次改写也不让敏感值泄露。
     for _, header in ipairs(rule.headers or {}) do
         if header_allowed(header.name) then
             ngx.header[header.name] = header.value
@@ -195,6 +274,10 @@ function _M.header_filter()
         skip_reason = "encoded"
     elseif first_header_value(ngx.header.content_range) ~= "" then
         skip_reason = "range"
+    elseif mode == "filter" and first_header_value(ngx.header.content_length) == "0" then
+        -- filter 模式下空响应没有可过滤的正文：直接透传并保留 Content-Length: 0，
+        -- 避免「无匹配回退原文」路径撤掉分帧头。replace 模式不受影响。
+        skip_reason = "empty"
     elseif mode == "filter" and not TEXTUAL_CONTENT_TYPES[content_type_key()] then
         skip_reason = "type"
     end
@@ -310,6 +393,78 @@ function _M.parse(raw)
     end
     if type(decoded.content_type) == "string" then
         rule.content_type = decoded.content_type
+    end
+    return rule
+end
+
+-- 请求改写白名单：这些头由 server.conf 的 proxy_set_header 或绑定专属字段
+-- 统一管控，运行期再兜底一层（校验层已拒一次，防手工改库）。
+local REQUEST_BLOCKED = {
+    host = true, cookie = true, origin = true, forwarded = true,
+    ["x-authz-user"] = true, ["x-authz-source"] = true,
+    ["x-authz-identity"] = true, ["x-authz-key"] = true, ["x-real-ip"] = true,
+    ["x-forwarded-for"] = true, ["x-forwarded-host"] = true,
+    ["x-forwarded-proto"] = true, ["x-forwarded-port"] = true,
+    ["content-length"] = true, ["transfer-encoding"] = true,
+    connection = true, ["keep-alive"] = true, upgrade = true,
+    te = true, trailer = true,
+}
+
+local function request_header_ok(name)
+    local lower = tostring(name or ""):lower()
+    if REQUEST_BLOCKED[lower] then return false end
+    if lower:sub(1, 8) == "x-authz-" then return false end
+    if lower:sub(1, 12) == "x-forwarded-" then return false end
+    if lower:sub(1, 6) == "proxy-" then return false end
+    return true
+end
+
+-- 绑定缓存里的 request_rewrite 同样是 JSON 文本；解码 + 白名单过滤 +
+-- base64 正文解出，与响应侧 parse 对称。无有效内容时返回 nil。
+function _M.parse_request(raw)
+    local text = tostring(raw or "")
+    if text == "" then return nil end
+    local decoded = cjson.decode(text)
+    if type(decoded) ~= "table" or decoded.enabled == false then return nil end
+    local rule = { headers = {}, remove_headers = {}, rewrites = {} }
+    for _, item in ipairs(type(decoded.headers) == "table" and decoded.headers or {}) do
+        local name = tostring(type(item) == "table" and item.name or "")
+        local value = type(item) == "table" and tostring(item.value or "") or ""
+        if name ~= "" and value ~= "" and request_header_ok(name) and not value:find("%c") then
+            rule.headers[#rule.headers + 1] = { name = name, value = value }
+        end
+    end
+    for _, name in ipairs(type(decoded.remove_headers) == "table" and decoded.remove_headers or {}) do
+        local clean = tostring(name)
+        if clean ~= "" and request_header_ok(clean) then
+            rule.remove_headers[#rule.remove_headers + 1] = clean
+        end
+    end
+    for _, item in ipairs(type(decoded.rewrites) == "table" and decoded.rewrites or {}) do
+        if type(item) == "table" then
+            local source = tostring(item.source or "")
+            local target = tostring(item.target or "")
+            if source ~= "" and not source:find("%c") and not target:find("%c") then
+                rule.rewrites[#rule.rewrites + 1] = {
+                    source = source, target = target, regex = item.regex == true,
+                }
+            end
+        end
+    end
+    if type(decoded.body) == "string" and decoded.body ~= "" then
+        if decoded.body_base64 == true then
+            local decoded_body = ngx.decode_base64(decoded.body)
+            if decoded_body then rule.body = decoded_body end
+        else
+            rule.body = decoded.body
+        end
+    end
+    if type(decoded.content_type) == "string" and decoded.content_type ~= "" then
+        rule.content_type = decoded.content_type
+    end
+    if #rule.headers == 0 and #rule.remove_headers == 0 and not rule.body
+        and #rule.rewrites == 0 then
+        return nil
     end
     return rule
 end
