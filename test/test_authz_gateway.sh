@@ -1653,6 +1653,42 @@ request GET rewrite.test.example /rewrite-huge "$ADMIN_COOKIE"
 assert_eq "responses over the rewrite buffer are not truncated" "$(wc -c <"$TMP_DIR/body")" "1200007"
 assert_contains "oversized responses keep the upstream bytes" "$BODY" "chunk-yyyy"
 
+# ── 压缩协商：正文改写必须让上游返回未压缩正文 ────────────────
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"response_rewrite":{"rewrites":[{"source":"negotiated-secret-token","target":"[REDACTED]"}]}}'
+assert_eq "store the negotiated-compression filter" "$STATUS" "200"
+# request() 不透传 Accept-Encoding，这里手工构造带压缩协商头的请求。
+negotiated_request() {
+    STATUS=$(curl --silent --show-error --max-time 5 \
+        --resolve "rewrite.test.example:$HTTP_PORT:127.0.0.1" \
+        -H 'Accept: text/plain' -H "Accept-Encoding: $2" \
+        -H "Cookie: $(cookie_header "$ADMIN_COOKIE")" \
+        -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}' \
+        "http://rewrite.test.example:$HTTP_PORT/rewrite-negotiated")
+    BODY=$(<"$TMP_DIR/body")
+}
+negotiated_request x 'gzip, deflate, br'
+assert_not_contains "body rewrite asks the upstream for uncompressed bytes" "$BODY" "negotiated-secret-token"
+assert_contains "negotiated upstream body is rewritten" "$BODY" "[REDACTED]"
+assert_not_contains "negotiated rewrite is not skipped" "$(cat "$TMP_DIR/headers")" "skipped="
+# 显式的 Accept-Encoding 覆盖优先于网关的 identity 声明：上游压缩，改写按设计跳过。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"header_overrides":"Accept-Encoding: gzip"}'
+assert_eq "override the upstream Accept-Encoding" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-negotiated "$ADMIN_COOKIE"
+assert_contains "explicit compression override wins and skips the rewrite" "$(cat "$TMP_DIR/headers")" "skipped=encoded"
+assert_contains "explicit compression override keeps the compressed body" "$(cat "$TMP_DIR/headers")" "gzip"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"header_overrides":""}'
+assert_eq "clear the compression override" "$STATUS" "200"
+# 规范化后的 status:0（= 不改写状态码）必须能原样重新提交，否则绑定保存过改写规则后
+# 就再也 PATCH 不动了（历史上这里会 422，表现为"替换不生效"）。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"response_rewrite":{"status":0,"rewrites":[{"source":"internal-secret-token","target":"[REDACTED]"}]}}'
+assert_eq "status 0 means keep the upstream status" "$STATUS" "200"
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_eq "status 0 never rewrites the status code" "$STATUS" "200"
+assert_contains "status 0 keeps the body filter working" "$BODY" "[REDACTED]"
+
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"response_rewrite":{"rewrites":[{"source":"internal-secret-token","target":"[REDACTED]"}]}}'
 assert_eq "restore the filter before the rejection probes" "$STATUS" "200"

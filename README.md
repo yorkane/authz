@@ -47,7 +47,7 @@
 - “高级代理配置”可选择上游协议、SSL 校验和上游路径改写，并覆盖上游 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto`、`X-Forwarded-Port`，以及保持、重写、移除或自定义 `Origin`；改写路径留空时保持原路径，填写后请求统一转发到该路径。
 - “高级代理配置”还支持多行 Header 覆盖：每行 `Header-Name: value`，按行覆盖发往上游的透传请求头（如 `Authorization`、自定义业务头）；Host、Cookie、X-Authz-* 等网关控制头不可覆盖。
 - “域名与端口绑定”每行提供 **改写响应** 按钮，可按绑定改写返回给浏览器的上游响应（语义参考 APISIX `response-rewrite`）：覆盖状态码、覆盖/删除响应头、整体替换正文（文本 / JSON / Base64）或按规则过滤正文（字面量与 PCRE 替换）。编辑器支持表单与 JSON 双视图互转，也可一键清除。
-  正文改写只作用于上游 200 的 GET 响应，压缩、Range 分片、二进制和超过 1MB 的响应自动跳过（响应头 `X-Authz-Rewrite: skipped=<原因>` 会标明原因）；`Set-Cookie`、`Content-Length`/`Transfer-Encoding` 等分帧头、`X-Authz-*`/`X-Forwarded-*` 以及 `X-Frame-Options`、`CSP`、`HSTS` 等安全头在保存与运行期两层都会被拒绝改写。
+  正文改写只作用于上游 200 的 GET 响应，Range 分片、二进制和超过 1MB 的响应自动跳过（响应头 `X-Authz-Rewrite: skipped=<原因>` 会标明原因）。为了让改写对压缩型上游也生效，配置了正文改写的绑定会自动向上游声明 `Accept-Encoding: identity`（该链路不再压缩）；在绑定的「Header 覆盖」里显式写 `Accept-Encoding` 时以其为准，此时上游返回压缩正文，正文改写按设计跳过并标记 `skipped=encoded`。`Set-Cookie`、`Content-Length`/`Transfer-Encoding` 等分帧头、`X-Authz-*`/`X-Forwarded-*` 以及 `X-Frame-Options`、`CSP`、`HSTS` 等安全头在保存与运行期两层都会被拒绝改写。
 - “模拟本机访问”默认把 `Host`/`Origin` 改为目标 HTTP 地址，并将 `X-Real-IP`、`X-Forwarded-For` 设置为 `127.0.0.1`；也可填写网关的局域网 IP。该选项只模拟 HTTP 请求头，不能改变真实 TCP 来源地址。
 
 ### 文件浏览（Web 文件管理器）

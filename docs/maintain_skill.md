@@ -87,6 +87,10 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
   正文改写必须保留全部安全跳过条件：上游非 200、HEAD、WebSocket、已压缩、含 Content-Range、
   过滤模式下的非文本 Content-Type、超过 1MB 缓冲上限（超限时连同已缓冲内容原样透传），
   且跳过原因必须回写 `X-Authz-Rewrite: skipped=<reason>`，不允许静默失效。
+  “已压缩”只认真正压缩过的 `Content-Encoding`（`identity` 视为未压缩）；配置了正文改写的绑定
+  由 `proxy.apply_headers` 向上游声明 `Accept-Encoding: identity`，绑定的显式 Accept-Encoding
+  覆盖优先（此时上游压缩、改写按设计跳过）。规范化后的 `status:0`（不改状态码）必须能通过
+  重新校验，否则绑定保存过改写规则后任何 PATCH 都会 422。
   正则规则保存时必须做 PCRE 编译校验并限制条数与长度；`body` 与 `rewrites` 互斥。
   授权管理页的“改写响应”对话框保持表单/JSON 双视图、按 binding ID PATCH、支持一键清除。
 - Compose 将 `conf/` 挂载到 `/etc/openresty/templates:ro`，镜像入口脚本每次启动生成最终 `nginx.conf` 与 `server.conf`；修改模板只需重建或重启容器，不需重建镜像。

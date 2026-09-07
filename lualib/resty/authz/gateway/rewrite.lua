@@ -59,6 +59,14 @@ function _M.release_buffer()
     release_state(ngx.ctx.authz_response_body)
 end
 
+-- 该规则是否会改写正文（替换或过滤）。正文改写必须在未压缩的字节上进行，
+-- 因此代理层要提前向上游声明不接受压缩；只看响应头/状态码则不需要。
+function _M.writes_body(rule)
+    if type(rule) ~= "table" or rule.enabled == false then return false end
+    if type(rule.body) == "string" and rule.body ~= "" then return true end
+    return type(rule.rewrites) == "table" and #rule.rewrites > 0
+end
+
 local BLOCKED_HEADERS = {
     ["content-length"] = true, ["transfer-encoding"] = true,
     connection = true, ["keep-alive"] = true, upgrade = true,
@@ -171,15 +179,19 @@ function _M.header_filter()
     -- 以下情形无法安全缓冲或改写正文：只保留状态码与响应头改写。
     local status = upstream_status(original_status)
     local skip_reason
+    local encoding = first_header_value(ngx.header.content_encoding):lower()
+    -- identity 只是显式声明“未压缩”，正文仍是明文，可以安全改写。
+    local compressed = encoding ~= "" and encoding ~= "identity"
     if status ~= 200 then
         skip_reason = "status"
     elseif ngx.req.get_method() == "HEAD" then
         skip_reason = "head"
     elseif tostring(ngx.var.authz_websocket or "") == "1" then
         skip_reason = "websocket"
-    elseif first_header_value(ngx.header.content_encoding) ~= "" then
+    elseif compressed then
         -- 上游已压缩：改写压缩字节没有意义。让上游返回未压缩内容才会生效
-        -- （可在绑定的 Header 覆盖里把请求的 Accept-Encoding 置空）。
+        -- （配了正文改写的绑定由 proxy 自动把上游请求改成 identity，
+        --   见 proxy.apply_headers；显式的 Header 覆盖优先级更高）。
         skip_reason = "encoded"
     elseif first_header_value(ngx.header.content_range) ~= "" then
         skip_reason = "range"

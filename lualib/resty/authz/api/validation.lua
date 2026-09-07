@@ -356,12 +356,15 @@ function _M.normalize_response_rewrite(value)
     enabled = not (enabled == false or enabled == 0 or enabled == "false")
 
     local status = config.status
-    if status == nil or status == cjson.null or status == "" then
+    -- 0 = 不改写状态码，与 UI/规范化输出一致。若在这里拒绝 0，任何已经保存过
+    -- 改写规则的绑定都会在后续 PATCH（哪怕只改别的字段）时被自己拒绝，
+    -- 表现为「改不动、替换不生效」。
+    if status == nil or status == cjson.null or status == "" or status == 0 or status == "0" then
         status = 0
     else
         status = tonumber(status)
         if not status or status % 1 ~= 0 or status < 200 or status > 999 then
-            return nil, "响应改写 status 必须是 200-999 的整数", 422
+            return nil, "响应改写 status 必须是 0（不改写）或 200-999 的整数", 422
         end
         status = math.floor(status)
     end

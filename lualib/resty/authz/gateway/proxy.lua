@@ -1,4 +1,5 @@
 local target = require "resty.authz.target"
+local rewrite = require "resty.authz.gateway.rewrite"
 
 local _M = {}
 
@@ -26,6 +27,14 @@ local function upstream_cookie()
         end
     end
     return table.concat(filtered, "; ")
+end
+
+-- 绑定是否显式覆盖了某个请求头（大小写不敏感）。
+local function has_header_override(binding, lower_name)
+    for _, header in ipairs((binding and binding.header_overrides) or {}) do
+        if tostring(header.name or ""):lower() == lower_name then return true end
+    end
+    return false
 end
 
 local function apply_headers(binding, target_ip, port)
@@ -79,6 +88,14 @@ local function apply_headers(binding, target_ip, port)
         ngx.var.authz_real_ip = tostring(ngx.var.remote_addr or "")
         ngx.var.authz_forwarded_for = forwarded_for()
         ngx.var.authz_forwarded = tostring(ngx.var.http_forwarded or "")
+    end
+    -- 正文改写只能在未压缩的字节上进行：上游看到 Accept-Encoding 就会自行压缩，
+    -- 压缩字节无法做文本替换（网关会跳过并标记 skipped=encoded）。因此当绑定
+    -- 配置了正文改写时，向上游声明不接受压缩；用户在「Header 覆盖」里显式写
+    -- Accept-Encoding 时以其为准，便于上游必须压缩的特殊场景自行权衡。
+    if rewrite.writes_body(binding.response_rewrite) and
+        not has_header_override(binding, "accept-encoding") then
+        ngx.req.set_header("Accept-Encoding", "identity")
     end
     -- 绑定级 header 覆盖：逐条改写随请求透传给上游的头（如 Authorization、自定义业务头）。
     -- Host/Cookie/X-Authz-*/X-Forwarded-* 等由 proxy_set_header 显式控制且校验层已禁止覆盖，

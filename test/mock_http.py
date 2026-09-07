@@ -122,6 +122,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        if self.path == "/rewrite-negotiated":
+            # 只在客户端声明支持压缩时返回 gzip。配置正文改写的绑定会把上游请求
+            # 改成 identity，因此网关应拿到未压缩正文并成功改写。
+            import gzip
+            plain = b"negotiated-secret-token\n"
+            encoding = "identity"
+            payload = plain
+            if "gzip" in self.headers.get("Accept-Encoding", ""):
+                payload = gzip.compress(plain)
+                encoding = "gzip"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Encoding", encoding)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path == "/rewrite-error":
             payload = b"upstream failure"
             self.send_response(503)

@@ -170,17 +170,19 @@ body { overflow-x: hidden; }
 .policy-object-target code,
 .policy-object-path code { color: #c9cddd; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .policy-object-path span { color: #858aa1; }
-.binding-dialog > div,
+/* 解除 Quasar 对对话框卡片的 560px 上限。
+   注意：只能作用在卡片上，不要写成 `.binding-dialog > div`——那会命中全屏
+   居中容器 .q-dialog__inner（inset:0 绝对定位），max-width 会让 right 失效、
+   容器从 left:0 起算，卡片整体贴左而不是居中。
+   .q-dialog__inner--minimized > .xxx-card (0,2,0) 已能覆盖 Quasar 的
+   .q-dialog__inner--minimized > div (0,1,1)，无需再动容器。 */
 .q-dialog__inner--minimized > .binding-dialog-card { max-width: min(760px, calc(100vw - 28px)); }
 .binding-dialog-card { width: 100%; max-height: min(820px, calc(100vh - 28px)); }
 .binding-dialog-heading { padding-bottom: 14px !important; }
 .binding-dialog-fields { gap: 11px; max-height: calc(100vh - 205px); overflow-y: auto; }
 
-/* 响应改写编辑器：绑定行内的状态徽标 + 独立对话框 */
+/* 响应改写编辑器：绑定行内的状态徽标 + 独立对话框（宽度上限见上方说明） */
 .rewrite-none { color: var(--muted); font-size: 12px; }
-/* 弹窗加宽：Quasar 在 ≥600px 视口给对话框容器加了 max-width:560px，
-   必须同时解除容器限制，否则卡片 width 再大也会被压回 560px。 */
-.rewrite-dialog > div,
 .q-dialog__inner--minimized > .rewrite-dialog-card { max-width: min(1160px, calc(100vw - 24px)); }
 .rewrite-dialog-card { width: 100%; max-height: min(920px, calc(100vh - 24px)); }
 .rewrite-dialog-heading { padding-bottom: 13px !important; gap: 10px; }

@@ -234,7 +234,8 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 | 子域之间登录态丢失 | 未设置 `AUTHZ_COOKIE_DOMAIN`（注意以 `.` 开头的父域），或需要启用 7.1 共享会话 |
 | Cookie 不生效 / 反复跳登录 | 外层是 HTTPS 但 `AUTHZ_COOKIE_SECURE=false`，或反代未透传 `X-Forwarded-Proto` |
 | 上游是 HTTPS 自签证书 | 在对应域名绑定的高级代理中关闭"验证 SSL 证书" |
-| 绑定的"改写响应"没生效 | 看响应头 `X-Authz-Rewrite: skipped=<原因>`：`encoded` 上游已压缩、`range` 分片下载、`type` 非文本、`status` 上游非 200、`websocket`/`head` 不支持；正文改写还有 1MB 缓冲上限，超限自动原样透传 |
+| 绑定的"改写响应"没生效 | 看响应头 `X-Authz-Rewrite: skipped=<原因>`：`encoded` 上游返回了压缩正文、`range` 分片下载、`type` 非文本、`status` 上游非 200、`websocket`/`head` 不支持；正文改写还有 1MB 缓冲上限，超限自动原样透传。正文改写会由网关自动向上游声明 `Accept-Encoding: identity`（该链路不再压缩）；若绑定里显式写了 `Accept-Encoding` 覆盖则以其为准，上游压缩时改写按设计跳过 |
+| 改绑定保存时报 `响应改写 status 必须是…` | 旧版本把规范化后的 `status:0`（= 不改状态码）当非法值拒绝，导致保存过改写规则的绑定再也 PATCH 不动；现已接受 0 |
 | 忘记 admin 密码 | 见第 6 节 `admin_password_reset` |
 | 容器内访问不到宿主服务 | 确认 `network_mode: host` 且宿主是 Linux；Docker Desktop 下容器 `127.0.0.1` 不是宿主 |
 | 用 IP 访问时登录成功却反复跳回登录页 | 老版本缺陷（已在当前镜像修复）：升级到最新镜像即可；根因是登录响应错误下发了 `Domain=.<ip>` 清理头 |

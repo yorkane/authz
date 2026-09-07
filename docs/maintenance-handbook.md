@@ -441,7 +441,7 @@ bash test/run_tests.sh openresty-base:nocobase-test
 | `test/test_shared_session.sh` | 共享会话 (Redis 单写多读、ACL、故障关闭) |
 | `test/run_tests.sh` | 镜像基础库、WebDAV、FancyIndex、JWT/旧 SSO 兼容 |
 
-截至本文更新，最近基线为 Router 99、Authz 624、共享会话 29、基础镜像 17。数量不是固定契约；
+截至本文更新，最近基线为 Router 99、Authz 635、共享会话 29、基础镜像 17。数量不是固定契约；
 任何行为变更必须增加或调整能验证真实 HTTP 结果的断言。
 
 三个脚本都会占用随机端口并起常驻 mock，**必须串行执行**；并发跑会互相抢端口并污染日志。

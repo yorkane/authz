@@ -303,7 +303,7 @@ OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh        # authz
 三个脚本都会占用随机端口并起常驻 mock，**不要并发跑**（会互相污染日志与端口），也不要在脚本里用裸
 `wait` 等待后台请求——常驻 mock 会让 `wait` 永不返回。
 
-最近基线：Router 99、共享会话 29、authz 网关 624。
+最近基线：Router 99、共享会话 29、authz 网关 635。
 
 当前回归覆盖 Router/ctxvar、请求体 helper、框架错误处理和 merge 原子性。最近维护基线为
 99 项检查；测试数量会随覆盖增长，应以脚本最终输出为准，包括：

@@ -180,6 +180,17 @@ Casbin 授权: enforce(principal, "/<port><uri>", HTTP_METHOD)
     就会把第一个业务返回值当成 ok 之后的值，导致静默取错字段
 14. **字符串前缀比较按实际长度**: `"x-authz-"` 是 8 字符、`"x-forwarded-"` 是 12 字符，
     按 7/13 位比较会让黑名单静默失效（header 覆盖与响应改写都踩过）
+15. **正文改写必须先拿到未压缩正文**: 上游看到 `Accept-Encoding: gzip` 就自行压缩，
+    压缩字节上做文本替换没有意义，网关只能跳过（`X-Authz-Rewrite: skipped=encoded`），
+    表现为"替换没生效"。配了正文改写的绑定由 `proxy.apply_headers` 向上游声明
+    `Accept-Encoding: identity`；绑定里显式写了 Accept-Encoding 覆盖时以用户为准
+    （代价是改写失效，二者不可兼得）。`Content-Encoding: identity` 视为未压缩，不跳过。
+16. **规范化输出必须能被重新校验**: `response_rewrite.status` 规范化后写 `0`（= 不改状态码），
+    若校验只接受 200-999，则规则一旦保存过，该绑定后续任何 PATCH 都会 422——
+    用户改别的字段也保存不进去，排查方向极易被带偏到缓存/压缩上。
+17. **`.q-dialog > div` 是 Quasar 的全屏居中容器**: 给它设 `max-width` 会让 `inset:0`
+    的绝对定位失去 `right` 约束，容器从 left:0 起算，弹窗整体贴左。解除 560px 上限
+    只能作用于卡片本身（`.q-dialog__inner--minimized > .xxx-card`）。
 
 ## 9. 构建与发布
 
