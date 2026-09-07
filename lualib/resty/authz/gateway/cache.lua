@@ -8,6 +8,7 @@ local bindings = require "resty.authz.repository.bindings"
 local policies = require "resty.authz.repository.policies"
 local remote_users = require "resty.authz.repository.remote_users"
 local users = require "resty.authz.repository.users"
+local rewrite = require "resty.authz.gateway.rewrite"
 
 local _M = {}
 local state = { rev = -1, enforcer = nil, bindings = nil }
@@ -49,7 +50,8 @@ local function binding_map()
             local name, value = line:match("^%s*([^:]+):%s*(.-)%s*$")
             if name and value ~= "" then
                 local lower = name:lower()
-                if not blocked[lower] and lower:sub(1, 7) ~= "x-authz-" and
+                -- "x-authz-" 长 8 字符：此前按 7 位比较，前缀过滤实际从未生效。
+                if not blocked[lower] and lower:sub(1, 8) ~= "x-authz-" and
                     lower:sub(1, 6) ~= "proxy-" and not value:find("%c") then
                     headers[#headers + 1] = { name = name, value = value }
                 end
@@ -77,6 +79,8 @@ local function binding_map()
             upstream_ssl_verify = tonumber(binding.upstream_ssl_verify) ~= 0,
             upstream_path = target.normalize_upstream_path(binding.upstream_path) or "",
             header_overrides = parse_header_overrides(binding.header_overrides),
+            -- 响应改写规则随绑定一起缓存（JSON 解码 + 运行期白名单整形在 rewrite.parse 完成）。
+            response_rewrite = rewrite.parse(binding.response_rewrite),
         }
     end
     return map

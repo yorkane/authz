@@ -80,6 +80,9 @@ function _M.load()
         tonumber(os.getenv("AUTHZ_DISCOVERY_READ_TIMEOUT_MS")) or 200)
     c.discovery_ports = tostring(os.getenv("AUTHZ_DISCOVERY_PORTS") or "")
     c.db_cache_ttl = math.max(1, tonumber(os.getenv("AUTHZ_DB_CACHE_TTL")) or 30)
+    -- 响应改写正文缓冲的单 worker 预留预算（MB）：默认 64MB ≈ 64 个并发正文改写。
+    c.rewrite_buffer_mb = math.min(512, math.max(8,
+        tonumber(os.getenv("AUTHZ_REWRITE_BUFFER_MB")) or 64))
     c.db_cache_lru_size = math.max(50, tonumber(os.getenv("AUTHZ_DB_CACHE_LRU_SIZE")) or 500)
     c.cache_dict = "authz_cache"
     c.login_limit_dict = "authz_login_limit"

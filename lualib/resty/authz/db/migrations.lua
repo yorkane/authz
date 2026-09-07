@@ -344,6 +344,15 @@ _M.list = {
                     WHERE kind = 'item' AND builtin <> '' AND parent_id IS NOT NULL)]]))
         end,
     },
+    {
+        version = 16,
+        name = "bindings_response_rewrite",
+        up = function(db)
+            -- 绑定级响应改写（对齐 APISIX response-rewrite 的 headers/status/body 子集）。
+            ensure_column(db, "bindings", "response_rewrite",
+                "response_rewrite TEXT NOT NULL DEFAULT ''")
+        end,
+    },
 }
 
 function _M.run(db)

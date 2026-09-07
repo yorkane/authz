@@ -80,6 +80,15 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
   绑定对象使用纯下拉选择，选中值不挤入详情；效果使用允许/拒绝 Radio；
   编辑使用 `PATCH /policies/:id` 并回填完整策略，校验失败不得覆盖旧值。策略列表通过 `binding_matches`
   展示菜单名、域名、目标 IP:端口和路径，并明确标记未绑定或同端口共享策略。
+- 绑定级响应改写（`bindings.response_rewrite`，APISIX `response-rewrite` 子集）由 `gateway/rewrite.lua` 在
+  `header_filter`/`body_filter` 阶段实现，`server.conf.template` 的两个代理 location 必须同时声明这两个过滤器。
+  Set-Cookie、Content-Length/Transfer-Encoding 等分帧与 hop-by-hop 头、X-Authz-*/X-Forwarded-*/Proxy-*、
+  XFO/CSP/HSTS/NOSNIFF/Permissions-Policy 在 validation 与运行期两层都必须拒绝改写或删除，不得扩大范围。
+  正文改写必须保留全部安全跳过条件：上游非 200、HEAD、WebSocket、已压缩、含 Content-Range、
+  过滤模式下的非文本 Content-Type、超过 1MB 缓冲上限（超限时连同已缓冲内容原样透传），
+  且跳过原因必须回写 `X-Authz-Rewrite: skipped=<reason>`，不允许静默失效。
+  正则规则保存时必须做 PCRE 编译校验并限制条数与长度；`body` 与 `rewrites` 互斥。
+  授权管理页的“改写响应”对话框保持表单/JSON 双视图、按 binding ID PATCH、支持一键清除。
 - Compose 将 `conf/` 挂载到 `/etc/openresty/templates:ro`，镜像入口脚本每次启动生成最终 `nginx.conf` 与 `server.conf`；修改模板只需重建或重启容器，不需重建镜像。
 
 ## 镜像构建决策（强制）

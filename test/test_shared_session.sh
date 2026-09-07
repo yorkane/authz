@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "$REPO_DIR/test/support_lualib.sh"
 IMAGE=${OPENRESTY_TEST_IMAGE:-ghcr.io/yorkane/authz:latest}
 SHARED_REDIS_CONTAINER=""
 SHARED_FIRST_CONTAINER=""
@@ -104,6 +105,7 @@ save_session_cookie() {
 
 # 共享网关容器直接挂载仓库内模板
 mkdir -p "$TMP_DIR/templates"
+LUALIB_MOUNT=$(prepare_lualib_mount "$IMAGE" "$TMP_DIR")
 cp "$REPO_DIR/conf/nginx.conf.template" "$TMP_DIR/templates/nginx.conf.template"
 cp "$REPO_DIR/conf/server.conf.template" "$TMP_DIR/templates/server.conf.template"
 
@@ -160,7 +162,7 @@ start_shared_gateway() {
         -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
         -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
         -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
-        -v "$REPO_DIR/lualib:/usr/local/openresty/site/lualib:ro" \
+        -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
         "$IMAGE" >/dev/null
 }
 

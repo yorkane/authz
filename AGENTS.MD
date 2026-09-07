@@ -254,6 +254,7 @@ lualib/tracker/
 - 会话：`GET|DELETE /_authz/api/session`
 - 用户：`GET|POST /_authz/api/users`、`PATCH|DELETE /_authz/api/users/:id`、`PUT /_authz/api/users/:id/password`
 - 绑定（应用）：`GET|POST /_authz/api/applications`、`PATCH|DELETE /_authz/api/applications/:id`
+  （`response_rewrite` 字段配置绑定级响应改写，字段与限制见 `docs/core-api.md`）
 - 策略：`GET /_authz/api/authorization`、`POST /_authz/api/policies`、`PATCH|DELETE /_authz/api/policies/:id`
 - API Key：`GET|POST /_authz/api/api-keys`、`PATCH|DELETE /_authz/api/api-keys/:id`
 - 菜单树：`GET /_authz/api/menu-tree`（渲染用）；`GET|POST /_authz/api/menu-entries`、
@@ -271,6 +272,9 @@ lualib/tracker/
   状态码语义：401 未认证/Key 无效、403 无权限或 CSRF 失败、404 不存在、409 冲突、422 参数校验失败。
 - **最小权限**：Agent 用 `AUTHZ_AGENT_API_KEY` 时拥有 admin 权限，只应调用其任务所需的最小接口集合；
   不要把该 key 写入日志、代码或 git。
+  写绑定（`POST/PATCH /_authz/api/applications`）时要意识到它包含两条高危能力：
+  `target_ip` 等同内网访问能力，`response_rewrite` 会改写返回给浏览器的响应；
+  除非任务明确要求，Agent 不得提交 `response_rewrite`，也不得用它改写安全响应头或注入脚本。
 - **登录防护**：控制面登录有失败延迟与 `账户名+IP` 锁定（默认 5 次 → 30 分钟）。Agent 不应使用
   用户名密码登录，避免触发锁定。
 - **验证义务**：任何依赖这些接口的自动化脚本，必须在真实实例上先做一次 smoke（读 session、列 applications）
@@ -290,10 +294,16 @@ lualib/tracker/
 执行：
 
 ```bash
-test/test_klib_router_ctxvar.sh
+OPENRESTY_TEST_IMAGE=authz:latest bash test/test_klib_router_ctxvar.sh   # Router/ctxvar
+OPENRESTY_TEST_IMAGE=authz:latest bash test/test_shared_session.sh       # 共享会话
+OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh        # authz 网关全量
 ```
 
 可通过 `OPENRESTY_TEST_IMAGE` 覆盖默认镜像。脚本会启动临时 OpenResty 容器，执行配置检查和真实 HTTP 请求，结束后删除测试容器。
+三个脚本都会占用随机端口并起常驻 mock，**不要并发跑**（会互相污染日志与端口），也不要在脚本里用裸
+`wait` 等待后台请求——常驻 mock 会让 `wait` 永不返回。
+
+最近基线：Router 99、共享会话 29、authz 网关 624。
 
 当前回归覆盖 Router/ctxvar、请求体 helper、框架错误处理和 merge 原子性。最近维护基线为
 99 项检查；测试数量会随覆盖增长，应以脚本最终输出为准，包括：
@@ -311,6 +321,34 @@ test/test_klib_router_ctxvar.sh
 
 新增或修改 Router/ctxvar 行为时，必须更新测试夹具和断言，并在真实 OpenResty 中复跑。
 
+## 测试实例（241.t）
+
+`241.t`（10.252.25.241）是本项目专用测试/回归实例，生产实例跑在本机（writer）。
+
+```text
+/data/app/authz-test/        # docker-compose.yml + .env + rsync 进来的代码
+├── docker-compose.yml       # authz:latest，network_mode: host，端口 6080/6443
+├── .env                     # AUTHZ_SESSION_REDIS_MODE=read-only
+├── admin/ lualib/ conf/     # 从仓库 rsync（勿 --delete，保留对方 lualib/lfs.so）
+```
+
+同步并重建：
+
+```bash
+cd /home/aigc/ChatGPT/authz
+rsync -a admin conf scripts test docker-entrypoint.sh .env.example 241.t:/data/app/authz-test/
+rsync -a lualib/resty 241.t:/data/app/authz-test/lualib/
+ssh 241.t 'cd /data/app/authz-test && sudo docker compose up -d --force-recreate'
+```
+
+241.t 是共享会话 **reader**，按设计不允许本地登录（本地创建会话返回 503）。在它上面做控制面验证：
+
+- 控制面写操作：用实例自带的 loopback-only Agent Key，请求头 `x-authz-key: <key>`；
+- 需要已登录会话的代理入口：先在本机 writer（`http://10.252.25.235:6080/_authz/login`）登录，
+  取 `authz_session` token 后带 `Cookie: authz_session=<token>` 访问 241.t；
+- 退出登录只在 writer 上做，reader 会在下一次请求立刻拒绝该 token（已验证跨实例撤销生效）。
+
+## Code Review Checklist
 ## Code Review Checklist
 
 - [ ] APP 是否只有一个 Router 入口 location？

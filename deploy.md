@@ -234,6 +234,7 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 | 子域之间登录态丢失 | 未设置 `AUTHZ_COOKIE_DOMAIN`（注意以 `.` 开头的父域），或需要启用 7.1 共享会话 |
 | Cookie 不生效 / 反复跳登录 | 外层是 HTTPS 但 `AUTHZ_COOKIE_SECURE=false`，或反代未透传 `X-Forwarded-Proto` |
 | 上游是 HTTPS 自签证书 | 在对应域名绑定的高级代理中关闭"验证 SSL 证书" |
+| 绑定的"改写响应"没生效 | 看响应头 `X-Authz-Rewrite: skipped=<原因>`：`encoded` 上游已压缩、`range` 分片下载、`type` 非文本、`status` 上游非 200、`websocket`/`head` 不支持；正文改写还有 1MB 缓冲上限，超限自动原样透传 |
 | 忘记 admin 密码 | 见第 6 节 `admin_password_reset` |
 | 容器内访问不到宿主服务 | 确认 `network_mode: host` 且宿主是 Linux；Docker Desktop 下容器 `127.0.0.1` 不是宿主 |
 | 用 IP 访问时登录成功却反复跳回登录页 | 老版本缺陷（已在当前镜像修复）：升级到最新镜像即可；根因是登录响应错误下发了 `Domain=.<ip>` 清理头 |
@@ -282,6 +283,10 @@ AUTHZ_SESSION_REDIS_USERNAME=authz-reader         # 为 writer/reader 配置不�
 AUTHZ_SESSION_REDIS_PASSWORD=                     # 对应 ACL 用户密码
 AUTHZ_SESSION_REDIS_DB=0                          # Redis 逻辑库（0-15）
 AUTHZ_SESSION_REDIS_PREFIX=authz                  # 键前缀，多套集群共用时隔离，如 authz-cluster1；键格式 <prefix>:session:<token>，TTL 与会话有效期一致。
+AUTHZ_SESSION_SIGNING_KEY=                        # 共享记录 HMAC-SHA256 签名密钥（>=32 字符，所有共享实例必须一致）；未签名/签名不符的记录一律拒绝。生成: openssl rand -hex 32
+
+# ══════════════ 响应改写缓冲（可选）══════════════
+AUTHZ_REWRITE_BUFFER_MB=64                        # 正文改写的 worker 级缓冲预算（MB）。单响应上限固定 1MB 并按此整块预留；预算耗尽的新响应跳过改写、原样流式透传（响应头 X-Authz-Rewrite: skipped=memory）。仅影响 body/rewrites，状态码与响应头改写不占预算。
 
 # ══════════════ OAuth：Google（可选）══════════════
 AUTHZ_GOOGLE_ENABLED=false

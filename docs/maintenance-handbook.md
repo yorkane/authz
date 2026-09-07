@@ -154,7 +154,7 @@ SQLite 默认位于 `/data/authz/authz.db`，`/data` 必须持久化。
 | `remote_users` | 主键 `(provider, subject)`；唯一 `(provider, username)`；创建/最近登录/修改时间 |
 | `sessions` | token、username、source、csrf、expires_at |
 | `policies` | `ptype/v0/v1/v2` 唯一；存 p/g 规则 |
-| `bindings` | domain 唯一；target_ip/port、enabled、websocket、note、menu_name；upstream/forwarded/origin 代理字段；simulate_local/local_ip；header_overrides（多行 Header 覆盖，逐条校验后存储） |
+| `bindings` | domain 唯一；target_ip/port、enabled、websocket、note、menu_name；upstream/forwarded/origin 代理字段；simulate_local/local_ip；header_overrides（多行 Header 覆盖，逐条校验后存储）；response_rewrite（响应改写规范化 JSON，空串表示未配置） |
 
 `remote_users.synced_at` 是保留的内部存储列名；管理 API 只输出语义明确的 `recorded_at`，避免把
 单向身份记录误解为双向同步协议。
@@ -235,6 +235,12 @@ API Key 安全约束：
   `Host`、`Origin`、`X-Real-IP`、`X-Forwarded-For` 等 HTTP 头，不应被描述成 TCP 来源伪造；
   header_overrides 只覆盖透传类请求头，格式、控制字符、长度和白名单（禁 Host/Cookie/Origin/X-Authz-*/X-Forwarded-*/hop-by-hop）
   在 validation 层校验，cache 层防御性二次过滤，proxy 层用 ngx.req.set_header 注入；
+- 绑定级响应改写 `response_rewrite`（APISIX response-rewrite 子集：status/headers/remove_headers/
+  body/body_base64/content_type/rewrites）：保存时校验字段白名单、头名与值、PCRE 编译、条数与长度上限；
+  运行期在 `gateway/rewrite.lua` 再拦一道（Set-Cookie、分帧与 hop-by-hop、X-Authz-*/X-Forwarded-*/Proxy-*、
+  XFO/CSP/HSTS/NOSNIFF 一律不可改写或删除）；正文改写只在“上游 200 + GET + 非压缩 + 非 Range +
+  非 WebSocket +（过滤模式要求文本 Content-Type）+ 总量 ≤1MB”时缓冲，超限连同已缓冲内容原样透传，
+  跳过原因写在响应头 `X-Authz-Rewrite: skipped=<reason>`；
 - Key 启用、禁用、删除和策略变更都必须 bump cache revision，并有跨 worker HTTP 回归。
 
 策略规则：
@@ -431,12 +437,18 @@ bash test/run_tests.sh openresty-base:nocobase-test
 | 脚本 | 覆盖 |
 |---|---|
 | `test/test_klib_router_ctxvar.sh` | Router/ctxvar、JSON、错误脱敏、merge 返回与原子性 |
-| `test/test_authz_gateway.sh` | 登录、API、CSRF、身份隔离、远端记录、OAuth、动态代理和 HTTPS Cookie |
+| `test/test_authz_gateway.sh` | 登录、API、CSRF、身份隔离、远端记录、OAuth、动态代理、HTTPS Cookie 与绑定级响应改写 |
 | `test/test_shared_session.sh` | 共享会话 (Redis 单写多读、ACL、故障关闭) |
 | `test/run_tests.sh` | 镜像基础库、WebDAV、FancyIndex、JWT/旧 SSO 兼容 |
 
-截至本文更新，最近基线为 Router 99、Authz 478、基础镜像 17，共 594 项/断言。数量不是固定契约；
+截至本文更新，最近基线为 Router 99、Authz 624、共享会话 29、基础镜像 17。数量不是固定契约；
 任何行为变更必须增加或调整能验证真实 HTTP 结果的断言。
+
+三个脚本都会占用随机端口并起常驻 mock，**必须串行执行**；并发跑会互相抢端口并污染日志。
+
+功能验证之外，`241.t`（10.252.25.241，`/data/app/authz-test`，端口 6080/6443）是长期在跑的测试实例，
+作为共享会话 reader 与生产 writer（本机 235）配对。它是共享会话、跨实例撤销和绑定级响应改写的
+回归现场，同步与验证方式见 `AGENTS.MD` 的「测试实例」一节。
 
 OAuth 测试使用 `test/mock_nocobase.py`，不得连接生产账号或把真实 token 写入测试输出。测试至少覆盖
 PKCE、resource、回调 issuer、state 一次性、角色映射、同名来源隔离和禁用状态保持。

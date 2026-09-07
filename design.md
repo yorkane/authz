@@ -37,7 +37,7 @@ lualib/resty/authz/         ★ Authz Gateway 核心
   init.lua                  稳定入口: init() + access() 委托
   config.lua                通用环境、会话、Redis、NocoBase 配置
   provider_config.lua       OAuth/OIDC Provider 装配
-  gateway/                  access 链、解析、缓存和代理变量构造
+  gateway/                  access 链、解析、缓存、代理变量构造与响应改写(rewrite.lua)
   router.lua                /_authz 统一 router：登录/OAuth 页面 + /api/* JSON API
   ui.lua                    登录页与 OAuth 跳转处理
   api/guard.lua             session/admin/CSRF guard
@@ -79,6 +79,7 @@ nginx.conf.template
 | sessions | token(PK, 32B随机hex), username, source, csrf, expires_at | 本机服务端会话, TTL 默认7天 |
 | policies | ptype('p'/'g'), v0, v1, v2, UNIQUE(ptype,v0,v1,v2) | casbin 策略行 |
 | bindings | domain(UNIQUE), port, enabled, note | 显式域名绑定 |
+| bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/header_overrides/**response_rewrite** | `response_rewrite` 为改写响应的规范化 JSON（status/headers/remove_headers/body/body_base64/content_type/rewrites），空串表示未配置 |
 | schema_migrations | version(PK), name, applied_at | 已应用迁移的有序版本账本 |
 
 **policies 编码约定**：
@@ -109,6 +110,13 @@ Casbin 授权: enforce(principal, "/<port><uri>", HTTP_METHOD)
      ngx.var.authz_user   = username                 → X-Authz-User 头
      ngx.var.authz_source = source                   → X-Authz-Source 头
      ngx.var.authz_identity = principal              → X-Authz-Identity 头
+
+响应返回阶段（header_filter / body_filter，见 gateway/rewrite.lua）:
+  绑定带 response_rewrite 时 → 覆盖状态码/响应头（含删除）
+                            → 正文整体替换（body/base64/content_type）
+                            → 或按规则过滤正文（字面量 / PCRE 替换）
+  跳过条件：非 200、HEAD、WebSocket、已压缩、Range、非文本(过滤模式)、超过 1MB 缓冲上限
+  跳过时在 X-Authz-Rewrite: skipped=<reason> 中显式标记，避免静默失效难排查
 ```
 
 **上游协议由绑定记录决定**（`upstream_scheme`，默认 http）；HTTPS 上游默认校验证书，
@@ -143,6 +151,7 @@ Casbin 授权: enforce(principal, "/<port><uri>", HTTP_METHOD)
 | 管理边界 | 仅 admin 可读取用户列表、应用和 Casbin 策略；非管理员只读取自身会话资料 |
 | 远程密码 | NocoBase、Google、钉钉、微信等远程身份不能在本机修改密码 |
 | 远程生命周期 | 登录记录不覆盖本机启用状态；仅管理员删除记录后，下次认证才按新身份重新创建 |
+| 响应改写 | 绑定级 response_rewrite 仅覆盖透传类响应头：Set-Cookie、Content-Length/Transfer-Encoding 等分帧与 hop-by-hop、X-Authz-*/X-Forwarded-*/Proxy-*、以及 XFO/CSP/HSTS/NOSNIFF 等安全头在 validation 与运行期双层拒绝；正则保存时做 PCRE 编译校验并限长（16 条/512/4096/64KB），正文改写只在 200 文本响应上缓冲且上限 1MB，超限原样透传，不改写 WebSocket/Range/压缩流 |
 
 ## 8. 关键实现约束 / 踩坑记录 ⚠
 
@@ -162,6 +171,15 @@ Casbin 授权: enforce(principal, "/<port><uri>", HTTP_METHOD)
    cookie 匹配, 用 `--resolve` 而非 `-H "Host:"`）
 9. **ui.lua 中 local 函数有顺序依赖**（如 login_page 在 login_get 前定义）, 调整位置需注意
 10. **docker exec 在容器启动早期可能挂起**, entrypoint 的 apk 重试循环期间网关不可达
+11. **ngx.re.find/gsub 的返回值位次**: `find` 返回 `from, to, err`、`gsub` 返回
+    `value, substitutions, err`；写成 `local _, err = ngx.re.find(...)` 永远拿到 nil，
+    正则编译校验与替换错误会被静默吞掉
+12. **cjson.decode 是 C 函数且严格检查参数个数**: `cjson.decode(s:gsub(...))` 会把 gsub 的
+    替换计数当第二个参数传入并直接抛错（safe 版也不例外），必须用括号截断多返回值
+13. **pcall(f, ...) 的返回值整体右移一位**: `local ok, a, b, c = pcall(f)`；少写一个占位
+    就会把第一个业务返回值当成 ok 之后的值，导致静默取错字段
+14. **字符串前缀比较按实际长度**: `"x-authz-"` 是 8 字符、`"x-forwarded-"` 是 12 字符，
+    按 7/13 位比较会让黑名单静默失效（header 覆盖与响应改写都踩过）
 
 ## 9. 构建与发布
 

@@ -183,6 +183,7 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 | `upstream_scheme` | 否 | 上游协议，`http`（默认）或 `https` |
 | `upstream_ssl_verify` | 否 | HTTPS 上游是否校验证书，默认 `true`；设为 `false` 忽略证书校验，仅建议用于受控内网或自签名证书 |
 | `upstream_path` | 否 | 上游路径改写，默认空值表示保留请求路径；例如 `/v1/index.html` 会把任意请求转发到 `/v1/index.html`，查询参数原样保留；不接受 query、fragment、连续斜杠或 `..` |
+| `response_rewrite` | 否 | 响应改写配置（对象或 JSON 字符串，语义参考 APISIX `response-rewrite`）：`enabled`、`status`、`headers`、`remove_headers`、`body`、`body_base64`、`content_type`、`rewrites`；留空或 `null` 表示不改写，保存后返回规范化 JSON |
 
 前缀按约定原样存库（`domain: "code"` 保存 `code`）；代理与菜单在运行时按当前请求 Host 拼出
 `<前缀>-<节点>.<请求域>`（如经 `a-241.ai-t.wtvdev.com` 访问时解析 `code-241.ai-t.wtvdev.com`，
@@ -209,6 +210,28 @@ TCP 来源仍是网关主机地址。
 `header_overrides` 每行一条 `Header-Name: value`，保存时做格式、控制字符、长度和白名单校验
 （名称不超过 128、值不超过 1024、总量不超过 8192、最多 32 条，重复名保留首条），
 只影响未在代理配置中显式控制的透传类请求头（如 `Authorization`、自定义业务头）。
+
+`response_rewrite` 改写的是返回给客户端的上游响应，字段语义：
+
+| 字段 | 说明 |
+|---|---|
+| `enabled` | 默认 `true`；`false` 时保留配置但不生效 |
+| `status` | 覆盖响应状态码，200-999；`0`/留空保持上游状态 |
+| `headers` | 对象，覆盖响应头；值置 `null` 等价于删除该头 |
+| `remove_headers` | 数组，显式删除响应头 |
+| `body` | 整体替换响应正文（文本或 JSON 对象） |
+| `body_base64` | `true` 时 `body` 按 Base64 解码后返回（二进制内容） |
+| `content_type` | 替换正文时写回的 Content-Type，留空保持上游类型 |
+| `rewrites` | 正文过滤规则数组：`{source, target, regex}`；`source` 以 `~` 开头或 `regex=true` 时按 PCRE 处理，替换支持 `$1` 捕获组 |
+
+约束：`body` 与 `rewrites` 互斥；未知字段、非法正则（保存时做 PCRE 编译校验）、`status` 越界、
+条数/长度超限（≤16 条规则、正则 ≤512、替换 ≤4096、正文 ≤65536、整体 JSON ≤131072 字节）均返回 `422`。
+`Set-Cookie`、`Content-Length`/`Transfer-Encoding` 等分帧与 hop-by-hop 头、`X-Authz-*`、`X-Forwarded-*`、
+`Proxy-*` 以及 `X-Frame-Options`、`Content-Security-Policy`、`Strict-Transport-Security`、
+`X-Content-Type-Options`、`Permissions-Policy` 一律不可改写或删除（校验层拒绝，运行期再拦一道）。
+改写只在上游返回 200 的 GET 响应上生效：HEAD、WebSocket、已压缩、含 `Content-Range`、
+非文本 Content-Type（过滤模式）以及超过 1MB 缓冲上限的响应会跳过，
+响应头 `X-Authz-Rewrite: skipped=<status|head|websocket|encoded|range|type>` 标明原因。
 
 ### `DELETE /applications/:id`
 

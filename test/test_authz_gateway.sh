@@ -2,10 +2,12 @@
 set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "$REPO_DIR/test/support_lualib.sh"
 IMAGE=${OPENRESTY_TEST_IMAGE:-ghcr.io/yorkane/authz:latest}
 CONTAINER_NAME="authz-gateway-test-$$"
 REDIRECT_CONTAINER_NAME=""
 ORIGIN_CONTAINER_NAME=""
+BUDGET_CONTAINER_NAME=""
 TMP_DIR=$(mktemp -d)
 PASS=0
 MOCK_PID=""
@@ -57,6 +59,10 @@ cleanup() {
     if [[ -n "$ORIGIN_CONTAINER_NAME" ]]; then
         docker exec "$ORIGIN_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
         docker rm -f "$ORIGIN_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$BUDGET_CONTAINER_NAME" ]]; then
+        docker exec "$BUDGET_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+        docker rm -f "$BUDGET_CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
     if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" >/dev/null 2>&1 || true; fi
     if [[ -n "$REMOTE_PID" ]]; then kill "$REMOTE_PID" >/dev/null 2>&1 || true; fi
@@ -226,6 +232,7 @@ python3 "$REPO_DIR/scripts/register_nocobase_oauth.py" \
 pass "NocoBase OAuth registration reuses existing client"
 
 mkdir -p "$TMP_DIR/data/authz"
+LUALIB_MOUNT=$(prepare_lualib_mount "$IMAGE" "$TMP_DIR")
 python3 - "$TMP_DIR/data/authz/authz.db" <<'PY'
 import sqlite3
 import sys
@@ -354,7 +361,7 @@ docker run -d \
     -v "$REPO_DIR/admin:/files:ro" \
     -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
     -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
-    -v "$REPO_DIR/lualib:/usr/local/openresty/site/lualib:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
     "$IMAGE" >/dev/null
 
 for _ in $(seq 1 80); do
@@ -452,7 +459,7 @@ assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite"
 
 cookie_header() {
     awk '
@@ -732,6 +739,14 @@ assert_contains_all "authorization page policy and binding forms" "$BODY" \
     'bindingForm.upstream_ssl_verify' \
     'bindingForm.upstream_path'
 assert_contains "binding form keeps proxy settings compact" "$BODY" 'q-expansion-item v-model="bindingAdvancedOpen"'
+request GET "$ADMIN_HOST" /_authz/apps/authorization.html "$ADMIN_COOKIE"
+assert_contains_all "binding rows expose the response rewrite editor" "$BODY" \
+    'openRewrite' \
+    'body-cell-rewrite' \
+    'mdi-file-edit-outline' \
+    'v-model="rewriteOpen"' \
+    'rewritePayloadFromForm' \
+    'rewritePayloadFromJson'
 request GET "$ADMIN_HOST" /_authz/api/session "$ADMIN_COOKIE"
 assert_eq "session API" "$STATUS" "200"
 assert_json "session username" '.data.username' "admin"
@@ -1592,6 +1607,115 @@ assert_eq "self-signed HTTPS upstream is rejected when verification is enabled" 
 request DELETE "$ADMIN_HOST" "/_authz/api/applications/$HTTPS_APP_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "delete HTTPS upstream binding" "$STATUS" "200"
 
+request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" \
+    "{\"domain\":\"rewrite.test.example\",\"port\":$UPSTREAM_PORT,\"enabled\":true,\"response_rewrite\":{\"headers\":{\"X-Upstream-Trace\":\"rewritten\"},\"remove_headers\":[\"X-Upstream-Remove\"],\"status\":201}}"
+assert_eq "create binding with response rewrite" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+REWRITE_APP_ID=$(jq -er '.data.bindings[] | select(.domain == "rewrite.test.example") | .id' "$TMP_DIR/body")
+assert_json "response rewrite is stored as normalized JSON" \
+    '.data.bindings[] | select(.domain == "rewrite.test.example") | .response_rewrite | fromjson | .headers[0].value' "rewritten"
+assert_json "response rewrite keeps explicit removals" \
+    '.data.bindings[] | select(.domain == "rewrite.test.example") | .response_rewrite | fromjson | .remove_headers[0]' "X-Upstream-Remove"
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_eq "response rewrite overrides the status code" "$STATUS" "201"
+REWRITE_HEADERS=$(<"$TMP_DIR/headers")
+assert_contains "rewritten header replaces the upstream value" "$REWRITE_HEADERS" "X-Upstream-Trace: rewritten"
+assert_not_contains "removed response header is gone" "$REWRITE_HEADERS" "X-Upstream-Remove:"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"response_rewrite":{"body":"REPLACED BY GATEWAY","content_type":"text/markdown; charset=utf-8"}}'
+assert_eq "switch response rewrite to body replacement" "$STATUS" "200"
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_eq "replaced body reaches the client" "$BODY" "REPLACED BY GATEWAY"
+assert_contains "replaced body writes the configured Content-Type" "$(cat "$TMP_DIR/headers")" "text/markdown"
+assert_not_contains "replaced body drops the stale Content-Length" "$(cat "$TMP_DIR/headers")" "Content-Length"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"response_rewrite":{"rewrites":[{"source":"internal-secret-token","target":"[REDACTED]"},{"source":"~value=(\\d+)","target":"value=redacted"}]}}'
+assert_eq "switch response rewrite to body filters" "$STATUS" "200"
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_contains_all "literal and regex filters rewrite the body" "$BODY" "[REDACTED]" "value=redacted"
+assert_not_contains "literal filter removed the secret" "$BODY" "internal-secret-token"
+assert_contains "text filters keep the upstream status" "$STATUS" "200"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"response_rewrite":{"rewrites":[{"source":"plain-text-inside-gzip","target":"SHOULD NOT APPEAR"}]}}'
+assert_eq "store a filter for the skip-case probes" "$STATUS" "200"
+request GET rewrite.test.example /rewrite-binary "$ADMIN_COOKIE"
+assert_contains "binary responses are skipped" "$(cat "$TMP_DIR/headers")" "skipped=type"
+assert_eq "binary body survives untouched" "$(wc -c <"$TMP_DIR/body")" "2048"
+request GET rewrite.test.example /rewrite-large "$ADMIN_COOKIE"
+assert_contains "oversized responses are passed through" "$BODY" "chunk-xxxx"
+assert_eq "oversized responses are not truncated" "$(wc -c <"$TMP_DIR/body")" "200007"
+request GET rewrite.test.example /rewrite-gzip "$ADMIN_COOKIE"
+assert_contains "compressed responses are skipped" "$(cat "$TMP_DIR/headers")" "skipped=encoded"
+request GET rewrite.test.example /rewrite-huge "$ADMIN_COOKIE"
+assert_eq "responses over the rewrite buffer are not truncated" "$(wc -c <"$TMP_DIR/body")" "1200007"
+assert_contains "oversized responses keep the upstream bytes" "$BODY" "chunk-yyyy"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"response_rewrite":{"rewrites":[{"source":"internal-secret-token","target":"[REDACTED]"}]}}'
+assert_eq "restore the filter before the rejection probes" "$STATUS" "200"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"Set-Cookie":"authz_session=forged"}}}'
+assert_eq "response rewrite cannot forge Set-Cookie" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"Content-Length":"1"}}}'
+assert_eq "response rewrite cannot touch framing headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"X-Frame-Options":"ALLOWALL"}}}'
+assert_eq "response rewrite cannot weaken security headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"X-Forwarded-For":"8.8.8.8"}}}'
+assert_eq "response rewrite cannot touch forwarded headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"X-Authz-Key":"key"}}}'
+assert_eq "response rewrite cannot touch gateway identity headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"Proxy-Info":"x"}}}'
+assert_eq "response rewrite cannot touch proxy headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"~(((","target":"x"}]}}'
+assert_eq "response rewrite rejects uncompilable regex" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"status":99}}'
+assert_eq "response rewrite rejects impossible status codes" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"body":"a","rewrites":[{"source":"a","target":"b"}]}}'
+assert_eq "response rewrite rejects body and filters together" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"unexpected":1}}'
+assert_eq "response rewrite rejects unknown fields" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"X-Bad":"ok"},"body_base64":true}}'
+assert_eq "response rewrite requires base64 body content" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":"{"}'
+assert_eq "response rewrite rejects malformed JSON" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":"[1,2]"}'
+assert_eq "response rewrite rejects a top-level array" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":"not json"}'
+assert_eq "response rewrite rejects non-JSON text" "$STATUS" "422"
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_contains "rejected rewrite updates are not applied" "$BODY" "[REDACTED]"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"response_rewrite":{"headers":{"X-Kept":"1"},"note_ignored":null}}'
+assert_eq "invalid rewrite field is rejected" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"body_base64":true,"body":"QUJDLUJBU0U2NA==","content_type":"text/plain"}}'
+assert_eq "base64 body rewrite is accepted" "$STATUS" "200"
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_eq "base64 body is decoded for the client" "$BODY" "ABC-BASE64"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"enabled":false,"headers":{"X-Kept":"1"}}}'
+assert_eq "rewrite can be disabled but kept" "$STATUS" "200"
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_eq "disabled rewrite keeps the upstream status" "$STATUS" "200"
+assert_not_contains "disabled rewrite is not applied" "$(cat "$TMP_DIR/headers")" "X-Kept"
+
+request GET "$ADMIN_HOST" /_authz/api/session "$ADMIN_COOKIE"
+assert_eq "control plane is never rewritten" "$STATUS" "200"
+assert_json "control plane body is untouched" '.data.username' "admin"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":null}'
+assert_eq "clear response rewrite" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+assert_json "cleared response rewrite is empty" \
+    '.data.bindings[] | select(.domain == "rewrite.test.example") | .response_rewrite' ""
+request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
+assert_contains_all "cleared rewrite restores the upstream body" "$BODY" "Hello Rewrite" "internal-secret-token" "value=42"
+assert_contains "cleared rewrite restores the upstream header" "$(cat "$TMP_DIR/headers")" "X-Upstream-Trace: upstream-trace"
+request DELETE "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "delete response rewrite binding" "$STATUS" "200"
+
 request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" "{\"domain\":\"ws-fixed.test.example\",\"port\":$WS_PORT,\"enabled\":true}"
 assert_eq "duplicate domain binding rejected clearly" "$STATUS" "409"
 assert_json "duplicate domain binding error" '.error.code' "request_failed"
@@ -1891,7 +2015,7 @@ docker run -d \
     -v "$REPO_DIR/admin:/files:ro" \
     -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
     -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
-    -v "$REPO_DIR/lualib:/usr/local/openresty/site/lualib:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
     "$IMAGE" >/dev/null
 for _ in $(seq 1 60); do
     STATUS=$(curl -sS --max-time 2 --resolve "redirect.test.example:$REDIRECT_HTTP_PORT:127.0.0.1" \
@@ -1924,7 +2048,7 @@ docker run -d \
     -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
     -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
     -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
-    -v "$REPO_DIR/lualib:/usr/local/openresty/site/lualib:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
     "$IMAGE" >/dev/null
 for _ in $(seq 1 60); do
     STATUS=$(curl -sS --max-time 2 --resolve "a.one.example.com:$ORIGIN_HTTP_PORT:127.0.0.1" \
@@ -1957,5 +2081,92 @@ assert_eq "matching origin keeps host domain" \
     "$(origin_login_cookie_domain a.one.example.com https://a.one.example.com)" ".one.example.com"
 assert_eq "unknown origin falls back to host domain" \
     "$(origin_login_cookie_domain a.one.example.com https://other.example.org)" ".one.example.com"
+
+# ── 响应改写缓冲预算：并发大响应必须降级为透传，而不是无上限缓冲 ──
+BUDGET_CONTAINER_NAME="authz-gateway-budget-test-$$"
+BUDGET_HTTP_PORT=$(free_port)
+BUDGET_HTTPS_PORT=$(free_port)
+mkdir -p "$TMP_DIR/budget-data/authz"
+docker run -d \
+    --name "$BUDGET_CONTAINER_NAME" \
+    --network host \
+    -e NGINX_WORKER_PROCESSES=1 \
+    -e AUTHZ_HTTP_PORT="$BUDGET_HTTP_PORT" \
+    -e AUTHZ_HTTPS_PORT="$BUDGET_HTTPS_PORT" \
+    -e AUTHZ_HTTP_MODE=serve \
+    -e AUTHZ_ADMIN_PASSWORD=admin123 \
+    -e AUTHZ_PORT_MIN=1000 \
+    -e AUTHZ_PORT_MAX=65535 \
+    -e AUTHZ_REWRITE_BUFFER_MB=8 \
+    -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
+    -v "$TMP_DIR/budget-data:/data" \
+    -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+    "$IMAGE" >/dev/null
+for _ in $(seq 1 60); do
+    STATUS=$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+        "http://budget.test.example:$BUDGET_HTTP_PORT/_authz/api/session" \
+        --resolve "budget.test.example:$BUDGET_HTTP_PORT:127.0.0.1" 2>/dev/null || true)
+    [[ "$STATUS" == "401" ]] && break
+    sleep 0.3
+done
+assert_eq "rewrite budget gateway becomes ready" "$STATUS" "401"
+
+BUDGET_COOKIE="$TMP_DIR/budget.cookie"
+BUDGET_TOKEN=$(curl -sS --max-time 5 -D "$TMP_DIR/budget-headers" -o /dev/null \
+    --resolve "budget.test.example:$BUDGET_HTTP_PORT:127.0.0.1" \
+    -X POST "http://budget.test.example:$BUDGET_HTTP_PORT/_authz/login" \
+    --data-urlencode "username=admin" --data-urlencode "password=admin123" \
+    -w '%{http_code}')
+assert_eq "budget gateway login" "$BUDGET_TOKEN" "302"
+save_session_cookie "$TMP_DIR/budget-headers" "$BUDGET_COOKIE"
+BUDGET_CSRF=$(curl -sS --max-time 5 --resolve "budget.test.example:$BUDGET_HTTP_PORT:127.0.0.1" \
+    -H "Cookie: $(cookie_header "$BUDGET_COOKIE")" -H 'Accept: application/json' \
+    "http://budget.test.example:$BUDGET_HTTP_PORT/_authz/api/session" | jq -er '.data.csrf')
+BUDGET_CREATE=$(curl -sS --max-time 5 -o "$TMP_DIR/budget-body" -w '%{http_code}' \
+    --resolve "budget.test.example:$BUDGET_HTTP_PORT:127.0.0.1" \
+    -H "Cookie: $(cookie_header "$BUDGET_COOKIE")" -H "X-CSRF-Token: $BUDGET_CSRF" \
+    -H 'Content-Type: application/json' -H "Origin: http://budget.test.example:$BUDGET_HTTP_PORT" \
+    -X POST --data "{\"domain\":\"budget\",\"port\":$UPSTREAM_PORT,\"enabled\":true,\
+\"response_rewrite\":{\"rewrites\":[{\"source\":\"stream-secret\",\"target\":\"[REDACTED]\"}]}}" \
+    "http://budget.test.example:$BUDGET_HTTP_PORT/_authz/api/applications")
+assert_eq "budget gateway stores rewrite rule" "$BUDGET_CREATE" "201"
+
+# 12 个并发慢速流式响应（每个预留 1MB）应把 8MB 预算打满，后续请求必须降级透传。
+budget_probe() {
+    curl -sS --max-time 20 -o "$TMP_DIR/budget-probe-$1" \
+        -D "$TMP_DIR/budget-probe-h-$1" \
+        --resolve "budget.test.example:$BUDGET_HTTP_PORT:127.0.0.1" \
+        -H "Cookie: $(cookie_header "$BUDGET_COOKIE")" \
+        -w '%{http_code}' "http://budget.test.example:$BUDGET_HTTP_PORT/rewrite-slow" &
+}
+PROBE_PIDS=()
+for probe in $(seq 1 12); do
+    budget_probe "$probe"
+    PROBE_PIDS+=("$!")
+done
+# 只等 12 个探测请求，不能用裸 wait（会连带等待常驻 mock 进程）
+for probe_pid in "${PROBE_PIDS[@]}"; do
+    wait "$probe_pid" || true
+done
+SKIPPED=0
+REWRITTEN=0
+for probe in $(seq 1 12); do
+    HEADERS=$(<"$TMP_DIR/budget-probe-h-$probe")
+    BODY=$(<"$TMP_DIR/budget-probe-$probe")
+    if [[ "$(printf '%s' "$HEADERS" | grep -c 'skipped=memory')" -gt 0 ]]; then
+        SKIPPED=$((SKIPPED + 1))
+        # 预算外降级：原样透传，必须拿到完整正文。
+        [[ "$BODY" == *"stream-secret-39"* ]] || fail "budget probe $probe degraded response lost streamed bytes"
+    else
+        [[ "$BODY" == *"[REDACTED]-39"* ]] || fail "budget probe $probe rewritten response lost streamed bytes"
+        REWRITTEN=$((REWRITTEN + 1))
+    fi
+done
+(( REWRITTEN >= 1 )) || fail "rewrite budget instance never rewrote a response"
+(( SKIPPED >= 1 )) || fail "rewrite budget never degraded a concurrent response"
+pass "concurrent rewrites stay within the worker buffer budget ($REWRITTEN rewritten, $SKIPPED degraded)"
 
 printf '\nAll %d authz gateway checks passed.\n' "$PASS"

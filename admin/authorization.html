@@ -8,7 +8,7 @@
   <meta http-equiv="Expires" content="0">
   <title>Admin</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
-  <link rel="stylesheet" href="./app-page.css?v=9">
+  <link rel="stylesheet" href="./app-page.css?v=13">
 </head>
 <body>
   <div id="q-app">
@@ -34,8 +34,13 @@
           <template v-slot:body-cell-target_ip="props"><q-td :props="props"><code class="code-pill">{{ props.row.target_ip || '127.0.0.1' }}</code></q-td></template>
           <template v-slot:body-cell-port="props"><q-td :props="props"><code class="code-pill">:{{ props.row.port }}</code></q-td></template>
           <template v-slot:body-cell-proxy="props"><q-td :props="props"><q-chip dense :class="props.row.simulate_local === 1 ? 'effect-allow' : (hasCustomProxy(props.row) ? 'role-chip' : '')" :icon="props.row.simulate_local === 1 ? 'mdi-laptop' : (hasCustomProxy(props.row) ? 'mdi-tune-variant' : 'mdi-arrow-right')">{{ proxySummary(props.row) }}</q-chip><q-tooltip><div v-for="line in proxyDetails(props.row)" :key="line">{{ line }}</div></q-tooltip></q-td></template>
+          <template v-slot:body-cell-rewrite="props"><q-td :props="props">
+            <q-chip v-if="rewriteActive(props.row)" dense class="role-chip" icon="mdi-file-edit-outline">{{ t.responseRewriteOn }}</q-chip>
+            <span v-else class="rewrite-none">{{ t.responseRewriteNone }}</span>
+            <q-tooltip v-if="rewriteActive(props.row)"><div v-for="line in rewriteDetails(props.row)" :key="line">{{ line }}</div></q-tooltip>
+          </q-td></template>
           <template v-slot:body-cell-enabled="props"><q-td :props="props"><q-toggle :model-value="props.row.enabled === 1" color="teal-4" :disable="!isAdmin" @update:model-value="toggleBinding(props.row)"></q-toggle></q-td></template>
-          <template v-slot:body-cell-actions="props"><q-td :props="props"><q-btn v-if="isAdmin" flat round dense icon="mdi-pencil-outline" @click="openEditBinding(props.row)"><q-tooltip>{{ t.editBinding }}</q-tooltip></q-btn><q-btn v-if="isAdmin" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeBinding(props.row)"><q-tooltip>{{ t.deleteBinding }}</q-tooltip></q-btn></q-td></template>
+          <template v-slot:body-cell-actions="props"><q-td :props="props"><q-btn v-if="isAdmin" flat round dense icon="mdi-file-edit-outline" @click="openRewrite(props.row)"><q-tooltip>{{ t.responseRewrite }}</q-tooltip></q-btn><q-btn v-if="isAdmin" flat round dense icon="mdi-pencil-outline" @click="openEditBinding(props.row)"><q-tooltip>{{ t.editBinding }}</q-tooltip></q-btn><q-btn v-if="isAdmin" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeBinding(props.row)"><q-tooltip>{{ t.deleteBinding }}</q-tooltip></q-btn></q-td></template>
           <template v-slot:no-data><div class="full-width row flex-center q-pa-xl empty-state"><q-icon name="mdi-lan-disconnect" size="28px"></q-icon><span>{{ t.noBindings }}</span></div></template>
         </q-table>
       </q-card>
@@ -61,7 +66,7 @@
         </q-table>
       </q-card>
 
-      <q-dialog v-model="bindingOpen">
+      <q-dialog v-model="bindingOpen" class="binding-dialog">
         <q-card class="dialog-card binding-dialog-card">
           <q-form @submit="saveBindingForm">
             <q-card-section class="binding-dialog-heading"><div class="dialog-title">{{ bindingEditingId ? t.editBindingTitle : t.bindingTitle }}</div><div class="dialog-copy">{{ t.bindingCopy }}</div></q-card-section>
@@ -104,6 +109,92 @@
         </q-card>
       </q-dialog>
 
+      <q-dialog v-model="rewriteOpen" class="rewrite-dialog">
+        <q-card class="dialog-card rewrite-dialog-card">
+          <q-card-section class="rewrite-dialog-heading">
+            <div class="row items-center justify-between q-col-gutter-sm">
+              <div>
+                <div class="dialog-title">{{ t.rwTitle }}</div>
+                <div class="dialog-copy">{{ t.rwCopy }}</div>
+              </div>
+              <q-btn-group outline dense>
+                <q-btn :color="rewriteView === 'form' ? 'purple-4' : 'grey-6'" no-caps dense size="sm" :label="t.rwViewForm" icon="mdi-form-select" @click="switchRewriteView('form')"></q-btn>
+                <q-btn :color="rewriteView === 'json' ? 'purple-4' : 'grey-6'" no-caps dense size="sm" :label="t.rwViewJson" icon="mdi-code-json" @click="switchRewriteView('json')"></q-btn>
+              </q-btn-group>
+            </div>
+            <div v-if="rewriteBinding" class="rewrite-target"><q-icon name="mdi-earth" size="16px"></q-icon><strong>{{ entryDomain(rewriteBinding) }}</strong><code class="code-pill">{{ rewriteBinding.target_ip || '127.0.0.1' }}:{{ rewriteBinding.port }}</code></div>
+          </q-card-section>
+          <q-separator dark></q-separator>
+          <q-card-section class="dialog-fields rewrite-dialog-fields">
+            <div class="rewrite-enabled-row">
+              <div>
+                <div class="rewrite-field-label">{{ t.rwEnabled }}</div>
+                <div class="rewrite-field-copy">{{ t.rwEnabledHint }}</div>
+              </div>
+              <q-toggle v-model="rewriteForm.enabled" dense color="teal-4"></q-toggle>
+            </div>
+
+            <div v-show="rewriteView === 'form'">
+              <div class="rewrite-grid">
+                <q-input v-model="rewriteForm.status" dark dense outlined type="number" min="200" max="999" hide-bottom-space :label="t.rwStatus" :placeholder="t.autoValue" :hint="t.rwStatusHint" :rules="[rewriteStatusRule]"></q-input>
+                <q-input v-model="rewriteForm.contentType" dark dense outlined hide-bottom-space maxlength="128" :disable="rewriteForm.bodyMode !== 'replace'" :label="t.rwContentType" placeholder="text/html; charset=utf-8" :hint="t.rwContentTypeHint" :rules="[rewriteContentTypeRule]"></q-input>
+              </div>
+
+              <div class="rewrite-section">
+                <div class="rewrite-section-head"><div class="rewrite-field-label">{{ t.rwHeaders }}</div><q-btn flat dense no-caps size="sm" icon="mdi-plus" :label="t.rwAddHeader" color="purple-4" @click="addRewriteHeader"></q-btn></div>
+                <div class="rewrite-field-copy q-mb-xs">{{ t.rwHeadersHint }}</div>
+                <div v-if="!rewriteForm.headers.length" class="rewrite-empty">{{ t.rwNoHeaders }}</div>
+                <div v-for="(header, index) in rewriteForm.headers" :key="index" class="rewrite-row">
+                  <q-input v-model.trim="header.name" dark dense outlined hide-bottom-space maxlength="128" :label="t.rwHeaderName" placeholder="X-Cache" :rules="[rewriteHeaderNameRule]" class="rewrite-row-name"></q-input>
+                  <q-input v-model="header.value" dark dense outlined hide-bottom-space :disable="header.remove" :label="t.rwHeaderValue" placeholder="HIT" class="rewrite-row-value"></q-input>
+                  <q-toggle v-model="header.remove" dense color="orange-4" class="rewrite-row-remove"><q-tooltip>{{ t.rwHeaderDelete }}</q-tooltip></q-toggle>
+                  <q-btn flat round dense icon="mdi-close" color="grey-6" class="rewrite-row-del" @click="removeRewriteHeader(index)"><q-tooltip>{{ t.deleteAction }}</q-tooltip></q-btn>
+                </div>
+              </div>
+
+              <div class="rewrite-section">
+                <div class="rewrite-field-label">{{ t.rwBodyMode }}</div>
+                <q-option-group v-model="rewriteForm.bodyMode" inline dense type="radio" color="purple-4" :options="rewriteBodyOptions" class="rewrite-body-options"></q-option-group>
+                <div class="rewrite-field-copy">{{ t.rwBodyModeHint }}</div>
+              </div>
+
+              <template v-if="rewriteForm.bodyMode === 'replace'">
+                <q-input v-model="rewriteForm.body" dark dense outlined type="textarea" autogrow :placeholder="t.rwBodyPlaceholder || '{&quot;ok&quot;:true}'" :label="t.rwBody" :hint="t.rwBodyHint" class="rewrite-body-text"></q-input>
+                <div class="rewrite-base64-row">
+                  <div><q-toggle v-model="rewriteForm.bodyBase64" dense color="teal-4" :label="t.rwBodyBase64"></q-toggle><div class="rewrite-field-copy">{{ t.rwBodyBase64Hint }}</div></div>
+                </div>
+              </template>
+
+              <div v-if="rewriteForm.bodyMode === 'filter'" class="rewrite-section">
+                <div class="rewrite-section-head"><div class="rewrite-field-label">{{ t.rwFilters }}</div><q-btn flat dense no-caps size="sm" icon="mdi-plus" :label="t.rwAddFilter" color="purple-4" @click="addRewriteFilter"></q-btn></div>
+                <div class="rewrite-field-copy q-mb-xs">{{ t.rwFiltersHint }}</div>
+                <div v-if="!rewriteForm.filters.length" class="rewrite-empty">{{ t.rwNoFilters }}</div>
+                <div v-for="(rule, index) in rewriteForm.filters" :key="index" class="rewrite-row">
+                  <q-input v-model="rule.source" dark dense outlined hide-bottom-space :label="t.rwFilterSource" placeholder="/internal/path 或 ~\\d{3,}" :rules="[rewriteFilterSourceRule]" class="rewrite-row-source"></q-input>
+                  <q-input v-model="rule.target" dark dense outlined hide-bottom-space :label="t.rwFilterTarget" placeholder="/public/path 或 code=$1" class="rewrite-row-target"></q-input>
+                  <q-toggle v-model="rule.regex" dense color="teal-4" class="rewrite-row-regex"><q-tooltip>PCRE</q-tooltip></q-toggle>
+                  <q-btn flat round dense icon="mdi-close" color="grey-6" class="rewrite-row-del" @click="removeRewriteFilter(index)"><q-tooltip>{{ t.deleteAction }}</q-tooltip></q-btn>
+                </div>
+              </div>
+            </div>
+
+            <div v-show="rewriteView === 'json'">
+              <q-input v-model="rewriteJsonText" dark dense outlined type="textarea" autogrow :input-style="{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', minHeight: '300px' }" :label="t.rwJson" :hint="t.rwJsonHint" :error="Boolean(rewriteJsonError)" :error-message="rewriteJsonError"></q-input>
+            </div>
+
+            <q-banner dense rounded class="rewrite-note-banner"><template v-slot:avatar><q-icon name="mdi-information-outline" color="blue-3"></q-icon></template>{{ t.rwScopeHint }}</q-banner>
+            <q-banner dense rounded class="rewrite-warn-banner"><template v-slot:avatar><q-icon name="mdi-alert-outline" color="orange-4"></q-icon></template>{{ t.rwUnsafeHint }}</q-banner>
+          </q-card-section>
+          <q-separator dark></q-separator>
+          <q-card-actions align="right">
+            <q-btn v-if="rewriteHasStored" flat dense no-caps color="red-4" :label="t.rwClear" @click="clearRewrite"></q-btn>
+            <q-space></q-space>
+            <q-btn flat dense no-caps :label="t.cancel" v-close-popup></q-btn>
+            <q-btn unelevated dense no-caps :label="t.rwSave" class="primary-button" :loading="saving" @click="saveRewriteForm"></q-btn>
+          </q-card-actions>
+        </q-card>
+      </q-dialog>
+
       <q-dialog v-model="policyOpen">
         <q-card class="dialog-card">
           <q-form @submit="savePolicyForm">
@@ -134,7 +225,7 @@
   </div>
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
   <script src="./api.js?v=16"></script>
-  <script src="./i18n.js?v=32"></script>
+  <script src="./i18n.js?v=33"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
     
@@ -163,6 +254,21 @@
         const portMax = ref(20000)
         const bindingDefaults = () => ({ domain: '', target_ip: '127.0.0.1', port: 3000, menu_name: '', note: '', enabled: true, upstream_scheme: 'http', upstream_ssl_verify: true, upstream_path: '', upstream_host: '', forwarded_host: '', forwarded_proto: '', forwarded_port: '', origin_mode: 'auto', custom_origin: '', simulate_local: false, local_ip: '127.0.0.1', header_overrides: '' })
         const bindingForm = reactive(bindingDefaults())
+        const rewriteOpen = ref(false)
+        const rewriteView = ref('form')
+        const rewriteBinding = ref(null)
+        const rewriteStored = ref('')
+        const rewriteJsonText = ref('')
+        const rewriteJsonError = ref('')
+        const rewriteDefaults = () => ({ enabled: true, status: '', contentType: '', headers: [], bodyMode: 'none', body: '', bodyBase64: false, filters: [] })
+        const rewriteForm = reactive(rewriteDefaults())
+        const rewriteBodyOptions = computed(() => [
+          { label: t.value.rwBodyNone, value: 'none' },
+          { label: t.value.rwBodyReplace, value: 'replace' },
+          { label: t.value.rwBodyFilter, value: 'filter' }
+        ])
+        const rewriteHasStored = computed(() => Boolean(rewriteStored.value))
+
         const policyForm = reactive({ ptype: 'p', v0: 'role:user', objectTarget: 'global', objectPath: '/*', v2: ['*'], eft: 'allow' })
       const policyUserOptions = computed(() => policyUsers.value.map(user => ({
         label: `${user.username} · ${sourceLabel(user.source)}`,
@@ -274,6 +380,207 @@
         policyForm.v2 = nextValues
       }
 
+      // ── 响应改写（response rewrite）────────────────────────────────
+      function parseRewriteConfig (raw) {
+        if (!raw) return null
+        if (typeof raw === 'object') return raw
+        try {
+          const parsed = JSON.parse(String(raw))
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+        } catch (parseError) {
+          return null
+        }
+      }
+
+      function rewriteActive (binding) {
+        return Boolean(parseRewriteConfig(binding && binding.response_rewrite))
+      }
+
+      function rewriteDetails (binding) {
+        const config = parseRewriteConfig(binding && binding.response_rewrite)
+        if (!config) return []
+        const details = []
+        if (!config.enabled) details.push(`${t.value.rwEnabled}: ${t.value.noBindings}`)
+        if (Number(config.status)) details.push(`${t.value.rwStatus}: ${config.status}`)
+        for (const header of config.headers || []) details.push(`${header.name}: ${header.value}`)
+        for (const name of config.remove_headers || []) details.push(`- ${name}`)
+        if (config.body) details.push(`${t.value.rwBody}: ${String(config.body).slice(0, 60)}`)
+        for (const rule of config.rewrites || []) {
+          details.push(`${rule.regex ? '~' : '='}${rule.source} → ${rule.target}`)
+        }
+        return details
+      }
+
+      function fillRewriteForm (config) {
+        Object.assign(rewriteForm, rewriteDefaults())
+        if (!config) return
+        rewriteForm.enabled = config.enabled !== false
+        rewriteForm.status = Number(config.status) ? String(config.status) : ''
+        rewriteForm.contentType = config.content_type || ''
+        rewriteForm.headers = (config.headers || []).map(header => ({ name: header.name, value: header.value, remove: false }))
+          .concat((config.remove_headers || []).map(name => ({ name, value: '', remove: true })))
+        rewriteForm.bodyBase64 = config.body_base64 === true
+        if (config.body) {
+          rewriteForm.bodyMode = 'replace'
+          rewriteForm.body = config.body
+        } else if ((config.rewrites || []).length) {
+          rewriteForm.bodyMode = 'filter'
+          rewriteForm.filters = config.rewrites.map(rule => ({
+            source: rule.regex && !String(rule.source).startsWith('~') ? `~${rule.source}` : rule.source,
+            target: rule.target || '',
+            regex: rule.regex === true
+          }))
+        }
+      }
+
+      function rewritePayloadFromForm () {
+        const payload = { enabled: rewriteForm.enabled }
+        if (rewriteForm.status !== '' && rewriteForm.status !== null) payload.status = Number(rewriteForm.status)
+        const headers = {}
+        for (const header of rewriteForm.headers) {
+          if (!header.name) continue
+          headers[header.name] = header.remove ? null : header.value
+        }
+        if (Object.keys(headers).length) payload.headers = headers
+        if (rewriteForm.bodyMode === 'replace' && rewriteForm.body !== '') {
+          payload.body = rewriteForm.body
+          if (rewriteForm.bodyBase64) payload.body_base64 = true
+          if (rewriteForm.contentType) payload.content_type = rewriteForm.contentType
+        }
+        if (rewriteForm.bodyMode === 'filter') {
+          const rules = rewriteForm.filters
+            .filter(rule => rule.source)
+            .map(rule => {
+              const source = rule.source.startsWith('~') ? rule.source.slice(1) : rule.source
+              return { source, target: rule.target || '', regex: rule.regex === true || rule.source.startsWith('~') }
+            })
+          if (rules.length) payload.rewrites = rules
+        }
+        return payload
+      }
+
+      function rewritePayloadFromJson () {
+        try {
+          const parsed = JSON.parse(rewriteJsonText.value || '{}')
+          if (Array.isArray(parsed)) return { error: t.value.rwJsonArrayWarn }
+          if (!parsed || typeof parsed !== 'object') return { error: t.value.rwJsonArrayWarn }
+          return { payload: parsed }
+        } catch (parseError) {
+          return { error: t.value.rwJsonInvalid }
+        }
+      }
+
+      function switchRewriteView (view) {
+        if (view === rewriteView.value) return
+        if (view === 'json') {
+          rewriteJsonText.value = JSON.stringify(rewritePayloadFromForm(), null, 2)
+          rewriteJsonError.value = ''
+        } else {
+          const result = rewritePayloadFromJson()
+          if (result.error) {
+            rewriteJsonError.value = result.error
+            return
+          }
+          fillRewriteForm(result.payload)
+          rewriteJsonError.value = ''
+        }
+        rewriteView.value = view
+      }
+
+      function rewriteStatusRule (value) {
+        if (value === '' || value === null || value === undefined) return true
+        const status = Number(value)
+        return Number.isInteger(status) && status >= 200 && status <= 999 || t.value.rwStatusHint
+      }
+
+      function rewriteContentTypeRule (value) {
+        if (!value) return true
+        return /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+([;,][^,;]*)*$/.test(String(value).trim()) || t.value.rwContentTypeHint
+      }
+
+      function rewriteHeaderNameRule (value) {
+        if (!value) return t.value.required
+        return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(String(value)) || t.value.rwHeadersHint
+      }
+
+      function rewriteFilterSourceRule (value) {
+        if (!String(value || '').trim()) return t.value.required
+        return String(value).length <= 512 || t.value.rwFiltersHint
+      }
+
+      function addRewriteHeader () {
+        if (rewriteForm.headers.length >= 32) return
+        rewriteForm.headers.push({ name: '', value: '', remove: false })
+      }
+
+      function removeRewriteHeader (index) {
+        rewriteForm.headers.splice(index, 1)
+      }
+
+      function addRewriteFilter () {
+        if (rewriteForm.filters.length >= 16) return
+        rewriteForm.filters.push({ source: '', target: '', regex: false })
+      }
+
+      function removeRewriteFilter (index) {
+        rewriteForm.filters.splice(index, 1)
+      }
+
+      function openRewrite (binding) {
+        rewriteBinding.value = binding
+        rewriteStored.value = binding.response_rewrite || ''
+        rewriteView.value = 'form'
+        rewriteJsonText.value = ''
+        rewriteJsonError.value = ''
+        fillRewriteForm(parseRewriteConfig(binding.response_rewrite))
+        rewriteOpen.value = true
+      }
+
+      async function submitRewrite (payload) {
+        const binding = rewriteBinding.value
+        if (!binding) return
+        const ok = await mutate(() => window.adminApi.saveBinding({
+          _csrf: csrf.value, action: 'edit', id: binding.id, response_rewrite: payload
+        }), t.value.rwSaved)
+        if (ok) rewriteOpen.value = false
+      }
+
+      async function saveRewriteForm () {
+        if (rewriteView.value === 'json') {
+          const result = rewritePayloadFromJson()
+          rewriteJsonError.value = result.error || ''
+          if (result.error) return
+          await submitRewrite(result.payload)
+          return
+        }
+        if (rewriteForm.bodyMode === 'replace') {
+          const body = String(rewriteForm.body || '').trim()
+          if (body.startsWith('{') || body.startsWith('[')) {
+            try {
+              rewriteForm.body = JSON.stringify(JSON.parse(body))
+            } catch (parseError) {
+              notify(t.value.rwJsonInvalid, 'negative')
+              return
+            }
+          }
+        }
+        await submitRewrite(rewritePayloadFromForm())
+      }
+
+      function clearRewrite () {
+        const binding = rewriteBinding.value
+        if (!binding) return
+        Quasar.Dialog.create({
+          title: t.value.rwClear,
+          message: t.value.rwClearConfirm,
+          cancel: true,
+          persistent: true,
+          ok: { label: t.value.deleteAction, color: 'negative', flat: true }
+        }).onOk(() => mutate(() => window.adminApi.saveBinding({
+          _csrf: csrf.value, action: 'edit', id: binding.id, response_rewrite: null
+        }), t.value.rwCleared).then(ok => { if (ok) rewriteOpen.value = false }))
+      }
+
       function policyObjectTargetRule (value) {
         return value === 'global' || /^binding:\d+$/.test(String(value || '')) || /^port:\d+$/.test(String(value || '')) || t.value.objectAddressRule
       }
@@ -307,6 +614,7 @@
         { name: 'target_ip', label: t.value.targetIp, field: 'target_ip', align: 'left', sortable: true },
         { name: 'port', label: t.value.port, field: 'port', align: 'left', sortable: true },
         { name: 'proxy', label: t.value.proxyMode, field: 'simulate_local', align: 'left' },
+        { name: 'rewrite', label: t.value.responseRewrite, field: 'response_rewrite', align: 'left' },
         { name: 'enabled', label: t.value.status, field: 'enabled', align: 'left', sortable: true },
         { name: 'note', label: t.value.note, field: 'note', align: 'left' },
         { name: 'actions', label: '', field: 'actions', align: 'right' }
@@ -506,7 +814,7 @@
 
       onBeforeUnmount(() => unsubscribeLocale?.())
     
-      return { actionList, allowCount, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, denyCount, entryDomain, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, required, resetPolicyFields, saveBindingForm, savePolicyForm, saving, selectedPolicyObject, setPolicyMethods, sourceLabel, t, toggleBinding, upstreamSchemeOptions }
+      return { actionList, addRewriteFilter, addRewriteHeader, allowCount, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, clearRewrite, denyCount, entryDomain, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, openRewrite, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, removeRewriteFilter, removeRewriteHeader, required, resetPolicyFields, rewriteActive, rewriteBodyOptions, rewriteBinding, rewriteContentTypeRule, rewriteDetails, rewriteFilterSourceRule, rewriteForm, rewriteHasStored, rewriteHeaderNameRule, rewriteJsonError, rewriteJsonText, rewriteOpen, rewriteStatusRule, rewriteStored, rewriteView, saveBindingForm, savePolicyForm, saveRewriteForm, saving, selectedPolicyObject, setPolicyMethods, sourceLabel, switchRewriteView, t, toggleBinding, upstreamSchemeOptions }
       }
     })
     
