@@ -22,7 +22,13 @@ function nodeUrl (node) {
   // 动态发现/绑定的本机服务：优先用绑定域名，否则 <port>-当前主机名
   if (node.port) {
     const hostname = node.domain || (node.port + '-' + window.location.hostname)
-    const gatewayPort = window.location.port ? (':' + window.location.port) : ''
+    // 不同入口 zone 的端口可以不同（如公网 ws:99、内网 ai-t:443），且外层入口
+    // 可能把请求 Host 的 zone 改写后菜单才拼出跨 zone 链接。此时照抄浏览器
+    // 当前端口会拼出目标 zone 上不存在的监听，只有同 zone 链接才继承端口。
+    const here = window.location.hostname
+    const zone = (h) => { const i = h.indexOf('.'); return i < 0 ? h : h.slice(i + 1) }
+    const sameZone = hostname === here || zone(hostname) === zone(here)
+    const gatewayPort = sameZone && window.location.port ? (':' + window.location.port) : ''
     return window.location.protocol + '//' + hostname + gatewayPort + '/'
   }
   return ''

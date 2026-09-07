@@ -519,7 +519,7 @@ bash scripts/restart_gateway.sh --build  # 按当前 Docker 架构重建镜像�
 5. 管理菜单优先使用已配置绑定的 `menu-name`，其次是绑定域名；绑定备注只在菜单名称下方显示，鼠标悬浮菜单时显示该菜单实际打开的完整域名地址；没有绑定时才使用自动发现的 `local:<port>`，且不显示绑定备注。普通点击在右侧 iframe 打开，Ctrl/Command + 点击在新窗口打开菜单地址。
 6. pi-web 会校验 API 请求的 Host 与 Origin；网关必须保留外部 Host，pi-web 启动环境需设置精确域名白名单，例如 `PI_WEB_ALLOWED_HOSTS=pi-m.ws.example.com`。公网端口被外层代理改写时，网关只对同主机名 Origin 恢复公网端口，异域 Origin 继续由上游拒绝。
 7. 若应用只接受目标地址 Host 或本地来源头，优先在单条绑定上覆盖 Host/Forwarded/Origin，或启用“模拟本机访问”并填写 `127.0.0.1`/网关局域网 IP；不要放宽所有绑定的全局默认策略。
-8. 外层入口可能使用 `:99` 映射网关内部 HTTPS `:6443`；`server.conf.template` 必须保持 `absolute_redirect off`，否则访问 `/_authz/apps` 时生成的尾斜杠跳转会泄露不可达的 `:6443`，造成 Admin 入口无法访问。
+8. 外层入口是两套、端口约定不同（2026-09-07 实测）：内网 APISIX（10.252.25.252）只监听 **443**，服务 `*-235/*-241.ai-t.wtvdev.com`；公网企业边缘（218.108.76.10）只监听 **ws.gatepro.cn 的 :99**（443 不通），且转发时**把 Host 的 zone 改写成 ai-t.wtvdev.com**（首标签保留，LAN APISIX 根本不服务 ws 域）。因此经 `ws.gatepro.cn:99` 浏览时菜单域名总是物化成 ai-t，菜单链接不能照抄浏览器端口——`admin/app.js` 的 `nodeUrl` 只在目标与当前页同 zone 时继承端口，跨 zone 用默认 443，否则拼出 `*-235.ai-t.wtvdev.com:99` 这类死链。`server.conf.template` 必须保持 `absolute_redirect off`，否则访问 `/_authz/apps` 时生成的尾斜杠跳转会泄露不可达的 `:6443`，造成 Admin 入口无法访问。
 9. 绑定的“上游路径改写”会把请求统一转发到填写的目标路径，不改变 Casbin 对象；例如填写 `/backend/index.html` 会把 `/path?a=1` 转发为 `/backend/index.html?a=1`。改写路径必须是安全路径，不能带 query、fragment、连续斜杠或 `..`。
 
 ## 11. 已解决故障与防回归点
