@@ -79,7 +79,7 @@ nginx.conf.template
 | sessions | token(PK, 32B随机hex), username, source, csrf, expires_at | 本机服务端会话, TTL 默认7天 |
 | policies | ptype('p'/'g'), v0, v1, v2, UNIQUE(ptype,v0,v1,v2) | casbin 策略行 |
 | bindings | domain(UNIQUE), port, enabled, note | 显式域名绑定 |
-| bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/header_overrides/**response_rewrite** | `response_rewrite` 为改写响应的规范化 JSON（status/headers/remove_headers/body/body_base64/content_type/rewrites），空串表示未配置 |
+| bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/menu_name/header_overrides/**request_rewrite**/**response_rewrite** | `request_rewrite`/`response_rewrite` 为改写请求/响应的规范化 JSON（结构同构：headers/remove_headers/body/body_base64/content_type/rewrites），空串表示未配置 |
 | schema_migrations | version(PK), name, applied_at | 已应用迁移的有序版本账本 |
 
 **policies 编码约定**：
@@ -90,6 +90,58 @@ nginx.conf.template
 
 **密码哈希**: `hex = to_hex(H(salt,...H(salt,H(salt,password))))`, H=HMAC-SHA256(key=salt), 迭代5000次。
 Python 等价验证: `hmac.new(salt.encode(), prev, hashlib.sha256).digest()`。
+## 4.1 环境变量完整参考
+
+所有变量在 [`.env.example`](.env.example) 有带注释样例，此处按子系统归档语义与默认值。
+
+**网络与解析**
+
+| 变量 | 默认 | 语义 |
+|------|------|------|
+| AUTHZ_HTTP_PORT / AUTHZ_HTTPS_PORT | 6080 / 6443 | HTTP/HTTPS 入口端口 |
+| AUTHZ_HTTP_MODE | redirect | `redirect`=HTTP 308 到 HTTPS；`disabled`=只监听 127.0.0.1；`serve`=明文服务（仅受控环境） |
+| AUTHZ_PORT_MIN / AUTHZ_PORT_MAX | 2000 / 20000 | `<端口>-<域名>` 数字前缀动态路由允许的端口范围 |
+| AUTHZ_DISCOVERY_PORTS | 空 | 服务发现追加探测端口（Docker Desktop 等容器监听表不可见时） |
+| AUTHZ_DISCOVERY_TTL / _CONNECT_TIMEOUT_MS / _READ_TIMEOUT_MS | 30 / 100 / 200 | 本机 HTTP 服务探测缓存与超时 |
+
+**存储与缓存**
+
+| 变量 | 默认 | 语义 |
+|------|------|------|
+| AUTHZ_DB_PATH | /data/authz/authz.db | SQLite 路径 |
+| AUTHZ_CERT_DIR | /data/certs | 自签证书目录（缺失自动生成 10 年期） |
+| AUTHZ_FILES_ROOT | /files | 文件浏览应用只读根目录，必须与 server.conf 的 `/_authz/files/` alias 一致 |
+| AUTHZ_DB_CACHE_TTL / _LRU_SIZE | 30 / 500 | 数据库查询缓存 |
+| AUTHZ_REWRITE_BUFFER_MB | 64 | 正文改写 worker 级缓冲预算（单响应上限固定 1MB） |
+| AUTHZ_NGINX_CONF_DIR / _PREFIX / _BIN / OPENRESTY_TEMPLATE_DIR | 镜像内路径 | nginx conf 在线编辑使用的运行时/模板目录与二进制 |
+
+**会话与登录防护**（默认值见 §7 安全设计表）
+
+| 变量 | 语义 |
+|------|------|
+| AUTHZ_SESSION_TTL | 会话有效期秒数 |
+| AUTHZ_ADMIN_PASSWORD | 首次 seed 的 admin 密码（users 表为空时才生效） |
+| AUTHZ_LOGIN_ATTEMPTS / _WINDOW / _FAIL_DELAY_MS | 按「账户名+IP」锁定阈值 / 锁定秒数 / 失败延迟毫秒 |
+| AUTHZ_COOKIE_SECURE | 生产 HTTPS 入口必须 true；同时决定 SameSite=None/Lax（见 §14） |
+| AUTHZ_COOKIE_DOMAIN | 逗号分隔多个父域，Cookie Domain 逐个匹配当前 Host/Origin |
+| AUTHZ_HOST_URL | Cookie 域缺省回退来源；公网入口地址 |
+| AUTHZ_SESSION_SHARED + REDIS_* | 共享会话开关与 Redis 连接/ACL/前缀/DB |
+| AUTHZ_SESSION_SIGNING_KEY | 共享会话记录 HMAC 签名（>=32 字符，全组一致；无签名记录一律失效） |
+
+**Agent / 机器凭证**
+
+| 变量 | 默认 | 语义 |
+|------|------|------|
+| AUTHZ_API_KEY | 空 | 实例级预置 Key：`x-api-key` 免登录访问控制面/管理页/代理入口；不入库、随环境变量轮换；32-256 字符 |
+| AUTHZ_API_KEY_ROLE | admin | 实例级 Key 角色（admin/staff/user/guest/api；旧 viewer 自动映射 guest 并告警） |
+| AUTHZ_API_KEY_ALLOWED_IPS | 127.0.0.1 | 来源白名单，逗号分隔 IP 或 CIDR（v4/v6）；旧变量 AUTHZ_API_KEY_LOOPBACK 直接报错逼迁移 |
+| AUTHZ_AGENT_API_KEY | 空 | 启动时自动创建名为 agent-default 的数据库 Key（仅回环） |
+
+**远程身份（全部默认关闭）**：AUTHZ_NOCO_*（signIn/check 直连 + OAuth Client）、
+AUTHZ_GOOGLE_*、AUTHZ_DINGTALK_*（Authorization Code，钉钉默认角色 guest）、
+各 provider 的 CONNECT/SEND/READ 超时与 MAX_BODY_SIZE；OAuth state 使用
+`authz_oauth_state` shared dict（TTL 默认 600s）。NocoBase 强制 HTTPS，除非显式
+AUTHZ_NOCO_ALLOW_HTTP。
 
 ## 5. 请求处理流程 (authz.access())
 
@@ -99,6 +151,7 @@ Host 解析 (ngx.var.host 已 lowercase 无端口):
   2. 正则 ^(\d{1,5})- 且 port ∈ [PORT_MIN,PORT_MAX] → port   ← 数字前缀免配置
   3. 否则 → 404 页面
 会话认证: cookie authz_session → sessions 表查 token/source (过期即删)
+  呈现 x-api-key / x-role-key 的机器请求不读 Cookie（见 §12）
   local 会话必须命中 enabled 本地用户
   任意远程 provider 会话必须命中对应来源的 enabled 本地记录；后续登录记录不得覆盖管理员设置的启用状态
   失败 → 302 /_authz/login?next=<request_uri>
@@ -121,6 +174,39 @@ Casbin 授权: enforce(principal, "/<port><uri>", HTTP_METHOD)
 
 **上游协议由绑定记录决定**（`upstream_scheme`，默认 http）；HTTPS 上游默认校验证书，
 只有绑定显式关闭校验才走内部 `@authz_proxy_insecure` 位置。HTTP 入口默认 308 到 HTTPS。
+
+## 5.1 域名前缀与入口解析顺序
+
+绑定表存的是**最后一级前缀**（如 `code`），完整入口域名在消费时按当前请求 Host
+重组为 `<前缀>-<节点>.<域>`（节点取首级标签最后一个 `-` 段，如
+`code-241.ai-t.wtvdev.com`）。同一套前缀在任意 wildcard 入口域下都可达，
+管理界面永远只让用户填前缀。含点的存量值按精确域名原样匹配（历史物化域名
+在同节点请求下仍可按 前缀|节点 回退）。菜单链接用 `display_host()`（优先
+X-Forwarded-Host 首值）保证外层反代改写 Host 后链接仍落在用户输入的域上。
+
+resolver（gateway/resolver.lua）按序命中：
+
+1. bindings 精确 host 匹配（enabled=1）
+2. 裸前缀索引：首级标签 `<前缀>` 或 `<前缀>-<节点>` 命中前缀绑定；纯数字前缀
+   不参与带节点回退（让位给动态端口路由）；物化旧域名先按 `前缀|节点` 精确回退
+3. 数字前缀：`^(\d{1,5})-` 且端口在 PORT_MIN~MAX → 端口，且默认
+   `simulate_local=true`（目标固定 127.0.0.1：上游 Host/Forwarded 头按本机访问
+   构造，兼容只认本地来源的本地应用）
+4. 全部未命中 → 404 页面（host 已 HTML 转义）
+
+代理循环防护：目标 IP+端口等于网关自身监听地址时返回 508。
+
+## 5.2 上游请求构造（gateway/proxy.lua）
+
+- `authz_session` Cookie 在代理前精确剥离，业务 Cookie 保留
+- 固定头：X-Authz-User / X-Authz-Source / X-Authz-Identity；X-Forwarded-For 追加
+  remote_addr；凭证头（x-api-key/x-role-key）不透传
+- Host/Forwarded 链路头优先级：绑定显式 `upstream_host`/`forwarded_*` 覆盖 →
+  `origin_mode`（auto/preserve/rewrite/remove/custom）→ simulate_local（本机值）→
+  请求 Host
+- 配了正文改写的绑定自动向上游声明 `Accept-Encoding: identity`（绑定显式覆盖
+  Accept-Encoding 时以用户为准，改写随之失效）；`request_rewrite` 结构化改写在
+  header_overrides 之后应用
 
 ## 6. 缓存一致性
 
@@ -224,3 +310,105 @@ OAuth state/PKCE/callback、同名多来源身份隔离、旧身份策略迁移�
 来源级直授权、上游身份头、远程改密拒绝、绑定 CRUD、CSRF、Casbin 多方法授权和缓存失效、
 网关 Cookie 不上游、403 转义与真实状态码、反斜杠开放跳转拒绝、HTTP→HTTPS 308、
 Redis ACL 单写多读与故障失败关闭、Relay 退役 410。
+
+## 11. API Key 子系统（api_key.lua）
+
+两类 Key，权限统一走 Casbin 角色模型：
+
+1. **数据库 Key**：管理界面创建（`ak_` + 64 hex），SQLite 只存 SHA-256 摘要；
+   可选 `loopback_only`（仅回环来源可用）。可用 `x-api-key` 或专用头 `x-role-key`
+   提交，两头同现以 `x-role-key` 为准；支持 rotate（旧值当场失效）与禁用。
+2. **环境变量 Key**（AUTHZ_API_KEY）：实例级，只认 `x-api-key`；常量时间比较 +
+   来源 IP/CIDR 白名单（`AUTHZ_API_KEY_ALLOWED_IPS`，v4/v6 皆可，跨族不匹配）；
+   不入库、不签发会话 Cookie，因此不受管理界面禁用影响，随容器环境变量轮换。
+
+`x-api-key` 认证顺序：先按 `ak_` 格式查库，未命中再与环境变量 Key 比较。
+**只要呈现了任一凭证头就只认它**：Key 无效直接 401，绝不回退浏览器 Cookie。
+凭证头不透传上游；代理/管理页的机器请求 401/403 返回 JSON 而非重定向。
+`authorize_request`（管理页/静态资源/文件浏览免登录放行）唯一排除 guest——
+guest 只能走 `/_authz/app/guest.html` 诊断页。
+
+上游身份头：数据库 Key 收到 `X-Authz-User: <Key名>`、`X-Authz-Source: api-key`、
+`X-Authz-Identity: api-key:<id>`；环境变量 Key 固定 id=0（identity `api-key:0`）。
+
+## 12. Cookie 域选择与多域名会话（session.lua）
+
+- `AUTHZ_COOKIE_DOMAIN` 支持逗号分隔多个父域；启动时归一化为有序列表。
+- 每次下发 Cookie 时 `current_cookie_domain()` 按序选择：
+  1. IP/IPv6 Host → 不带 Domain 属性（host-only；Domain=.IP 会被浏览器归一化，
+     造成登录后立刻丢会话）；
+  2. Origin 头优先：反向代理改写 Host、请求 Origin 与实际 Host 不一致时，若 Origin
+     主机命中已配置父域，则以该配置域下发（例：Origin `*.ws.gatepro.cn`、Host 被改成
+     `*.ai-t.wtvdev.com` → Cookie 落在 `.ws.gatepro.cn`）；
+  3. 否则按当前 Host 匹配父域，取标签数最多的配置域，且不窄于 Host 自身派生域；
+  4. 配置域与 Host 不匹配时退回 host-only，绝不下发浏览器会拒绝的 Domain。
+- Secure 标志：AUTHZ_COOKIE_SECURE、TLS 入口或 X-Forwarded-Proto=https 任一满足即
+  Secure；Secure 时 SameSite=None（沙箱页面/文件预览需要），纯 HTTP 部署保持 Lax。
+- 登录/登出同时清理历史遗留 Domain 变体（旧父域链、host-only），避免旧 Cookie 残留
+  造成反复跳登录页。
+- 不同注册域之间不能靠 Cookie Domain 互通：各入口各自承载 Cookie + 共享 Redis 会话
+  （单写多读 + HMAC 签名，见 §7）。
+
+## 13. 左侧菜单与服务发现
+
+菜单由两部分合成（api/services/read_models.lua）：
+
+- **menu_entries**（自定义树）：kind=group/item，支持 parent_id 两级嵌套、icon、
+  url、admin_only、enabled、sort_order、builtin（`local`/`domains` 两个内置分组
+  受 409 保护不可删）；reorder 在 `/:id` 路由之前注册。
+- **menu_services**（运行时注入项）：键为 `binding:<id>`（域名服务组）或
+  `port:<port>`（本地服务组），覆盖数据存 menu_overrides 表，显示名单一数据源是
+  `bindings.menu_name`；支持改名/图标/排序/隐藏，DELETE 是重置回默认而非删除。
+
+服务发现（discovery.lua）：读 `/proc/net/tcp{,6}` 的 LISTEN 条目（回环 + tcp6），
+过滤端口范围与网关自身端口，合并 AUTHZ_DISCOVERY_PORTS，再对每个端口向
+127.0.0.1 发 HEAD 探测是否 HTTP 服务；结果按 `AUTHZ_DISCOVERY_TTL`（默认 30s）
+worker 内缓存。域名绑定占用的端口不会重复出现在本地服务组。menu-tree 只返回
+启用项（admin_only 按 subject 过滤），编辑器走 `GET /menu-services` 看含隐藏项全量。
+
+## 14. Nginx conf 外置 include 与在线编辑（nginxconf.lua）
+
+三个用户可编辑文件在启动时由 entrypoint 动态生成（缺省带注释内容）：
+`http_inc.conf`（http{} 尾部）、`server_inc.conf`（server{} 尾部，默认含
+favicon/noc.gif 心跳 location）、`stream_inc.conf`（stream{}）。运行时由 nginx.conf
+template include；compose 可把模板目录只读挂载实现外置。
+
+在线编辑 API（`/_authz/api/nginx-conf*`，admin-only）：
+
+- `GET /nginx-conf` 读取三个文件（单文件上限 256KB，超限截断标记）；
+- `POST /nginx-conf/validate` 与 `PUT /nginx-conf` 先把整个运行时 conf 目录复制到
+  一次性 staging 前缀、只替换被编辑文件、跑 `openresty -t`，成功才落盘——校验失败
+  永远碰不到在线文件，不会卡住并发 reload；
+- `POST /nginx-conf/reload` 触发 `openresty -s reload`。
+- 持久化规则：模板目录未设置或等于运行时目录，或模板目录可写时编辑可持久；否则
+  API 返回 `persistent:false` 提示重启后丢失。
+
+## 15. 文件浏览与 guest 诊断页
+
+- 文件浏览：`GET /api/files?path=` 只读列目录（root=AUTHZ_FILES_ROOT），前端
+  `files.html`；会话或合法 Key 均可访问， guest 除外。
+- guest 诊断页 `/_authz/app/guest.html`（guest.lua 自含认证）：guest 角色的数据库
+  Key 或 guest 会话可访问，admin 也可；服务端渲染回显调用者请求头/来源 IP/代理转发
+  链，逐字段 HTML 转义 + 敏感头脱敏 + 禁缓存；`?json=1` 返回同数据 JSON。该页是
+  天然反射面，转义与脱敏是回归测试固定断言。
+
+## 16. 控制面 API 概览（router.lua 注册序）
+
+| 域 | 端点 | 门禁 |
+|----|------|------|
+| 页面 | `GET /_authz/login`、`POST /login`、`/oauth/start|callback` | 公开 |
+| 会话 | `GET/DELETE /api/session` | self_service（guest 可读自身）；DELETE session_only+CSRF |
+| 用户 | `GET/POST /api/users`、`PATCH/DELETE /api/users/:id`、`PUT /users/:id/password` | admin（改自己密码除外，session_only） |
+| 远程用户 | `PATCH/DELETE /api/remote-users/:provider` | admin |
+| 授权视图 | `GET /api/authorization` | admin |
+| 绑定 | `GET /api/applications`（登录即可读）、`POST`（admin+api 角色）、`PATCH/DELETE`（admin） | CSRF |
+| API Key | `GET/POST /api/api-keys`、`PATCH/DELETE /:id`、`POST /:id/rotate` | admin；rotate 走 authz 事务 |
+| 策略 | `POST/PATCH/DELETE /api/policies` | admin |
+| 菜单 | `GET /api/menu-entries|menu-tree|menu-services`、`POST/PATCH/DELETE menu-entries`、`PUT menu-entries/reorder`、`PATCH/DELETE menu-services/:key`、`PUT menu-services/reorder` | 读取登录即可；写 admin |
+| 文件 | `GET /api/files` | 登录/Key，guest 除外 |
+| conf | `GET /api/nginx-conf`、`POST validate`、`PUT`、`POST reload` | admin |
+
+guard 语义：`admin=true` 要求 admin；`roles` 白名单；`csrf=true` 校验
+`X-CSRF-Token == session.csrf`（机器 Key 请求免）；`session_only` 拒绝 Key；
+`self_service` 放行 guest 的只读自身端点。错误统一 `{error:{code,message}}`，
+404/500 按 Accept 头回 JSON 或 HTML。

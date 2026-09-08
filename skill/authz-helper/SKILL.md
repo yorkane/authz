@@ -42,6 +42,10 @@ scripts/azctl.sh ... menu
 复杂字段（`response_rewrite`、`header_overrides`、`origin_mode`）仍用 curl + JSON
 直发 API，示例见 references/api.md。
 
+管理端各页面（users/authorization/menu-editor/files/nginx_conf）的区块与功能
+对照见 [references/ui.md](references/ui.md)；`testcase/ui_api_tests.sh` 是按页面
+功能块组织的可执行回归（41 项，幂等自清理），改完配置可跑一遍验证。
+
 ## 常见任务速查
 
 - 增加角色/用户：本地角色目录固定 `admin/staff/user/guest`，**没有动态新建角色的 API**；

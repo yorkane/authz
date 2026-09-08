@@ -91,6 +91,7 @@ label `local:<port>`）。
 | `upstream_host` / `forwarded_host` / `forwarded_proto` / `forwarded_port` | 显式覆盖上游 Host 与转发头 |
 | `origin_mode` | `auto`(默认)/`preserve`/`rewrite`/`remove`/`custom`；custom 配 `custom_origin`（`http(s)://authority`） |
 | `header_overrides` | 多行文本，每行 `Header-Name: value`，覆盖透传请求头（见 §5） |
+| `request_rewrite` | 结构化请求改写，对象或 JSON 字符串（见 §5.1） |
 | `response_rewrite` | 对象或 JSON 字符串（见 §6） |
 
 `PATCH /applications/:id` 可改全部字段（仅 admin）。`DELETE /applications/:id` 删绑定。
@@ -135,7 +136,21 @@ label `local:<port>`）。
 {"header_overrides": "Authorization: Bearer sk-xxx\nX-Biz-Env: prod"}
 ```
 
-只想改 Host/转发头/Origin 时用结构字段（`upstream_host` 等），不要用 overrides。
+
+### 5.1 结构化请求改写（`request_rewrite`）
+
+与 `header_overrides` 相比能力更全，结构与 `response_rewrite` 同构：
+
+| 字段 | 说明 |
+|---|---|
+| `headers` / `remove_headers` | 同 §6 语义，改写/删除发往上游的请求头（同样的禁止名单） |
+| `body` / `body_base64` / `content_type` | 整体替换请求正文（与 `rewrites` 互斥） |
+| `rewrites` | 请求正文过滤规则，同 §6 格式 |
+
+规则：`body` 与 `rewrites` 不能同时给；四类全空视为未配置；配了正文改写时网关
+自动声明 `Accept-Encoding: identity`（用户显式覆盖优先）。简单改一两个头优先用
+`header_overrides`，需要改正文或删头用本字段。两者同时存在时 `request_rewrite`
+在 `header_overrides` 之后应用。
 
 ## 6. 改写响应体（`response_rewrite`，APISIX 语义子集）
 
@@ -201,3 +216,34 @@ label `local:<port>`）。
 
 完整契约与更多字段见仓库 `docs/core-api.md`（本文件是它的操作速查，冲突时以
 core-api.md 与代码为准）。
+
+## 10. 实例环境配置（.env，需重启容器生效）
+
+有些配置不在数据库里，而在部署目录 `.env`（本机 `/data/app/.env`）。修改后
+`docker compose up -d` 重建生效。语义全表见仓库 `design.md` §4.1，常用项：
+
+| 任务 | 变量 |
+|---|---|
+| 多域名共享登录 | `AUTHZ_COOKIE_DOMAIN=.a.com,.b.com` + 共享 Redis 会话（`AUTHZ_SESSION_SHARED`、`AUTHZ_SESSION_REDIS_*`、`AUTHZ_SESSION_SIGNING_KEY`，仅一个实例 read-write） |
+| Agent 免登录 Key | `AUTHZ_API_KEY`（32-256 字符）+ `AUTHZ_API_KEY_ROLE` + `AUTHZ_API_KEY_ALLOWED_IPS`（IP/CIDR 逗号分隔，默认 127.0.0.1） |
+| 登录防爆破 | `AUTHZ_LOGIN_ATTEMPTS`(5) / `AUTHZ_LOGIN_WINDOW`(1800s) / `AUTHZ_LOGIN_FAIL_DELAY_MS`(1000)，按「账户名+IP」锁定 |
+| 端口发现 | `AUTHZ_DISCOVERY_PORTS`（容器监听表不可见时追加）、`AUTHZ_DISCOVERY_TTL` |
+| HTTP 入口策略 | `AUTHZ_HTTP_MODE`=redirect/disabled/serve |
+| Cookie 安全 | `AUTHZ_COOKIE_SECURE`（HTTPS 入口必须 true；决定 SameSite=None/Lax） |
+
+注意：数据库类配置（用户/策略/绑定/菜单/Key）走 API 即时生效，不要改库；
+环境类配置走 .env，两层不要混。
+
+## 11. 其他端点与语义速查
+
+- `GET /_authz/app/guest.html?json=1` — guest 角色诊断页（回显请求头/来源/代理链，
+  服务端转义+脱敏）；guest Key 只能访问它和 `GET /session`，admin 也可看。
+- `GET /api/files?path=` — 只读列 `AUTHZ_FILES_ROOT` 目录（登录或非 guest Key）。
+- `PUT /api/me/password` — 改自己密码（session_only；改完其他会话全部下线）。
+- `PUT /api/users/:id/password` — admin 重置他人密码。
+- `PATCH/DELETE /api/remote-users/:provider` — 管理远程身份记录（角色覆盖/删除，
+  `{provider, subject, ...}`，删除后下次登录按新身份重建）。
+- nginx-conf 编辑：文件白名单 `http_inc.conf`/`server_inc.conf`/`stream_inc.conf`，
+  单文件 256KB 上限；validate/PUT 都是 staging + `openresty -t` 通过才落盘；
+  reload 失败看返回 message；模板目录只读时 API 会标 `persistent:false`。
+- 登录页：`GET /_authz/login?next=<path>`；`next` 只接受以 `/` 开头的本站路径。
