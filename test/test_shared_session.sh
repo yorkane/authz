@@ -47,7 +47,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# KEEP_GOING=1：分诊模式，失败只记一行并继续，末尾汇总全部 FAIL。
+# 与 test_authz_gateway.sh 同一约定；结论只当线索，确认用默认严格模式复跑。
+KEEP_GOING=${KEEP_GOING:-0}
+FAILS=0
+if [[ "$KEEP_GOING" == "1" ]]; then set +eu; fi
+
 fail() {
+    if [[ "$KEEP_GOING" == "1" ]]; then
+        printf 'FAIL: %s\n' "$1"
+        FAILS=$((FAILS + 1))
+        return
+    fi
     printf 'FAIL: %s\n' "$1" >&2
     [[ -f "$TMP_DIR/body" ]] && cat "$TMP_DIR/body" >&2 || true
     exit 1
@@ -60,13 +71,13 @@ pass() {
 
 assert_eq() {
     local name=$1 actual=$2 expected=$3
-    [[ "$actual" == "$expected" ]] || fail "$name (expected '$expected', got '$actual')"
+    [[ "$actual" == "$expected" ]] || { fail "$name (expected '$expected', got '$actual')"; return; }
     pass "$name"
 }
 
 assert_contains() {
     local name=$1 actual=$2 expected=$3
-    [[ "$actual" == *"$expected"* ]] || fail "$name (missing '$expected')"
+    [[ "$actual" == *"$expected"* ]] || { fail "$name (missing '$expected')"; return; }
     pass "$name"
 }
 
@@ -78,7 +89,7 @@ assert_not_contains() {
 
 assert_json() {
     local name=$1 filter=$2 expected=$3 actual
-    actual=$(jq -er "$filter" "$TMP_DIR/body") || fail "$name (invalid JSON or filter)"
+    actual=$(jq -er "$filter" "$TMP_DIR/body") || { fail "$name (invalid JSON or filter)"; return; }
     assert_eq "$name" "$actual" "$expected"
 }
 
@@ -320,4 +331,9 @@ assert_contains "Redis outage clears browser cookie" "$(cat "$TMP_DIR/shared-hea
     "authz_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
 
 
-printf '\nAll %d shared session checks passed.\n' "$PASS"
+if [[ "$KEEP_GOING" == "1" ]]; then
+    printf '\nTriage run: %d passed, %d failed\n' "$PASS" "$FAILS"
+    [[ "$FAILS" == "0" ]] || exit 1
+else
+    printf '\nAll %d shared session checks passed.\n' "$PASS"
+fi

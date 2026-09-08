@@ -52,6 +52,12 @@ DYNAMIC_HOST="${UPSTREAM_PORT}-dynamic.test.example"
 POLICY_OBJECT="/${UPSTREAM_PORT}/*"
 
 cleanup() {
+    # cleanup 可能早于变量初始化就触发（例如启动阶段致命失败），一律用默认值。
+    if [[ "${KEEP_GOING:-0}" == "1" && "${FAILS:-0}" != "0" ]]; then
+        printf '\n===== %d failed check(s) =====\n' "$FAILS"
+        cat "$FAIL_LOG" 2>/dev/null || true
+        printf '===============================\n'
+    fi
     docker exec "$CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     if [[ -n "$REDIRECT_CONTAINER_NAME" ]]; then
@@ -83,7 +89,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# 运行模式：
+#   默认（严格）        首个 FAIL 立即退出，转储响应体与容器日志。结论可信，诊断最全。
+#   KEEP_GOING=1        分诊：失败只记一行摘要并继续，跑完汇总全部 FAIL。用来一轮
+#                       暴露所有问题 —— 改断言口径时逐个试错的串行全量重跑是最大的
+#                       时间浪费（改造前一次口径调整实测重跑 5 轮 × ~2 分钟）。
+#                       代价：期间关掉 errexit/nounset，前置步骤失败可能让个别后续
+#                       断言虚假通过，所以 KEEP_GOING 的结果只当线索，确认必须用
+#                       默认模式复跑。
+#   TEST_ONLY=a,b       只跑命中的 section（段名见 section 函数注释）。
+#   TEST_DEBUG=1        打印每段 run/skip 与耗时，用来定位「慢在哪一段」。
+KEEP_GOING=${KEEP_GOING:-0}
+TEST_ONLY=${TEST_ONLY:-}
+TEST_DEBUG=${TEST_DEBUG:-0}
+FAILS=0
+FAIL_LOG="$TMP_DIR/failures.txt"
+CURRENT_SECTION=core
+SECTION_RUN=1
+SKIP_UNTIL_SECTION=0
+TEST_T0=$(date +%s)
+if [[ "$KEEP_GOING" == "1" ]]; then set +eu; fi
+
+elapsed() { printf '%ds' "$(( $(date +%s) - TEST_T0 ))"; }
+
 fail() {
+    if [[ "$KEEP_GOING" == "1" ]]; then
+        # 分诊模式只留一行摘要；完整转储交给随后的默认模式复跑。
+        printf 'FAIL: %s\n   section=%s at %s\n' "$1" "$CURRENT_SECTION" "$(elapsed)"
+        printf '%s\n' "$1" >> "$FAIL_LOG"
+        FAILS=$((FAILS + 1))
+        return
+    fi
     printf 'FAIL: %s\n' "$1" >&2
     [[ -f "$TMP_DIR/body" ]] && cat "$TMP_DIR/body" >&2 || true
     [[ -f "$TMP_DIR/nocobase.log" ]] && tail -n 40 "$TMP_DIR/nocobase.log" >&2 || true
@@ -92,19 +128,24 @@ fail() {
 }
 
 pass() {
+    # 本段被 TEST_ONLY 跳过，或前置步骤失败（ensure 已置位）：断言无意义，静默略过。
+    [[ "$SECTION_RUN" == "1" && "$SKIP_UNTIL_SECTION" != "1" ]] || return 0
     PASS=$((PASS + 1))
     printf 'PASS: %s\n' "$1"
 }
 
+# 断言失败时必须在 fail 之后立即 return：严格模式下 fail 会 exit，但分诊模式
+# KEEP_GOING 下 fail 只记一笔就返回，不 return 会继续走进 pass，把同一次检查
+# 同时计成 FAIL 和 PASS（实测：注入 2 个坏断言后汇总成 882 通过 / 2 失败）。
 assert_eq() {
     local name=$1 actual=$2 expected=$3
-    [[ "$actual" == "$expected" ]] || fail "$name (expected '$expected', got '$actual')"
+    [[ "$actual" == "$expected" ]] || { fail "$name (expected '$expected', got '$actual')"; return; }
     pass "$name"
 }
 
 assert_contains() {
     local name=$1 actual=$2 expected=$3
-    [[ "$actual" == *"$expected"* ]] || fail "$name (missing '$expected')"
+    [[ "$actual" == *"$expected"* ]] || { fail "$name (missing '$expected')"; return; }
     pass "$name"
 }
 
@@ -117,20 +158,64 @@ assert_contains_lower() {
     local lower_actual lower_expected
     lower_actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
     lower_expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
-    [[ "$lower_actual" == *"$lower_expected"* ]] || fail "$name (missing '$expected')"
+    [[ "$lower_actual" == *"$lower_expected"* ]] || { fail "$name (missing '$expected')"; return; }
     pass "$name"
 }
 
 assert_not_contains() {
     local name=$1 actual=$2 unexpected=$3
-    [[ "$actual" != *"$unexpected"* ]] || fail "$name (unexpected '$unexpected')"
+    [[ "$actual" != *"$unexpected"* ]] || { fail "$name (unexpected '$unexpected')"; return; }
     pass "$name"
 }
 
 assert_json() {
     local name=$1 filter=$2 expected=$3 actual
-    actual=$(jq -er "$filter" "$TMP_DIR/body") || fail "$name (invalid JSON or filter)"
+    # 分诊模式下 jq 取值失败也要就地返回：否则拿空串继续比期望值会计两次。
+    actual=$(jq -er "$filter" "$TMP_DIR/body") || { fail "$name (invalid JSON or filter)"; return; }
     assert_eq "$name" "$actual" "$expected"
+}
+
+# 段名（默认全跑，TEST_ONLY 用逗号挑选）：
+#   guest domain-prefix request-rewrite body-rewrite gzip-negotiation
+#   complex-rewrite response-rewrite-xss menu-tree files files-legacy
+#   nginx-conf agent-key login-lock http-redirect cookie-domain
+#   rewrite-budget envkey
+# 段之间共享登录会话、端口与 mock。被标记成可挑选的段都自带前置（自己登录、
+# 自己建数据）；挑中的段若依赖被跳过段留下的变量，ensure 会让它安静跳过而不是
+# 拿空值发请求。因此 TEST_ONLY 的结果同样只当线索，确认用全量跑。
+section() {
+    local name=$1
+    CURRENT_SECTION=$name
+    SKIP_UNTIL_SECTION=0
+    if [[ -z "$TEST_ONLY" || ",$TEST_ONLY," == *",$name,"* ]]; then
+        SECTION_RUN=1
+    else
+        SECTION_RUN=0
+    fi
+    if [[ "$TEST_DEBUG" == "1" ]]; then
+        printf 'SECTION %s %s (+%s)\n' "$name" \
+            "$( [[ $SECTION_RUN == 1 ]] && echo run || echo skip )" "$(elapsed)"
+    fi
+    return 0
+}
+
+# 前置变量缺失（或本段被跳过）→ 记一次 FAIL 并让本段剩余断言静默略过。
+# 走 fail 而不是 return 1：严格模式下 return 1 会被 set -e 直接杀掉，
+# 什么诊断都不留；fail 在严格模式下给出明确原因，在 KEEP_GOING 下只记一行。
+# 跳过信号是 SKIP_UNTIL_SECTION 标志，不是返回值。
+ensure() {
+    local name missing=""
+    for name in "$@"; do
+        [[ -n "${!name:-}" ]] || missing="$missing $name"
+    done
+    if [[ -n "$missing" || "$SECTION_RUN" != "1" ]]; then
+        SKIP_UNTIL_SECTION=1
+        if [[ "$TEST_DEBUG" == "1" ]]; then
+            printf 'SKIP rest of section %s (%s)\n' "$CURRENT_SECTION" "${missing:-TEST_ONLY}"
+        fi
+        [[ -n "$missing" ]] && fail "section $CURRENT_SECTION prerequisites missing:$missing"
+    fi
+    return 0
 }
 
 assert_contains_all() {
@@ -1015,6 +1100,9 @@ request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$VIEWER_API_KEY_ID" "" "" "" 
 assert_eq "admin API key deletes another key" "$STATUS" "200"
 unset VIEWER_API_KEY_TOKEN
 
+section guest
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
 # -- guest 角色：最小权限 API Key，唯一入口是只读诊断页 --------------------------
 request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name":"guest-agent"}'
 assert_eq "admin creates a guest API key" "$STATUS" "201"
@@ -1623,6 +1711,10 @@ assert_eq "restore edited binding" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
 APP_ID=$(jq -er '.data.bindings[] | select(.domain == "fixed.test.example") | .id' "$TMP_DIR/body")
 
+fi
+section domain-prefix
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
 # ── 多入口域名：前缀绑定 + 跨 zone 访问 / 菜单域名重建 ───────────
 request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" "{\"domain\":\"pfx\",\"port\":$UPSTREAM_PORT,\"enabled\":true}"
 assert_eq "create binding from a bare prefix" "$STATUS" "201"
@@ -1759,6 +1851,10 @@ assert_eq "HTTPS default WebSocket proxy" "$WS_STATUS" "101"
 assert_contains "HTTPS WebSocket upgrade response" \
     "$(cat "$TMP_DIR/https-websocket-headers")" "101 Switching Protocols"
 
+fi
+section request-rewrite
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF APP_ID
 # ── 绑定级请求改写（原「Header 覆盖」升级为 JSON 结构化配置）──
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"request_rewrite":{"headers":{"X-Probe-Header":"from-binding","Authorization":"Bearer fixed-token"}}}'
@@ -1805,6 +1901,10 @@ assert_eq "clear request rewrite" "$STATUS" "200"
 request GET fixed.test.example /identity "$ADMIN_COOKIE"
 assert_json "cleared request rewrite stops overriding" '.probe | tostring' "null"
 
+fi
+section body-rewrite
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF APP_ID
 # ── 绑定级请求正文改写（发往上游前替换/过滤文本正文）──
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"request_rewrite":{"body":{"replaced":true}}}'
@@ -1962,6 +2062,10 @@ request GET rewrite.test.example /rewrite-huge "$ADMIN_COOKIE"
 assert_eq "responses over the rewrite buffer are not truncated" "$(wc -c <"$TMP_DIR/body")" "1200007"
 assert_contains "oversized responses keep the upstream bytes" "$BODY" "chunk-yyyy"
 
+fi
+section gzip-negotiation
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF REWRITE_APP_ID
 # ── 压缩协商：正文改写必须让上游返回未压缩正文 ────────────────
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"response_rewrite":{"rewrites":[{"source":"negotiated-secret-token","target":"[REDACTED]"}]}}'
@@ -1998,6 +2102,10 @@ request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
 assert_eq "status 0 never rewrites the status code" "$STATUS" "200"
 assert_contains "status 0 keeps the body filter working" "$BODY" "[REDACTED]"
 
+fi
+section complex-rewrite
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF REWRITE_APP_ID
 # ── 复杂场景：UTF-8 / 捕获组 / 大小写不敏感 / base64 往返 / 多 filter 顺序 / 全字段组合 ──
 # UTF-8 多字节正文：字面量与正则捕获组同时生效；Content-Length 被撤除、走分块。
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"\u4f60\u597d","target":"\u60a8\u597d"},{"source":"~token=(\\d+)","target":"\u6570\u5b57=[$1]"}]}}'
@@ -2138,6 +2246,10 @@ request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
 assert_contains_all "cleared rewrite restores the upstream body" "$BODY" "Hello Rewrite" "internal-secret-token" "value=42"
 assert_contains "cleared rewrite restores the upstream header" "$(cat "$TMP_DIR/headers")" "X-Upstream-Trace: upstream-trace"
 
+fi
+section response-rewrite-xss
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF REWRITE_APP_ID
 # ── 复杂响应改写：Header 注入保护、多值头、Server 屏蔽、HTML/XSS 净化 ──
 # CRLF 注入在 header 名 / 值、rewrite source / target 里都会被拒绝。
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"headers":{"X-Crlf":"good\r\nX-Injected: yes"}}}'
@@ -2344,6 +2456,10 @@ assert_eq "unknown API status" "$STATUS" "404"
 assert_eq "unknown API JSON type" "$CONTENT_TYPE" "application/json; charset=UTF-8"
 assert_json "unknown API error" '.error.code' "http_404"
 
+fi
+section menu-tree
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
 # ── 菜单树管理 /_authz/api/menu-tree + /menu-entries ────────────
 request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
 assert_eq "menu tree loads" "$STATUS" "200"
@@ -2431,6 +2547,10 @@ assert_eq "delete emptied group" "$STATUS" "200"
 request DELETE "$ADMIN_HOST" "/_authz/api/menu-entries/$MENU_NEW_GROUP_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "delete missing menu entry 404" "$STATUS" "404"
 
+fi
+section files
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
 # ── 文件浏览 API /_authz/api/files ─────────────────────────────
 request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
 assert_eq "menu services list loads" "$STATUS" "200"
@@ -2480,6 +2600,10 @@ request GET "$ADMIN_HOST" /_authz/api/menu-services "$ADMIN_COOKIE"
 assert_json "reordered service moves to the top" '.data.local[0].menu_key' "$MENU_SVC_FIRST"
 assert_json "untouched services keep relative order" '.data.local[1].menu_key' "$MENU_SVC_LAST"
 
+fi
+section files-legacy
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
 # ── 文件浏览 API /_authz/api/files ─────────────────────────────
 request GET "$ADMIN_HOST" /_authz/api/files "$ADMIN_COOKIE"
 assert_eq "file listing loads" "$STATUS" "200"
@@ -2497,6 +2621,10 @@ request GET "$ADMIN_HOST" /_authz/api/files
 assert_eq "file listing requires session" "$STATUS" "401"
 
 
+fi
+section nginx-conf
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
 # ── Nginx include 编辑 API /_authz/api/nginx-conf ──────────────
 request GET "$ADMIN_HOST" /_authz/api/nginx-conf "$ADMIN_COOKIE"
 assert_eq "nginx conf listing loads" "$STATUS" "200"
@@ -2529,6 +2657,10 @@ sleep 1
 login "$ADMIN_HOST" admin reset123 "$RESET_COOKIE"
 request GET "$ADMIN_HOST" /_authz/api/session "$RESET_COOKIE"
 assert_eq "reset admin password is immediately usable" "$STATUS" "200"
+fi
+section agent-key
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure RESET_COOKIE
 # ── Agent 专用 API Key（仅本机可用）────────────────────────────
 AGENT_CSRF=$(jq -er '.data.csrf' "$TMP_DIR/body")
 STATUS=$(curl -sS --max-time 5 --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1" \
@@ -2566,6 +2698,10 @@ assert_eq "forwarded HTTPS login succeeds" "$STATUS" "302"
 FORWARDED_SECURE_COOKIE=$(awk 'BEGIN { IGNORECASE=1 } /^Set-Cookie:/ { print }' "$TMP_DIR/forwarded-secure-headers")
 assert_contains "forwarded HTTPS cookie is Secure" "$FORWARDED_SECURE_COOKIE" "; Secure"
 
+fi
+section login-lock
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_HOST
 # ── 登录失败延迟与账户锁定（账户名+IP）──────────────────────────
 LOCK_ACCOUNT="lockme"
 FAIL_START_MS=$(date +%s%3N)
@@ -2591,6 +2727,9 @@ STATUS=$(curl -sS --max-time 5 --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1" \
     --data-urlencode 'username=admin' --data-urlencode 'password=admin123')
 assert_eq "another account from the same IP is not locked" "$STATUS" "302"
 
+fi
+section http-redirect
+if [[ "$SECTION_RUN" == "1" ]]; then
 # ── 公网 HTTP 默认只重定向到 HTTPS ─────────────────────────────
 REDIRECT_CONTAINER_NAME="authz-gateway-redirect-test-$$"
 mkdir -p "$TMP_DIR/redirect-data/authz"
@@ -2621,6 +2760,9 @@ REDIRECT_LOCATION=$(awk 'BEGIN { IGNORECASE=1 } /^Location:/ { sub(/^[^:]+:[[:sp
 assert_eq "HTTPS redirect preserves host port path and query" "$REDIRECT_LOCATION" \
     "https://redirect.test.example:$REDIRECT_HTTPS_PORT/_authz/login?next=%2Fdemo"
 
+fi
+section cookie-domain
+if [[ "$SECTION_RUN" == "1" ]]; then
 # ── Cookie 域选择：Origin 与 Host 不一致时以 Origin 匹配的父域为准 ──
 ORIGIN_CONTAINER_NAME="authz-gateway-origin-test-$$"
 ORIGIN_HTTP_PORT=$(free_port)
@@ -2674,6 +2816,9 @@ assert_eq "matching origin keeps host domain" \
 assert_eq "unknown origin falls back to host domain" \
     "$(origin_login_cookie_domain a.one.example.com https://other.example.org)" ".one.example.com"
 
+fi
+section rewrite-budget
+if [[ "$SECTION_RUN" == "1" ]]; then
 # ── 响应改写缓冲预算：并发大响应必须降级为透传，而不是无上限缓冲 ──
 BUDGET_CONTAINER_NAME="authz-gateway-budget-test-$$"
 BUDGET_HTTP_PORT=$(free_port)
@@ -2761,6 +2906,9 @@ done
 (( SKIPPED >= 1 )) || fail "rewrite budget never degraded a concurrent response"
 pass "concurrent rewrites stay within the worker buffer budget ($REWRITTEN rewritten, $SKIPPED degraded)"
 
+fi
+section envkey
+if [[ "$SECTION_RUN" == "1" ]]; then
 # ── 实例级预置 API Key（AUTHZ_API_KEY + x-api-key 免登录）──────────────
 # 覆盖：控制面/页面/代理三条路径的 Key 放行、角色与来源约束、Key 不外泄、
 # 呈现 Key 时不回退 Cookie、未配置时完全失效、配置错误启动即失败。
@@ -2986,4 +3134,14 @@ assert_contains_all "server template strips every credential header" "$SERVER_TE
     'proxy_set_header X-API-Key         "";' \
     'proxy_set_header X-Role-Key        "";'
 
-printf '\nAll %d authz gateway checks passed.\n' "$PASS"
+fi
+if [[ "$KEEP_GOING" == "1" ]]; then
+    printf '\nTriage run: %d passed, %d failed (TEST_ONLY=%s, %s)\n' \
+        "$PASS" "$FAILS" "${TEST_ONLY:-all}" "$(elapsed)"
+    if [[ -n "$TEST_ONLY" ]]; then
+        printf '注意：TEST_ONLY/KEEP_GOING 的结果只当线索，确认请全量严格跑。\n'
+    fi
+    [[ "$FAILS" == "0" ]] || exit 1
+else
+    printf '\nAll %d authz gateway checks passed.\n' "$PASS"
+fi

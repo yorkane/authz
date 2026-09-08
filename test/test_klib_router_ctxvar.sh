@@ -13,7 +13,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# KEEP_GOING=1：分诊模式（与 test_authz_gateway.sh 同一约定）。
+KEEP_GOING=${KEEP_GOING:-0}
+FAILS=0
+if [[ "$KEEP_GOING" == "1" ]]; then set +eu; fi
+
 fail() {
+    if [[ "$KEEP_GOING" == "1" ]]; then
+        printf 'FAIL: %s\n' "$1"
+        FAILS=$((FAILS + 1))
+        return
+    fi
     printf 'FAIL: %s\n' "$1" >&2
     docker logs "$CONTAINER_NAME" 2>&1 | tail -n 80 >&2 || true
     exit 1
@@ -28,6 +38,7 @@ assert_eq() {
     local name=$1 actual=$2 expected=$3
     if [[ "$actual" != "$expected" ]]; then
         fail "$name (expected '$expected', got '$actual')"
+        return
     fi
     pass "$name"
 }
@@ -36,6 +47,7 @@ assert_contains() {
     local name=$1 actual=$2 expected=$3
     if [[ "$actual" != *"$expected"* ]]; then
         fail "$name (missing '$expected' in '$actual')"
+        return
     fi
     pass "$name"
 }
@@ -44,6 +56,7 @@ assert_not_contains() {
     local name=$1 actual=$2 unexpected=$3
     if [[ "$actual" == *"$unexpected"* ]]; then
         fail "$name (unexpected '$unexpected' in '$actual')"
+        return
     fi
     pass "$name"
 }
@@ -241,4 +254,9 @@ request GET '/tracker/context?long=123' -H 'X-Klib-Test: after-unseeded-timer'
 assert_eq "known unseeded timer header corruption" "$STATUS" "500"
 assert_contains "unseeded timer corruption source" "$BODY" "loop in gettable"
 
-printf '\nAll %d klib router/ctxvar checks passed.\n' "$PASSED"
+if [[ "$KEEP_GOING" == "1" ]]; then
+    printf '\nTriage run: %d passed, %d failed\n' "$PASSED" "$FAILS"
+    [[ "$FAILS" == "0" ]] || exit 1
+else
+    printf '\nAll %d klib router/ctxvar checks passed.\n' "$PASSED"
+fi

@@ -349,8 +349,26 @@ lualib/tracker/
 ```bash
 OPENRESTY_TEST_IMAGE=authz:latest bash test/test_klib_router_ctxvar.sh   # Router/ctxvar
 OPENRESTY_TEST_IMAGE=authz:latest bash test/test_shared_session.sh       # 共享会话
-OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh        # authz 网关全量
+OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh      # authz 网关全量（严格模式，交付前跑这个）
 ```
+
+改断言口径或只看某一子系统时，别用全量严格跑试错（一轮 ~2 分钟，首个 FAIL 即退出）：
+
+```bash
+# 分诊：失败只记一行并继续，末尾汇总全部 FAIL（实测 41s 一轮，注入 2 个坏断言
+# 会一次全部暴露）。期间关掉 errexit/nounset，可能出现虚假 PASS，结论只当线索。
+KEEP_GOING=1 OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh
+
+# 只跑相关段（实测 16s）：段名见脚本内 section 清单
+TEST_ONLY=guest,envkey TEST_DEBUG=1 OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh
+```
+
+段名：`guest` `domain-prefix` `request-rewrite` `body-rewrite` `gzip-negotiation`
+`complex-rewrite` `response-rewrite-xss` `menu-tree` `files` `files-legacy`
+`nginx-conf` `agent-key` `login-lock` `http-redirect` `cookie-domain`
+`rewrite-budget` `envkey`。前缀部分（登录、迁移、绑定、OAuth、远程身份）是共享
+前置，任何 TEST_ONLY 都会跑。KEEP_GOING/TEST_ONLY 的结果不能当作交付结论 ——
+收尾必须用默认严格模式全量复跑。
 
 可通过 `OPENRESTY_TEST_IMAGE` 覆盖默认镜像。脚本会启动临时 OpenResty 容器，执行配置检查和真实 HTTP 请求，结束后删除测试容器。
 三个脚本都会占用随机端口并起常驻 mock，**不要并发跑**（会互相污染日志与端口），也不要在脚本里用裸
