@@ -494,6 +494,11 @@ PKCE、resource、回调 issuer、state 一次性、角色映射、同名来源�
 - 改数据库 schema：先备份 `/data/authz/authz.db`，追加有明确版本号的迁移，不得改写已发布版本；必须重启或重建容器，让 `init_by_lua` 在 worker 接收流量前完成迁移；
 - 改 vendor：重新生成 manifest 和哈希，不在页面恢复 CDN 依赖。
 
+> **外置模板目录漂移**：部署若把宿主机目录挂载到 `/etc/openresty/templates`（如 235 的
+> `/data/app/data/authz/conf`），镜像升级不会更新它。模板改动（如凭据头剥离、access 放行块）
+> 必须同步到该目录再重建容器，否则新镜像配旧模板，行为静默缺项。每次发布模板变更后核对：
+> `docker exec <容器> grep -c authorize_request /usr/local/openresty/nginx/conf/server.conf`。
+
 生产检查模板：
 
 ```bash
