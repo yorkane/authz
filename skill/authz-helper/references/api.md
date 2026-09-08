@@ -30,15 +30,44 @@
 - `PATCH /api-keys/:id` — `{"name","role","enabled":false}`，立即生效。
 - `DELETE /api-keys/:id` — 不可恢复。
 
-第三方使用方式（把它写进给用户的说明里）：
+**用户创建的 Key 怎么用**（创建后应把以下用法完整交给用户）：
+
+1. **携带方式**：请求头 `x-api-key: ak_xxx`（推荐）。数据库 Key 也可用专用头
+   `x-role-key` 提交；两个头同时出现时以 `x-role-key` 为准。只要呈现了任一凭证头，
+   Key 无效就直接 401，绝不回退到浏览器 Cookie。
+2. **能打开哪三类入口**（同一把 Key）：
+   - 控制面 API：`https://<入口>/_authz/api/*`，机器请求免 CSRF；
+   - 管理页面与静态资源：`/_authz/apps/*`、`/_authz/files/*`（浏览器/Playwright 用
+     `setExtraHTTPHeaders` 逐请求附带该头，不必登录取 Cookie）；
+   - 代理入口：域名/端口绑定与 `<port>-域名` 动态入口，如
+     `https://code-235.ai-t.wtvdev.com:6443/api/...`。
+3. **权限边界 = 角色 + Casbin 策略**：
+   - `guest`：只有 `GET /_authz/app/guest.html` 诊断页和只回显自身的
+     `GET /_authz/api/session`；其余控制面 API、管理页、文件浏览一律拒绝。
+     给第三方做链路自检（确认来源 IP、代理头、上游收到的头）用 guest 即可。
+   - `user`/`staff`/`admin`：按角色的 Casbin 策略决定控制面与代理目标权限；
+     需要调控制面 API 但只做业务读取时用 `staff`，完全控制面管理用 `admin`。
+   - `api`：服务主体角色，默认可访问所有已解析代理目标（admin 可用 deny 收紧），
+     适合纯代理场景的第三方后端。
+4. **上游看到什么**：网关剥离凭证头，绝不转发 Key；上游只收到
+   `X-Authz-User: <Key名称>`、`X-Authz-Source: api-key`、`X-Authz-Identity: api-key:<id>`，
+   第三方可据此区分身份（Key 名称建 Key 时就定好，见名知用途）。
+5. **来源限制**：数据库 Key 本身不限来源，安全边界是"谁拿着 Key"。需要限定来源时：
+   跨机固定出口 IP 的场景优先改用实例级 `AUTHZ_API_KEY`（配
+   `AUTHZ_API_KEY_ALLOWED_IPS` 白名单，只认 `x-api-key` 头）；只能本机的自动化用
+   `AUTHZ_AGENT_API_KEY`（回环强制 401）。
+6. **保管要求**：Key 放环境变量或密钥管理系统，不写 URL query、Cookie、日志、git；
+   明文只在创建/轮换响应里出现一次，丢了只能轮换或重建。停用第三方时
+   `PATCH {"enabled":false}` 立即失效，比删除温和。
+
+最小示例：
 
 ```bash
-curl -H "x-role-key: ak_xxxx" https://<入口域名>/_authz/app/guest.html   # guest 自检
-curl -H "x-api-key: ak_xxxx" "https://<绑定域名>:6443/api/..."          # 代理入口
+KEY=ak_xxx   # 创建时一次性返回的 token
+curl -H "x-api-key: $KEY" "https://<入口>/_authz/app/guest.html?json=1"  # guest 自检链路
+curl -H "x-api-key: $KEY" "https://<绑定域名>/api/status"                # 代理入口
+curl -H "x-api-key: $KEY" "https://<入口>/_authz/api/applications"       # 控制面（按角色）
 ```
-
-网关不会把 Key 头转发给上游；上游只收到 `X-Authz-User` / `X-Authz-Source` /
-`X-Authz-Identity`。
 
 ## 3. 域名/端口绑定（按本地服务名配域名）
 

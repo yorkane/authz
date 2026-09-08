@@ -61,6 +61,8 @@ scripts/azctl.sh ... menu
 - 开放接口给第三方：`POST /api-keys`（名字体现用途，角色最小化：只读诊断给
   `guest`，调控制面给 `api`/`staff`/`admin`），把一次性返回的 `token` 交给用户保管；
   需要限来源时用 `AUTHZ_API_KEY_ALLOWED_IPS`（实例级 Key）或改用数据库 Key。
+  创建后必须把 Key 的用法说明交给用户（携带头 `x-api-key`、三类入口、角色权限边界、
+  上游身份头、保管要求），完整文案见 references/api.md §2。
 - 菜单：`GET /menu-tree` 看现状；自定义分组/条目走 `menu-entries`；调整
   「域名服务/本地服务」组内项的名字、图标、顺序、隐藏走 `menu-services/:key`
   （key 形如 `binding:3` / `port:2077`）。
