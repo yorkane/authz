@@ -1,5 +1,6 @@
 local provider_config = require "resty.authz.provider_config"
 local session = require "resty.authz.session"
+local api_key = require "resty.authz.api_key"
 
 local _M = {}
 
@@ -8,6 +9,31 @@ local function env_bool(name, default)
     if value == nil or value == "" then return default end
     value = value:lower()
     return value == "1" or value == "true" or value == "yes" or value == "on"
+end
+
+-- 实例级预置 API Key（Agent 免登录入口）：以 `x-api-key` 请求头提交，
+-- 允许直接调用控制面 API、访问管理页面与代理入口，省去手动登录取 Cookie。
+-- 默认 admin 角色（沿用既有 role:admin 策略），可用 AUTHZ_API_KEY_ROLE 收窄；
+-- AUTHZ_API_KEY_LOOPBACK=true 时只接受本机回环来源。
+local function configure_api_key(c)
+    local token = tostring(os.getenv("AUTHZ_API_KEY") or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local role = tostring(os.getenv("AUTHZ_API_KEY_ROLE") or "admin"):lower()
+    local loopback_only = env_bool("AUTHZ_API_KEY_LOOPBACK", false)
+    if token == "" then
+        c.env_api_key = nil
+        api_key.configure_env({})
+        return
+    end
+    if not api_key.valid_role(role) then
+        error("AUTHZ_API_KEY_ROLE must be one of admin, staff, user, viewer, api")
+    end
+    if #token < 32 or #token > 256 or token:find("[%c%s]") then
+        error("AUTHZ_API_KEY must be 32-256 characters without spaces or control characters")
+    end
+    c.env_api_key = { role = role, loopback_only = loopback_only }
+    api_key.configure_env({ token = token, role = role, loopback_only = loopback_only })
+    ngx.log(ngx.NOTICE, "authz: env API key enabled (role=", role,
+        loopback_only and ", loopback-only)" or ")")
 end
 
 local function configure_session(c)
@@ -101,6 +127,7 @@ function _M.load()
     c.login_fail_delay_ms = math.min(10000, math.max(0,
         tonumber(os.getenv("AUTHZ_LOGIN_FAIL_DELAY_MS")) or 1000))
     configure_session(c)
+    configure_api_key(c)
 
     c.noco_enabled = env_bool("AUTHZ_NOCO_ENABLED", false)
     c.noco_oauth_enabled = env_bool("AUTHZ_NOCO_OAUTH_ENABLED", false)

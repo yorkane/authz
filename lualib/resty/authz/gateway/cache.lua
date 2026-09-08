@@ -89,6 +89,11 @@ function _M.ensure(config)
         local principal, role = api_key.principal(key.id), api_key.valid_role(key.role)
         if principal and role then lines[#lines + 1] = "g, " .. principal .. ", role:" .. role end
     end
+    -- 环境变量 Key（AUTHZ_API_KEY，principal api-key:0）：不在库里，角色线随配置注入。
+    if api_key.env.token ~= "" then
+        local role = api_key.valid_role(api_key.env.role)
+        if role then lines[#lines + 1] = "g, " .. api_key.env_identity .. ", role:" .. role end
+    end
     state.enforcer = casbin.new_enforcer(lines)
     state.bindings = binding_map()
     -- 裸前缀索引：绑定只存前缀（code），resolver 用它匹配

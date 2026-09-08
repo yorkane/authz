@@ -74,6 +74,38 @@ curl -H "x-authz-key: $AUTHZ_AGENT_API_KEY" http://127.0.0.1:6080/_authz/api/ses
 - 该 Key 具备 admin 权限，自动化脚本应只调用任务所需的最小接口集合；
 - 管理界面创建的普通 API Key 不受 loopback 限制，如需限制来源请使用本节方式。
 
+### 2.4 实例级预置 API Key（`x-api-key`，免登录）
+
+设置环境变量 `AUTHZ_API_KEY`（32-256 字符，不含空格与控制字符，例如 `openssl rand -hex 32`）后，
+网关接受用 `x-api-key` 请求头提交的这把 Key，**免登录**直接访问三类入口：
+
+- 控制面 API（`/_authz/api/*`，写接口免 CSRF）；
+- 管理页面与静态资源（`/_authz/apps/*`、`/_authz/files/*`）——Agent 不必再手动登录取 Cookie，
+  Playwright 用 `setExtraHTTPHeaders`、curl 用 `-H` 给每个请求带上该头即可；
+- 代理入口（域名/端口绑定的目标服务）。
+
+```bash
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
+```
+
+配置与语义：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `AUTHZ_API_KEY` | 空 | Key 本体；留空即完全关闭该认证路径 |
+| `AUTHZ_API_KEY_ROLE` | `admin` | 角色（admin/staff/user/viewer/api），权限走同角色 Casbin 策略 |
+| `AUTHZ_API_KEY_LOOPBACK` | `false` | `true` 时只接受本机回环来源，跨机一律 401 |
+
+- 主体固定为 `api-key:0`，上游收到 `X-Authz-Identity: api-key:0`；
+- 不写入数据库，因此不受管理界面的禁用/删除影响；轮换方式是改环境变量并**重建**容器；
+- 网关不签发也不读取会话 Cookie：呈现了 `x-api-key`（或 `x-authz-key`）就只看 Key，
+  Key 无效直接 401，绝不回退到同时携带的浏览器 Cookie；
+- `x-api-key` 与 `x-authz-key` 一样被网关剥离，绝不转发给上游；绑定级「改写请求」也禁止设置该头；
+- 两个头同时呈现时以 `x-authz-key` 为准；
+- 配置非法（Key 过短/含空白、角色不在目录内）时容器**启动即失败**，不会静默降级成未启用；
+- 它是实例级万能钥匙：对外暴露实例时应设 `AUTHZ_API_KEY_LOOPBACK=true`，
+  或用 `AUTHZ_API_KEY_ROLE=viewer` 收窄权限；泄漏等同于管理员凭据泄漏。
+
 ## 3. 权限矩阵
 
 | 接口能力 | 普通用户/Key | `admin` 用户/Key | `api` Key |

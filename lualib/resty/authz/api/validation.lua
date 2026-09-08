@@ -109,6 +109,7 @@ local REQUEST_HEADER_BLOCKED = {
     host = true, cookie = true, origin = true, forwarded = true,
     ["x-authz-user"] = true, ["x-authz-source"] = true, ["x-authz-identity"] = true,
     ["x-authz-key"] = true, ["x-real-ip"] = true,
+    ["x-api-key"] = true,
     ["x-forwarded-for"] = true, ["x-forwarded-host"] = true,
     ["x-forwarded-proto"] = true, ["x-forwarded-port"] = true,
     ["content-length"] = true, ["transfer-encoding"] = true,

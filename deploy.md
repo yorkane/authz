@@ -289,6 +289,11 @@ AUTHZ_SESSION_SIGNING_KEY=                        # 共享记录 HMAC-SHA256 签
 # ══════════════ 响应改写缓冲（可选）══════════════
 AUTHZ_REWRITE_BUFFER_MB=64                        # 正文改写的 worker 级缓冲预算（MB）。单响应上限固定 1MB 并按此整块预留；预算耗尽的新响应跳过改写、原样流式透传（响应头 X-Authz-Rewrite: skipped=memory）。仅影响 body/rewrites，状态码与响应头改写不占预算。
 
+# ══════════════ 实例级预置 API Key（Agent 免登录，可选）══════════════
+AUTHZ_API_KEY=                                    # 留空即关闭。设置后用 `x-api-key: <值>` 免登录访问控制面 API、管理页面与代理入口；32-256 字符（如 openssl rand -hex 32）。不入库，随环境变量轮换；配置非法启动即失败。
+AUTHZ_API_KEY_ROLE=admin                          # 该 Key 的角色（admin/staff/user/viewer/api），权限走同角色 Casbin 策略
+AUTHZ_API_KEY_LOOPBACK=false                      # true 时只接受本机回环来源；对外暴露实例时强烈建议 true
+
 # ══════════════ OAuth：Google（可选）══════════════
 AUTHZ_GOOGLE_ENABLED=false
 AUTHZ_GOOGLE_CLIENT_ID=your-google-client-id

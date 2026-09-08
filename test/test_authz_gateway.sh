@@ -8,6 +8,8 @@ CONTAINER_NAME="authz-gateway-test-$$"
 REDIRECT_CONTAINER_NAME=""
 ORIGIN_CONTAINER_NAME=""
 BUDGET_CONTAINER_NAME=""
+ENVKEY_CONTAINER_NAME=""
+ENVKEY2_CONTAINER_NAME=""
 TMP_DIR=$(mktemp -d)
 PASS=0
 MOCK_PID=""
@@ -63,6 +65,14 @@ cleanup() {
     if [[ -n "$BUDGET_CONTAINER_NAME" ]]; then
         docker exec "$BUDGET_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
         docker rm -f "$BUDGET_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$ENVKEY_CONTAINER_NAME" ]]; then
+        docker exec "$ENVKEY_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+        docker rm -f "$ENVKEY_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$ENVKEY2_CONTAINER_NAME" ]]; then
+        docker exec "$ENVKEY2_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+        docker rm -f "$ENVKEY2_CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
     if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" >/dev/null 2>&1 || true; fi
     if [[ -n "$REMOTE_PID" ]]; then kill "$REMOTE_PID" >/dev/null 2>&1 || true; fi
@@ -2569,5 +2579,178 @@ done
 (( REWRITTEN >= 1 )) || fail "rewrite budget instance never rewrote a response"
 (( SKIPPED >= 1 )) || fail "rewrite budget never degraded a concurrent response"
 pass "concurrent rewrites stay within the worker buffer budget ($REWRITTEN rewritten, $SKIPPED degraded)"
+
+# ── 实例级预置 API Key（AUTHZ_API_KEY + x-api-key 免登录）──────────────
+# 覆盖：控制面/页面/代理三条路径的 Key 放行、角色与来源约束、Key 不外泄、
+# 呈现 Key 时不回退 Cookie、未配置时完全失效、配置错误启动即失败。
+ENVKEY_CONTAINER_NAME="authz-gateway-envkey-test-$$"
+ENVKEY2_CONTAINER_NAME="authz-gateway-envkey2-test-$$"
+ENVKEY_HTTP_PORT=$(free_port)
+ENVKEY_HTTPS_PORT=$(free_port)
+ENVKEY2_HTTP_PORT=$(free_port)
+ENVKEY2_HTTPS_PORT=$(free_port)
+ENVKEY_BAD_PORT=$(free_port)
+ENV_KEY="envkey-instance-test-0123456789abcdef0123456789abcdef"
+ENV_KEY2="envkey2-instance-test-0123456789abcdef0123456789abcdef"
+ENVKEY_HOST=envkey.test.example
+ENVKEY2_HOST=envkey2.test.example
+mkdir -p "$TMP_DIR/envkey-data/authz" "$TMP_DIR/envkey2-data/authz"
+
+run_envkey_container() {
+    local name=$1 port=$2 tls=$3 data=$4 key=$5 loopback=$6 role=$7
+    docker run -d \
+        --name "$name" \
+        --network host \
+        -e NGINX_WORKER_PROCESSES=1 \
+        -e AUTHZ_HTTP_PORT="$port" \
+        -e AUTHZ_HTTPS_PORT="$tls" \
+        -e AUTHZ_HTTP_MODE=serve \
+        -e AUTHZ_ADMIN_PASSWORD=admin123 \
+        -e AUTHZ_PORT_MIN=1000 \
+        -e AUTHZ_PORT_MAX=65535 \
+        -e "AUTHZ_API_KEY=$key" \
+        -e "AUTHZ_API_KEY_LOOPBACK=$loopback" \
+        -e "AUTHZ_API_KEY_ROLE=$role" \
+        -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
+        -v "$data:/data" \
+        -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
+        -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+        -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
+        -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+        "$IMAGE" >/dev/null
+}
+
+# envkey_req METHOD HOST PORT PATH KEY BODY SOURCE_IP
+envkey_req() {
+    local method=$1 host=$2 port=$3 path=$4 key=${5:-} body=${6:-} source_ip=${7:-127.0.0.1}
+    local args=(--silent --show-error --max-time 5 --request "$method"
+        --resolve "$host:$port:$source_ip" --resolve "admin.test.example:$port:$source_ip"
+        -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}')
+    [[ -n "$key" ]] && args+=(-H "x-api-key: $key")
+    [[ -n "$body" ]] && args+=(-H 'Content-Type: application/json' --data "$body")
+    STATUS=$(curl "${args[@]}" "http://$host:$port$path")
+    BODY=$(<"$TMP_DIR/body")
+}
+
+envkey_wait_ready() {
+    local host=$1 port=$2
+    for _ in $(seq 1 80); do
+        STATUS=$(curl -sS --max-time 2 --resolve "$host:$port:127.0.0.1" \
+            -o /dev/null -w '%{http_code}' "http://$host:$port/_authz/api/session" 2>/dev/null || true)
+        [[ "$STATUS" == "401" ]] && return 0
+        sleep 0.25
+    done
+    fail "env API key instance did not become ready (last status $STATUS)"
+}
+
+run_envkey_container "$ENVKEY_CONTAINER_NAME" "$ENVKEY_HTTP_PORT" "$ENVKEY_HTTPS_PORT" \
+    "$TMP_DIR/envkey-data" "$ENV_KEY" false admin
+run_envkey_container "$ENVKEY2_CONTAINER_NAME" "$ENVKEY2_HTTP_PORT" "$ENVKEY2_HTTPS_PORT" \
+    "$TMP_DIR/envkey2-data" "$ENV_KEY2" true viewer
+
+envkey_wait_ready "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT"
+
+envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/api/session
+assert_eq "control plane still needs a credential without x-api-key" "$STATUS" "401"
+
+envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/api/session "$ENV_KEY"
+assert_eq "env API key authenticates the control plane" "$STATUS" "200"
+assert_json "env key session is machine auth" '.data.auth_type' "api_key"
+assert_json "env key session uses the fixed principal" '.data.identity' "api-key:0"
+assert_json "env key session reports its configured role" '.data.roles | join(",")' "admin"
+assert_json "admin-role env key is admin" '.data.admin | tostring' "true"
+assert_not_contains "env key session never echoes the key" "$BODY" "$ENV_KEY"
+
+envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/api/session "wrong-$ENV_KEY"
+assert_eq "wrong env API key is rejected" "$STATUS" "401"
+envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/api/session \
+    "ak_0000000000000000000000000000000000000000000000000000000000000000"
+assert_eq "database key format never satisfies the env key" "$STATUS" "401"
+
+# 免登录管理页面：带 Key 直接出页面与静态资源，不带 Key 依旧跳登录。
+envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/apps/ "$ENV_KEY"
+assert_eq "env API key opens the admin page without a cookie" "$STATUS" "200"
+assert_contains "admin page served to the env key" "$BODY" "app-frame"
+assert_not_contains "admin page never echoes the key" "$BODY" "$ENV_KEY"
+envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" '/_authz/apps/api.js?v=7' "$ENV_KEY"
+assert_eq "env API key loads admin assets" "$STATUS" "200"
+envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/apps/
+assert_eq "admin page without a key still redirects to login" "$STATUS" "302"
+
+# 免 CSRF：Key 即机器身份，写接口直接可用；随后经代理入口验证并确认 Key 不外泄。
+envkey_req POST "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/api/applications "$ENV_KEY" \
+    "{\"domain\":\"envkey.test.example\",\"port\":$UPSTREAM_PORT,\"menu_name\":\"Env key\"}"
+assert_eq "env API key creates a binding without CSRF" "$STATUS" "201"
+envkey_req GET envkey.test.example "$ENVKEY_HTTP_PORT" /identity "$ENV_KEY"
+assert_eq "env API key reaches a proxied service" "$STATUS" "200"
+assert_json "proxy records the env key principal" '.identity' "api-key:0"
+assert_json "raw env key is stripped from upstream" '.api_key == null | tostring' "true"
+envkey_req GET envkey.test.example "$ENVKEY_HTTP_PORT" /identity
+assert_eq "proxied service still requires a credential" "$STATUS" "302"
+
+# 第二个实例：来源与角色双约束（loopback-only + viewer）。
+envkey_wait_ready "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2"
+assert_eq "loopback-only env key works from loopback" "$STATUS" "200"
+assert_json "env key honours AUTHZ_API_KEY_ROLE" '.data.roles | join(",")' "viewer"
+assert_json "viewer-role env key is not admin" '.data.admin | tostring' "false"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/users "$ENV_KEY2"
+assert_eq "viewer-role env key cannot manage users" "$STATUS" "403"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "$REMOTE_IP"
+assert_eq "loopback-only env key is rejected from a remote address" "$STATUS" "401"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/apps/ "$ENV_KEY2" "" "$REMOTE_IP"
+assert_eq "loopback-only env key cannot open admin pages remotely" "$STATUS" "302"
+
+# 呈现 x-api-key 就绝不回退到浏览器 Cookie；未配置 Key 的实例该头完全无效。
+ENVKEY_COOKIE="$TMP_DIR/envkey.cookie"
+ENVKEY_LOGIN_STATUS=$(curl -sS --max-time 5 \
+    --resolve "$ENVKEY_HOST:$ENVKEY_HTTP_PORT:127.0.0.1" \
+    -D "$TMP_DIR/envkey-login-headers" -o /dev/null -w '%{http_code}' \
+    -X POST "http://$ENVKEY_HOST:$ENVKEY_HTTP_PORT/_authz/login" \
+    --data-urlencode 'username=admin' --data-urlencode 'password=admin123')
+assert_eq "env key instance can still issue browser sessions" "$ENVKEY_LOGIN_STATUS" "302"
+save_session_cookie "$TMP_DIR/envkey-login-headers" "$ENVKEY_COOKIE"
+ENVKEY_COOKIE_HEADER=$(cookie_header "$ENVKEY_COOKIE")
+STATUS=$(curl -sS --max-time 5 --resolve "$ENVKEY_HOST:$ENVKEY_HTTP_PORT:127.0.0.1" \
+    -o "$TMP_DIR/body" -w '%{http_code}' -H "Cookie: $ENVKEY_COOKIE_HEADER" \
+    "http://$ENVKEY_HOST:$ENVKEY_HTTP_PORT/_authz/api/session")
+assert_eq "browser session on the env key instance works" "$STATUS" "200"
+STATUS=$(curl -sS --max-time 5 --resolve "$ENVKEY_HOST:$ENVKEY_HTTP_PORT:127.0.0.1" \
+    -o "$TMP_DIR/body" -w '%{http_code}' -H "Cookie: $ENVKEY_COOKIE_HEADER" \
+    -H "x-api-key: wrong-$ENV_KEY" \
+    "http://$ENVKEY_HOST:$ENVKEY_HTTP_PORT/_authz/api/session")
+assert_eq "presented but wrong env key never falls back to a cookie" "$STATUS" "401"
+request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "" "x-api-key: $ENV_KEY"
+assert_eq "x-api-key is inert when AUTHZ_API_KEY is unset" "$STATUS" "401"
+
+# 配置错误必须启动即失败，不能静默降级成「未启用」。
+STARTUP_LOG="$TMP_DIR/envkey-startup.log"
+set +e
+timeout 40 docker run --rm \
+    -e AUTHZ_HTTP_PORT="$ENVKEY_BAD_PORT" \
+    -e AUTHZ_API_KEY=short \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+    "$IMAGE" >"$STARTUP_LOG" 2>&1
+STARTUP_RC=$?
+set -e
+(( STARTUP_RC != 0 )) || fail "too-short AUTHZ_API_KEY started anyway"
+assert_contains "short env API key fails at startup" "$(<"$STARTUP_LOG")" "AUTHZ_API_KEY"
+set +e
+timeout 40 docker run --rm \
+    -e AUTHZ_HTTP_PORT="$ENVKEY_BAD_PORT" \
+    -e "AUTHZ_API_KEY=$ENV_KEY" \
+    -e AUTHZ_API_KEY_ROLE=root \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+    "$IMAGE" >"$STARTUP_LOG" 2>&1
+STARTUP_RC=$?
+set -e
+(( STARTUP_RC != 0 )) || fail "unknown AUTHZ_API_KEY_ROLE started anyway"
+assert_contains "unknown env key role fails at startup" "$(<"$STARTUP_LOG")" "AUTHZ_API_KEY_ROLE"
+
+assert_contains_all "server template strips both credential headers" "$SERVER_TEMPLATE" \
+    'proxy_set_header X-Authz-Key       "";' \
+    'proxy_set_header X-API-Key         "";'
 
 printf '\nAll %d authz gateway checks passed.\n' "$PASS"

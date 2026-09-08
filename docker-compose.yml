@@ -66,6 +66,10 @@ services:
       AUTHZ_LOGIN_FAIL_DELAY_MS: ${AUTHZ_LOGIN_FAIL_DELAY_MS:-1000}
       # Agent 专用 API Key（仅本机可用，角色 admin）；留空不创建
       AUTHZ_AGENT_API_KEY: ${AUTHZ_AGENT_API_KEY:-}
+      # 实例级预置 API Key：`x-api-key` 请求头免登录访问控制面 API / 管理页面 / 代理入口
+      AUTHZ_API_KEY: ${AUTHZ_API_KEY:-}
+      AUTHZ_API_KEY_ROLE: ${AUTHZ_API_KEY_ROLE:-admin}
+      AUTHZ_API_KEY_LOOPBACK: ${AUTHZ_API_KEY_LOOPBACK:-false}
       AUTHZ_NOCO_ENABLED: ${AUTHZ_NOCO_ENABLED:-false}
       AUTHZ_NOCO_URL: ${AUTHZ_NOCO_URL:-}
       AUTHZ_NOCO_ROLE_MAP: ${AUTHZ_NOCO_ROLE_MAP:-root=admin,admin=admin,member=user}

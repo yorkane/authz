@@ -261,9 +261,21 @@ lualib/tracker/
 本仓库自身就是一个 Authz Gateway。Agent（自动化程序）在本机对网关控制面的访问必须遵守以下约定，
 不得为绕过认证而修改代码或数据库。
 
-### 认证方式（三选一，按优先级）
+### 认证方式（四选一，按优先级）
 
-1. **Agent 专用 API Key（推荐）**：环境变量 `AUTHZ_AGENT_API_KEY` 指定一个 `ak_<64 hex>` token，
+1. **实例级预置 API Key（推荐，免登录）**：环境变量 `AUTHZ_API_KEY`（32-256 字符，
+   `openssl rand -hex 32` 即可）设定实例的机器 Key，请求头 `x-api-key: <Key>` 提交。
+   免登录直接覆盖三类入口：控制面 API（免 CSRF 写操作）、管理页面与静态资源
+   （`/_authz/apps/*`，Playwright 用 `setExtraHTTPHeaders` 逐请求附带）、代理入口。
+   主体固定 `api-key:0`，角色由 `AUTHZ_API_KEY_ROLE`（默认 admin）决定并走 Casbin 策略；
+   `AUTHZ_API_KEY_LOOPBACK=true` 时只接受本机回环。不入库、不受管理界面禁用影响，
+   随环境变量轮换；配置非法时容器启动即失败。
+
+   ```bash
+   curl -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/...
+   ```
+
+2. **Agent 专用 API Key**：环境变量 `AUTHZ_AGENT_API_KEY` 指定一个 `ak_<64 hex>` token，
    启动时 seed 为 `agent-default` key（角色 admin、`loopback_only=1`）。使用方式：
 
    ```bash
@@ -273,9 +285,12 @@ lualib/tracker/
    该 key **只能从本机回环地址调用**，非回环来源一律 401。值保存在部署目录（如 `/data/app/.env`），
    不入库、不进 git；轮换时改环境变量并重建容器。
 
-2. **普通 API Key**：管理员通过 `POST /_authz/api/api-keys` 创建，角色决定控制面与代理权限，
+3. **普通 API Key**：管理员通过 `POST /_authz/api/api-keys` 创建，角色决定控制面与代理权限，
    不限来源但无 CSRF 豁免差异（API key 本身免 CSRF）。
-3. **浏览器会话**：人用，修改请求需 `X-CSRF-Token`。Agent 不应使用会话方式，避免 CSRF 与 Cookie 管理。
+4. **浏览器会话**：人用，修改请求需 `X-CSRF-Token`。Agent 不应使用会话方式，避免 CSRF 与 Cookie 管理。
+
+`x-api-key` 与 `x-authz-key` 都是网关凭据头：同时呈现时以 `x-authz-key` 为准；Key 无效直接 401，
+绝不回退到同时携带的 Cookie；两者都被网关剥离，绝不转发上游，绑定级改写请求也禁止设置它们。
 
 ### 控制面路径（全部在 `/_authz` 下）
 
@@ -295,7 +310,7 @@ lualib/tracker/
 - **只走本机**：Agent 必须在网关宿主机上运行，通过 `127.0.0.1:<AUTHZ_HTTP_PORT>` 访问；
   禁止把控制面端口暴露到公网或跨机访问。
 - **请求头**：修改类请求必须带 `Content-Type: application/json`；API key 放在 `x-authz-key`，
-  不用 Cookie、不用 `Authorization: Bearer`。
+  不用 Cookie、不用 `Authorization: Bearer`。实例级 Key 放 `x-api-key`。
 - **响应契约**：成功 `{"data": ...}`，失败 `{"error":{"code","message"}}`，JSON 为 UTF-8。
   状态码语义：401 未认证/Key 无效、403 无权限或 CSRF 失败、404 不存在、409 冲突、422 参数校验失败。
 - **最小权限**：Agent 用 `AUTHZ_AGENT_API_KEY` 时拥有 admin 权限，只应调用其任务所需的最小接口集合；
@@ -313,6 +328,10 @@ lualib/tracker/
 - API Key 认证逻辑在 `lualib/resty/authz/api_key.lua`（含 `loopback_only` 强制），
   种子逻辑在 `lualib/resty/authz/db/seed.lua`；改动后必须在真实实例上同时验证
   “回环可用 + 非回环拒绝”两个方向，并更新 `test/test_authz_gateway.sh`。
+  实例级 Key（`AUTHZ_API_KEY` / `x-api-key`）由 `config.lua` 的 `configure_api_key` 校验并注入
+  `api_key.configure_env`（本模块禁止 require 上层模块，避免 init_by_lua 加载链上的 require 环）；
+  比较必须走 `util.constant_time_equals`，角色线在 `gateway/cache.lua` 以 `api-key:0` 注入 Casbin，
+  页面免登录放行在 `conf/server.conf.template` 的 access 块（`api_key.authorize_request()`）。
 - 新增控制面接口时保持：guard 顺序（会话/API key → admin/roles → CSRF）不变、
   错误结构不变、并同步 `docs/core-api.md` 与本节路径清单。
 
@@ -331,7 +350,7 @@ OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh        # authz
 三个脚本都会占用随机端口并起常驻 mock，**不要并发跑**（会互相污染日志与端口），也不要在脚本里用裸
 `wait` 等待后台请求——常驻 mock 会让 `wait` 永不返回。
 
-最近基线：Router 99、共享会话 29、authz 网关 777。
+最近基线：Router 99、共享会话 29、authz 网关 809（含实例级 API Key `x-api-key` 免登录套件）。
 
 当前回归覆盖 Router/ctxvar、请求体 helper、框架错误处理和 merge 原子性。最近维护基线为
 99 项检查；测试数量会随覆盖增长，应以脚本最终输出为准，包括：

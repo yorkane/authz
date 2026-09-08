@@ -90,6 +90,13 @@ API Key（角色 admin、`loopback_only=1`），只能从网关宿主机本机�
 轮换时更换该环境变量并重建容器。接入约定与硬性要求见 `AGENTS.MD` 的「Authz Gateway 的 API 控制」章节；
 接口明细见 `docs/core-api.md` 2.3 节。
 
+实例级预置 API Key（免登录，`docs/core-api.md` 2.4 节）：`AUTHZ_API_KEY` 设定后用 `x-api-key`
+请求头免登录访问控制面 API、管理页面与代理入口，Agent 不必手动登录取 Cookie。角色由
+`AUTHZ_API_KEY_ROLE`（默认 admin）决定并走 Casbin；`AUTHZ_API_KEY_LOOPBACK=true` 只接受本机回环。
+Key 不入库（不受管理界面禁用影响）、常量时间比较、网关剥离不转发上游、呈现即不回退 Cookie；
+配置非法（过短/含空白/角色非法）启动即报错。它是实例级万能钥匙：公网实例必须
+`AUTHZ_API_KEY_LOOPBACK=true` 或收窄角色，泄漏等同管理员凭据泄漏。
+
 ## 3. 代码职责
 
 | 路径 | 责任 |

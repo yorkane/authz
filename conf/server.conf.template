@@ -21,6 +21,9 @@ location = /_authz/apps/ {
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
+        -- 免登录放行：合法 API Key（x-api-key / x-authz-key）直接取页面与资源，
+        -- 不签发会话 Cookie。Agent 给每个请求带上 x-api-key 即可打开管理页面。
+        if require("resty.authz.api_key").authorize_request() then return end
         local session = require "resty.authz.session"
         local token = session.get_request_token()
         local current = token and session.get(token)
@@ -42,6 +45,9 @@ location = /_authz/apps/index.html {
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
+        -- 免登录放行：合法 API Key（x-api-key / x-authz-key）直接取页面与资源，
+        -- 不签发会话 Cookie。Agent 给每个请求带上 x-api-key 即可打开管理页面。
+        if require("resty.authz.api_key").authorize_request() then return end
         local session = require "resty.authz.session"
         local token = session.get_request_token()
         local current = token and session.get(token)
@@ -71,6 +77,9 @@ location ^~ /_authz/apps/ {
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
+        -- 免登录放行：合法 API Key（x-api-key / x-authz-key）直接取页面与资源，
+        -- 不签发会话 Cookie。Agent 给每个请求带上 x-api-key 即可打开管理页面。
+        if require("resty.authz.api_key").authorize_request() then return end
         local session = require "resty.authz.session"
         local token = session.get_request_token()
         local current = token and session.get(token)
@@ -119,6 +128,9 @@ location ^~ /_authz/files/ {
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
+        -- 免登录放行：合法 API Key（x-api-key / x-authz-key）直接取页面与资源，
+        -- 不签发会话 Cookie。Agent 给每个请求带上 x-api-key 即可打开管理页面。
+        if require("resty.authz.api_key").authorize_request() then return end
         local session = require "resty.authz.session"
         local token = session.get_request_token()
         local current = token and session.get(token)
@@ -165,6 +177,7 @@ location / {
     proxy_set_header X-Authz-Source    $authz_source;
     proxy_set_header X-Authz-Identity  $authz_identity;
     proxy_set_header X-Authz-Key       "";
+    proxy_set_header X-API-Key         "";
     proxy_set_header Cookie            $authz_upstream_cookie;
     proxy_set_header X-Forwarded-Host  $authz_proxy_forwarded_host;
     proxy_set_header Origin            $authz_origin;
@@ -211,6 +224,7 @@ location @authz_proxy_insecure {
     proxy_set_header X-Authz-Source    $authz_source;
     proxy_set_header X-Authz-Identity  $authz_identity;
     proxy_set_header X-Authz-Key       "";
+    proxy_set_header X-API-Key         "";
     proxy_set_header Cookie            $authz_upstream_cookie;
     proxy_set_header X-Forwarded-Host  $authz_proxy_forwarded_host;
     proxy_set_header Origin            $authz_origin;

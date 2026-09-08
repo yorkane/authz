@@ -403,6 +403,9 @@ local REQUEST_BLOCKED = {
     host = true, cookie = true, origin = true, forwarded = true,
     ["x-authz-user"] = true, ["x-authz-source"] = true,
     ["x-authz-identity"] = true, ["x-authz-key"] = true, ["x-real-ip"] = true,
+    -- 网关自身凭据头：改写规则不得把它塞给上游（proxy_set_header 已置空，
+    -- 这里再挡一层，防手工改库绕过校验）。
+    ["x-api-key"] = true,
     ["x-forwarded-for"] = true, ["x-forwarded-host"] = true,
     ["x-forwarded-proto"] = true, ["x-forwarded-port"] = true,
     ["content-length"] = true, ["transfer-encoding"] = true,
