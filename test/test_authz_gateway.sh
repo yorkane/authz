@@ -2597,7 +2597,9 @@ ENVKEY2_HOST=envkey2.test.example
 mkdir -p "$TMP_DIR/envkey-data/authz" "$TMP_DIR/envkey2-data/authz"
 
 run_envkey_container() {
-    local name=$1 port=$2 tls=$3 data=$4 key=$5 loopback=$6 role=$7
+    local name=$1 port=$2 tls=$3 data=$4 key=$5 allowed=$6 role=$7
+    local allowed_env=()
+    [[ -n "$allowed" ]] && allowed_env=(-e "AUTHZ_API_KEY_ALLOWED_IPS=$allowed")
     docker run -d \
         --name "$name" \
         --network host \
@@ -2609,7 +2611,7 @@ run_envkey_container() {
         -e AUTHZ_PORT_MIN=1000 \
         -e AUTHZ_PORT_MAX=65535 \
         -e "AUTHZ_API_KEY=$key" \
-        -e "AUTHZ_API_KEY_LOOPBACK=$loopback" \
+        "${allowed_env[@]}" \
         -e "AUTHZ_API_KEY_ROLE=$role" \
         -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
         -v "$data:/data" \
@@ -2620,12 +2622,15 @@ run_envkey_container() {
         "$IMAGE" >/dev/null
 }
 
-# envkey_req METHOD HOST PORT PATH KEY BODY SOURCE_IP
+# envkey_req METHOD HOST PORT PATH KEY BODY BIND_IP
+# BIND_IP 用 --interface 绑定 curl 的源地址：Linux 任意 127/8 都可 bind，
+# 精确控制网关看到的 remote_addr（--resolve 指定的是目的地址，不能当来源用）。
 envkey_req() {
-    local method=$1 host=$2 port=$3 path=$4 key=${5:-} body=${6:-} source_ip=${7:-127.0.0.1}
+    local method=$1 host=$2 port=$3 path=$4 key=${5:-} body=${6:-} bind_ip=${7:-}
     local args=(--silent --show-error --max-time 5 --request "$method"
-        --resolve "$host:$port:$source_ip" --resolve "admin.test.example:$port:$source_ip"
+        --resolve "$host:$port:127.0.0.1" --resolve "admin.test.example:$port:127.0.0.1"
         -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}')
+    [[ -n "$bind_ip" ]] && args+=(--interface "$bind_ip")
     [[ -n "$key" ]] && args+=(-H "x-api-key: $key")
     [[ -n "$body" ]] && args+=(-H 'Content-Type: application/json' --data "$body")
     STATUS=$(curl "${args[@]}" "http://$host:$port$path")
@@ -2643,10 +2648,13 @@ envkey_wait_ready() {
     fail "env API key instance did not become ready (last status $STATUS)"
 }
 
+# 实例 1：白名单走默认（仅 127.0.0.1），角色 admin。
 run_envkey_container "$ENVKEY_CONTAINER_NAME" "$ENVKEY_HTTP_PORT" "$ENVKEY_HTTPS_PORT" \
-    "$TMP_DIR/envkey-data" "$ENV_KEY" false admin
+    "$TMP_DIR/envkey-data" "$ENV_KEY" "" admin
+# 实例 2：白名单 = 一个 /32 地址 + 一个 CIDR 段（都是 loopback 可 bind 地址，
+# 配合 envkey_req 的 --local-address 精确控制来源），角色 viewer。
 run_envkey_container "$ENVKEY2_CONTAINER_NAME" "$ENVKEY2_HTTP_PORT" "$ENVKEY2_HTTPS_PORT" \
-    "$TMP_DIR/envkey2-data" "$ENV_KEY2" true viewer
+    "$TMP_DIR/envkey2-data" "$ENV_KEY2" "127.0.0.2/32,127.5.0.0/16" viewer
 
 envkey_wait_ready "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT"
 
@@ -2660,6 +2668,8 @@ assert_json "env key session uses the fixed principal" '.data.identity' "api-key
 assert_json "env key session reports its configured role" '.data.roles | join(",")' "admin"
 assert_json "admin-role env key is admin" '.data.admin | tostring' "true"
 assert_not_contains "env key session never echoes the key" "$BODY" "$ENV_KEY"
+envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/api/session "$ENV_KEY" "" "127.0.0.9"
+assert_eq "default allow-list admits only the exact default IP" "$STATUS" "401"
 
 envkey_req GET "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT" /_authz/api/session "wrong-$ENV_KEY"
 assert_eq "wrong env API key is rejected" "$STATUS" "401"
@@ -2688,18 +2698,24 @@ assert_json "raw env key is stripped from upstream" '.api_key == null | tostring
 envkey_req GET envkey.test.example "$ENVKEY_HTTP_PORT" /identity
 assert_eq "proxied service still requires a credential" "$STATUS" "302"
 
-# 第二个实例：来源与角色双约束（loopback-only + viewer）。
+# 第二个实例：来源与角色双约束（显式 IP/CIDR 白名单 + viewer）。
 envkey_wait_ready "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2"
-assert_eq "loopback-only env key works from loopback" "$STATUS" "200"
+assert_eq "source outside every allow-list entry is rejected" "$STATUS" "401"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.0.0.2"
+assert_eq "explicit single-IP allow-list admits that source" "$STATUS" "200"
 assert_json "env key honours AUTHZ_API_KEY_ROLE" '.data.roles | join(",")' "viewer"
 assert_json "viewer-role env key is not admin" '.data.admin | tostring' "false"
-envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/users "$ENV_KEY2"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/users "$ENV_KEY2" "" "127.0.0.2"
 assert_eq "viewer-role env key cannot manage users" "$STATUS" "403"
-envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "$REMOTE_IP"
-assert_eq "loopback-only env key is rejected from a remote address" "$STATUS" "401"
-envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/apps/ "$ENV_KEY2" "" "$REMOTE_IP"
-assert_eq "loopback-only env key cannot open admin pages remotely" "$STATUS" "302"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.5.0.9"
+assert_eq "CIDR allow-list entry admits an in-range source" "$STATUS" "200"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.6.0.9"
+assert_eq "source outside the CIDR range is rejected" "$STATUS" "401"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.0.0.9"
+assert_eq "allow-list without loopback rejects loopback too" "$STATUS" "401"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/apps/ "$ENV_KEY2" "" "127.0.0.2"
+assert_eq "allow-listed source opens the admin page" "$STATUS" "200"
 
 # 呈现 x-api-key 就绝不回退到浏览器 Cookie；未配置 Key 的实例该头完全无效。
 ENVKEY_COOKIE="$TMP_DIR/envkey.cookie"
@@ -2748,6 +2764,30 @@ STARTUP_RC=$?
 set -e
 (( STARTUP_RC != 0 )) || fail "unknown AUTHZ_API_KEY_ROLE started anyway"
 assert_contains "unknown env key role fails at startup" "$(<"$STARTUP_LOG")" "AUTHZ_API_KEY_ROLE"
+set +e
+timeout 40 docker run --rm \
+    -e AUTHZ_HTTP_PORT="$ENVKEY_BAD_PORT" \
+    -e "AUTHZ_API_KEY=$ENV_KEY" \
+    -e "AUTHZ_API_KEY_ALLOWED_IPS=10.0.0.0/33" \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+    "$IMAGE" >"$STARTUP_LOG" 2>&1
+STARTUP_RC=$?
+set -e
+(( STARTUP_RC != 0 )) || fail "invalid AUTHZ_API_KEY_ALLOWED_IPS started anyway"
+assert_contains "invalid allowed-IP CIDR fails at startup" "$(<"$STARTUP_LOG")" "AUTHZ_API_KEY_ALLOWED_IPS"
+set +e
+timeout 40 docker run --rm \
+    -e AUTHZ_HTTP_PORT="$ENVKEY_BAD_PORT" \
+    -e "AUTHZ_API_KEY=$ENV_KEY" \
+    -e AUTHZ_API_KEY_LOOPBACK=true \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+    "$IMAGE" >"$STARTUP_LOG" 2>&1
+STARTUP_RC=$?
+set -e
+(( STARTUP_RC != 0 )) || fail "retired AUTHZ_API_KEY_LOOPBACK started anyway"
+assert_contains "retired loopback switch names the replacement" "$(<"$STARTUP_LOG")" "AUTHZ_API_KEY_ALLOWED_IPS"
 
 assert_contains_all "server template strips both credential headers" "$SERVER_TEMPLATE" \
     'proxy_set_header X-Authz-Key       "";' \

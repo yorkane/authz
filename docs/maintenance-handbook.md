@@ -92,10 +92,13 @@ API Key（角色 admin、`loopback_only=1`），只能从网关宿主机本机�
 
 实例级预置 API Key（免登录，`docs/core-api.md` 2.4 节）：`AUTHZ_API_KEY` 设定后用 `x-api-key`
 请求头免登录访问控制面 API、管理页面与代理入口，Agent 不必手动登录取 Cookie。角色由
-`AUTHZ_API_KEY_ROLE`（默认 admin）决定并走 Casbin；`AUTHZ_API_KEY_LOOPBACK=true` 只接受本机回环。
+`AUTHZ_API_KEY_ROLE`（默认 admin）决定并走 Casbin；来源必须命中 `AUTHZ_API_KEY_ALLOWED_IPS`
+（逗号分隔 IP/CIDR，默认仅 `127.0.0.1`，匹配 TCP remote_addr，XFF 不参与）。
 Key 不入库（不受管理界面禁用影响）、常量时间比较、网关剥离不转发上游、呈现即不回退 Cookie；
-配置非法（过短/含空白/角色非法）启动即报错。它是实例级万能钥匙：公网实例必须
-`AUTHZ_API_KEY_LOOPBACK=true` 或收窄角色，泄漏等同管理员凭据泄漏。
+配置非法（过短/含空白/角色非法/白名单条目非法）启动即报错；旧的
+`AUTHZ_API_KEY_LOOPBACK` 已废弃，出现即报错（用 `127.0.0.0/8` 表达旧语义）。
+它是实例级万能钥匙：默认白名单锁死 127.0.0.1；跨机接入逐条列 IP 或收窄角色，
+泄漏等同管理员凭据泄漏。
 
 ## 3. 代码职责
 

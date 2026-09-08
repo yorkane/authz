@@ -178,4 +178,80 @@ function _M.authority_host(value)
     return authority:match("^([^:]+)")
 end
 
+-- ── IP / CIDR 白名单 ──────────────────────────────────────────────
+-- 条目形式：单个 IP（v4/v6）或 CIDR（10.0.0.0/8、fd00::/64）。
+-- 归一化为 { bytes = 字节序列, bits = 前缀位数, text = 规范文本 }；
+-- 非法条目返回 nil，调用方据此 fail-fast（不允许静默丢弃规则）。
+local function ip_bytes(value)
+    local v4 = parse_ipv4(value)
+    if v4 then return v4 end
+    local v6 = parse_ipv6(value)
+    if not v6 then return nil end
+    local bytes = {}
+    for _, hextet in ipairs(v6) do
+        bytes[#bytes + 1] = math.floor(hextet / 256)
+        bytes[#bytes + 1] = hextet % 256
+    end
+    return bytes
+end
+
+function _M.normalize_cidr(entry)
+    local text = trim(entry)
+    if text == "" or #text > 64 or text:find("[%c ]") then return nil end
+    local address, prefix_text = text:match("^([^/]+)/(%d+)$")
+    address = address or text
+    local bytes = ip_bytes(address)
+    if not bytes then return nil end
+    local total_bits = #bytes * 8
+    local bits = total_bits
+    if prefix_text then
+        bits = tonumber(prefix_text)
+        if not bits or bits < 0 or bits > total_bits then return nil end
+    end
+    return {
+        bytes = bytes,
+        bits = bits,
+        text = _M.normalize_ip(address) .. (prefix_text and ("/" .. tostring(bits)) or ""),
+    }
+end
+
+-- 白名单条目集合：逗号分隔，逐项校验；任一条目非法返回 nil + 原因。
+function _M.normalize_cidr_list(value)
+    local text = trim(value)
+    if text == "" then return nil, "empty list" end
+    local entries = {}
+    for item in text:gmatch("[^,]+") do
+        local entry = _M.normalize_cidr(item)
+        if not entry then return nil, "invalid IP or CIDR: " .. trim(item) end
+        entries[#entries + 1] = entry
+    end
+    if #entries == 0 then return nil, "empty list" end
+    return entries
+end
+
+local function prefix_match(entry_bytes, candidate, limit_bits)
+    for index, expected in ipairs(entry_bytes) do
+        local byte_bits = limit_bits - (index - 1) * 8
+        if byte_bits <= 0 then return true end
+        if byte_bits < 8 then
+            local shift = 2 ^ (8 - byte_bits)
+            return math.floor(candidate[index] / shift) == math.floor(expected / shift)
+        end
+        if candidate[index] ~= expected then return false end
+    end
+    return true
+end
+
+-- 来源 IP 是否落在白名单内（跨族条目不参与匹配，v4 不会命中 v6 规则）。
+function _M.ip_in_list(ip, entries)
+    local bytes = ip_bytes(trim(ip))
+    if not bytes then return false end
+    for _, entry in ipairs(entries or {}) do
+        if #entry.bytes == #bytes and prefix_match(entry.bytes, bytes, entry.bits) then
+            return true
+        end
+    end
+    return false
+end
+
 return _M

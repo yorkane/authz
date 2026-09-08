@@ -268,7 +268,8 @@ lualib/tracker/
    免登录直接覆盖三类入口：控制面 API（免 CSRF 写操作）、管理页面与静态资源
    （`/_authz/apps/*`，Playwright 用 `setExtraHTTPHeaders` 逐请求附带）、代理入口。
    主体固定 `api-key:0`，角色由 `AUTHZ_API_KEY_ROLE`（默认 admin）决定并走 Casbin 策略；
-   `AUTHZ_API_KEY_LOOPBACK=true` 时只接受本机回环。不入库、不受管理界面禁用影响，
+   来源必须命中 `AUTHZ_API_KEY_ALLOWED_IPS`（逗号分隔 IP/CIDR，默认仅 `127.0.0.1`）。
+   不入库、不受管理界面禁用影响，
    随环境变量轮换；配置非法时容器启动即失败。
 
    ```bash

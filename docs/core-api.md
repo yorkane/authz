@@ -94,7 +94,7 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 |---|---|---|
 | `AUTHZ_API_KEY` | 空 | Key 本体；留空即完全关闭该认证路径 |
 | `AUTHZ_API_KEY_ROLE` | `admin` | 角色（admin/staff/user/viewer/api），权限走同角色 Casbin 策略 |
-| `AUTHZ_API_KEY_LOOPBACK` | `false` | `true` 时只接受本机回环来源，跨机一律 401 |
+| `AUTHZ_API_KEY_ALLOWED_IPS` | `127.0.0.1` | 来源白名单：逗号分隔的 IP 或 CIDR（如 `127.0.0.1,10.0.0.0/8`），只有 `remote_addr` 命中者可用 Key |
 
 - 主体固定为 `api-key:0`，上游收到 `X-Authz-Identity: api-key:0`；
 - 不写入数据库，因此不受管理界面的禁用/删除影响；轮换方式是改环境变量并**重建**容器；
@@ -102,9 +102,12 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
   Key 无效直接 401，绝不回退到同时携带的浏览器 Cookie；
 - `x-api-key` 与 `x-authz-key` 一样被网关剥离，绝不转发给上游；绑定级「改写请求」也禁止设置该头；
 - 两个头同时呈现时以 `x-authz-key` 为准；
-- 配置非法（Key 过短/含空白、角色不在目录内）时容器**启动即失败**，不会静默降级成未启用；
-- 它是实例级万能钥匙：对外暴露实例时应设 `AUTHZ_API_KEY_LOOPBACK=true`，
-  或用 `AUTHZ_API_KEY_ROLE=viewer` 收窄权限；泄漏等同于管理员凭据泄漏。
+- 配置非法（Key 过短/含空白、角色不在目录内、白名单条目非法）时容器**启动即失败**，不会静默降级成未启用；
+- 它是实例级万能钥匙：来源边界就是 `AUTHZ_API_KEY_ALLOWED_IPS`，默认只信 `127.0.0.1`；
+  跨机接入时把对端出口 IP 逐个列出（谨慎使用宽 CIDR），并考虑用 `AUTHZ_API_KEY_ROLE=viewer` 收窄；
+  泄漏等同于管理员凭据泄漏；
+- 匹配对象是 TCP `remote_addr`：网关前有反向代理时，代理所在 IP 就是白名单要收的来源；
+  `X-Forwarded-For` 不参与匹配（可伪造）。
 
 ## 3. 权限矩阵
 

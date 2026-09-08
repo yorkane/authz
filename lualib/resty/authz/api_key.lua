@@ -19,14 +19,16 @@ local TOKEN_PATTERN = [[^ak_[0-9a-f]{64}$]]
 local ROLE_SET = { admin = true, staff = true, user = true, viewer = true, api = true }
 
 -- 环境变量 Key 的固定 principal（Casbin g 线用）与运行期配置；token 为空即未启用。
+-- allowed_ips 是来源白名单（target.normalize_cidr_list 的条目集合），config.load() 已保证非空。
 _M.env_identity = "api-key:0"
-_M.env = { token = "", role = "admin", loopback_only = false }
+_M.env = { token = "", role = "admin", allowed_ips = {}, allowed_text = "127.0.0.1" }
 
 function _M.configure_env(options)
     options = options or {}
     _M.env.token = tostring(options.token or "")
     _M.env.role = _M.valid_role(options.role) or "admin"
-    _M.env.loopback_only = options.loopback_only == true
+    _M.env.allowed_ips = options.allowed_ips or {}
+    _M.env.allowed_text = tostring(options.allowed_text or "127.0.0.1")
 end
 
 function _M.valid_role(role)
@@ -85,15 +87,16 @@ function _M.authenticate_request()
     return true, _M.authenticate(token)
 end
 
--- 环境变量 Key（`x-api-key`）：常量时间比较，可选仅回环来源。不查库、不签发
--- 会话 Cookie，因此不受管理界面禁用/删除影响，随容器环境变量轮换。
+-- 环境变量 Key（`x-api-key`）：常量时间比较 + 来源 IP/CIDR 白名单。
+-- 不查库、不签发会话 Cookie，因此不受管理界面禁用/删除影响，随容器环境变量轮换。
 function _M.authenticate_env(token)
     local configured = _M.env.token
     if configured == "" then return nil end
     if type(token) ~= "string" then return nil end
     if not util.constant_time_equals(token, configured) then return nil end
-    if _M.env.loopback_only and not target.is_loopback(ngx.var.remote_addr) then
-        ngx.log(ngx.WARN, "authz: loopback-only env API key rejected from ",
+    -- 白名单为空（配置异常）时 fail-closed：拒绝一切来源。
+    if not target.ip_in_list(ngx.var.remote_addr, _M.env.allowed_ips) then
+        ngx.log(ngx.WARN, "authz: env API key rejected from ",
             tostring(ngx.var.remote_addr))
         return nil
     end
@@ -107,7 +110,7 @@ function _M.authenticate_env(token)
         source = "api-key",
         role = role,
         roles = { role },
-        loopback_only = _M.env.loopback_only,
+        allowed_ips = _M.env.allowed_text,
         identity = _M.env_identity,
         created_at = 0,
         updated_at = 0,

@@ -1,6 +1,7 @@
 local provider_config = require "resty.authz.provider_config"
 local session = require "resty.authz.session"
 local api_key = require "resty.authz.api_key"
+local target = require "resty.authz.target"
 
 local _M = {}
 
@@ -14,11 +15,11 @@ end
 -- 实例级预置 API Key（Agent 免登录入口）：以 `x-api-key` 请求头提交，
 -- 允许直接调用控制面 API、访问管理页面与代理入口，省去手动登录取 Cookie。
 -- 默认 admin 角色（沿用既有 role:admin 策略），可用 AUTHZ_API_KEY_ROLE 收窄；
--- AUTHZ_API_KEY_LOOPBACK=true 时只接受本机回环来源。
+-- 来源限定在 AUTHZ_API_KEY_ALLOWED_IPS 白名单内：逗号分隔的 IP 或 CIDR
+-- （如 127.0.0.1,10.0.0.0/8），默认只允许 127.0.0.1；放开公网来源前必须三思。
 local function configure_api_key(c)
     local token = tostring(os.getenv("AUTHZ_API_KEY") or ""):gsub("^%s+", ""):gsub("%s+$", "")
     local role = tostring(os.getenv("AUTHZ_API_KEY_ROLE") or "admin"):lower()
-    local loopback_only = env_bool("AUTHZ_API_KEY_LOOPBACK", false)
     if token == "" then
         c.env_api_key = nil
         api_key.configure_env({})
@@ -30,10 +31,24 @@ local function configure_api_key(c)
     if #token < 32 or #token > 256 or token:find("[%c%s]") then
         error("AUTHZ_API_KEY must be 32-256 characters without spaces or control characters")
     end
-    c.env_api_key = { role = role, loopback_only = loopback_only }
-    api_key.configure_env({ token = token, role = role, loopback_only = loopback_only })
+    -- 旧开关已被白名单取代：静默忽略会让旧部署悄悄改变来源边界，直接报错逼迁移。
+    local legacy = os.getenv("AUTHZ_API_KEY_LOOPBACK")
+    if legacy ~= nil and legacy ~= "" then
+        error("AUTHZ_API_KEY_LOOPBACK was replaced by AUTHZ_API_KEY_ALLOWED_IPS " ..
+            "(default 127.0.0.1; use 127.0.0.0/8 to keep the old loopback-wide scope)")
+    end
+    local allowed_text = tostring(os.getenv("AUTHZ_API_KEY_ALLOWED_IPS") or "127.0.0.1")
+    local allowed_ips, list_err = target.normalize_cidr_list(allowed_text)
+    if not allowed_ips then
+        error("AUTHZ_API_KEY_ALLOWED_IPS " .. tostring(list_err))
+    end
+    c.env_api_key = { role = role, allowed_ips = allowed_text }
+    api_key.configure_env({
+        token = token, role = role,
+        allowed_ips = allowed_ips, allowed_text = allowed_text,
+    })
     ngx.log(ngx.NOTICE, "authz: env API key enabled (role=", role,
-        loopback_only and ", loopback-only)" or ")")
+        ", allowed from ", allowed_text, ")")
 end
 
 local function configure_session(c)
