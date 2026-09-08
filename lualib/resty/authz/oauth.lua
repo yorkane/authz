@@ -88,7 +88,7 @@ local function mapped_roles(provider, claims)
         for _, role in ipairs(provider.default_roles) do selected[role] = true end
     end
     local roles = {}
-    for _, role in ipairs({ "admin", "staff", "user", "viewer" }) do
+    for _, role in ipairs({ "admin", "staff", "user", "guest" }) do
         if selected[role] then roles[#roles + 1] = role end
     end
     return roles

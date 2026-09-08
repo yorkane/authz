@@ -105,11 +105,13 @@ function saveNginxConf (values) {
   throw new Error('Unsupported nginx conf action')
 }
 
-// API 管理：创建返回一次性明文 token；角色/启停/删除走标准动作。
+// API 管理：创建与轮换都返回一次性明文 token（库里只存摘要，事后不可回看）；
+// 角色/启停/删除走标准动作。
 function saveApiKey (values) {
   const { action, id, ...payload } = values
   if (action === 'create') return mutation('POST', '/api-keys', payload)
   if (action === 'edit') return mutation('PATCH', `/api-keys/${id}`, payload)
+  if (action === 'rotate') return mutation('POST', `/api-keys/${id}/rotate`, payload)
   if (action === 'delete') return mutation('DELETE', `/api-keys/${id}`, payload)
   throw new Error('Unsupported api key action')
 }

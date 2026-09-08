@@ -7,7 +7,7 @@ local LOCAL_ROLES = {
     admin = true,
     staff = true,
     user = true,
-    viewer = true,
+    guest = true,
 }
 
 local DEFAULT_ROLE_MAP = {
@@ -16,7 +16,7 @@ local DEFAULT_ROLE_MAP = {
     staff = "staff",
     member = "user",
     user = "user",
-    viewer = "viewer",
+    viewer = "guest",
 }
 
 local function config()
@@ -76,7 +76,7 @@ local function mapped_roles(remote_roles)
         if mapped then selected[mapped] = true end
     end
     local roles = {}
-    for _, role in ipairs({ "admin", "staff", "user", "viewer" }) do
+    for _, role in ipairs({ "admin", "staff", "user", "guest" }) do
         if selected[role] then roles[#roles + 1] = role end
     end
     return roles

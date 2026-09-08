@@ -7,7 +7,7 @@ local ROLE_SET = {
     admin = true,
     staff = true,
     user = true,
-    viewer = true,
+    guest = true,
 }
 
 function _M.normalize_username(value)
@@ -34,7 +34,7 @@ function _M.save(provider, subject, username, roles)
         if ROLE_SET[role] then selected[role] = true end
     end
     local normalized_roles = {}
-    for _, role in ipairs({ "admin", "staff", "user", "viewer" }) do
+    for _, role in ipairs({ "admin", "staff", "user", "guest" }) do
         if selected[role] then normalized_roles[#normalized_roles + 1] = role end
     end
     if #normalized_roles == 0 then return nil, "roles_unmapped" end

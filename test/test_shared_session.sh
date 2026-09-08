@@ -263,7 +263,7 @@ create_shared_bob() {
         -H "X-CSRF-Token: $SHARED_ADMIN_CSRF" -H 'Content-Type: application/json' \
         -o "$TMP_DIR/body" -w '%{http_code}' \
         -X POST "http://$host:$port/_authz/api/users" \
-        -d '{"username":"sharedbob","password":"bob-secret-1","roles":["viewer"]}'
+        -d '{"username":"sharedbob","password":"bob-secret-1","roles":["guest"]}'
 }
 
 STATUS=$(create_shared_bob "$SHARED_A_HOST" "$SHARED_HTTP_PORT")
@@ -276,7 +276,7 @@ shared_login "$SHARED_A_HOST" "$SHARED_HTTP_PORT" sharedbob bob-secret-1 "$SHARE
 SHARED_BOB_TOKEN=$(cookie_header "$SHARED_BOB_COOKIE" | sed 's/^authz_session=//')
 STATUS=$(shared_session "$SHARED_B_HOST" "$SHARED_B_HTTP_PORT" "$SHARED_BOB_COOKIE")
 assert_eq "writer-created user session is accepted by reader" "$STATUS" "200"
-assert_json "reader derives roles from its own database" '.data.roles | join(",")' "viewer"
+assert_json "reader derives roles from its own database" '.data.roles | join(",")' "guest"
 
 SHARED_BOB_READER_ID=$(curl -sS --max-time 5 \
     --resolve "$SHARED_B_HOST:$SHARED_B_HTTP_PORT:127.0.0.1" \

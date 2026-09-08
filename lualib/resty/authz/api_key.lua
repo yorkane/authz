@@ -18,7 +18,7 @@ local target = require "resty.authz.target"
 local _M = {}
 
 local TOKEN_PATTERN = [[^ak_[0-9a-f]{64}$]]
-local ROLE_SET = { admin = true, staff = true, user = true, viewer = true, guest = true, api = true }
+local ROLE_SET = { admin = true, staff = true, user = true, guest = true, api = true }
 
 -- 环境变量 Key 的固定 principal（Casbin g 线用）与运行期配置；token 为空即未启用。
 -- allowed_ips 是来源白名单（target.normalize_cidr_list 的条目集合），config.load() 已保证非空。

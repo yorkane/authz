@@ -40,7 +40,9 @@ x-role-key: ak_<64 个小写十六进制字符>
 `x-role-key` 是角色 Key 专用头，只接受数据库 Key；`x-api-key` 也接受数据库 Key（并额外接受
 2.4 的实例级 Key）。两个头同时呈现时以 `x-role-key` 为准。
 API Key 的主体是 `api-key:<id>`，创建或修改时可绑定一个固定目录角色：`admin`、`staff`、`user`、
-`viewer`、`guest`、`api`，新建默认为 `guest`（仅可访问 `/_authz/app/guest.html` 诊断页）。
+`guest`、`api`，新建默认为 `guest`（仅可访问 `/_authz/app/guest.html` 诊断页）。
+旧目录里的 `viewer` 已退役，由 `guest` 接管：新建时提交 `viewer` 会被拒绝（422），
+存量数据由迁移 `18:retire_viewer_role_into_guest` 就地改写。
 控制面权限与同角色用户一致，代理权限由对应的 `role:<role>` Casbin 策略决定。
 `role:admin` 和 `role:api` 默认可访问所有已解析代理目标，管理员可用 deny 策略继续收紧。
 
@@ -96,7 +98,7 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AUTHZ_API_KEY` | 空 | Key 本体；留空即完全关闭该认证路径 |
-| `AUTHZ_API_KEY_ROLE` | `admin` | 角色（admin/staff/user/viewer/guest/api），权限走同角色 Casbin 策略 |
+| `AUTHZ_API_KEY_ROLE` | `admin` | 角色（admin/staff/user/guest/api），权限走同角色 Casbin 策略；旧值 `viewer` 在加载期映射为 `guest` 并告警 |
 | `AUTHZ_API_KEY_ALLOWED_IPS` | `127.0.0.1` | 来源白名单：逗号分隔的 IP 或 CIDR（如 `127.0.0.1,10.0.0.0/8`），只有 `remote_addr` 命中者可用 Key |
 
 - 主体固定为 `api-key:0`，上游收到 `X-Authz-Identity: api-key:0`；
@@ -106,7 +108,7 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 - 凭证头被网关剥离，绝不转发给上游；绑定级「改写请求」也禁止设置这些头；
 - 配置非法（Key 过短/含空白、角色不在目录内、白名单条目非法）时容器**启动即失败**，不会静默降级成未启用；
 - 它是实例级万能钥匙：来源边界就是 `AUTHZ_API_KEY_ALLOWED_IPS`，默认只信 `127.0.0.1`；
-  跨机接入时把对端出口 IP 逐个列出（谨慎使用宽 CIDR），并考虑用 `AUTHZ_API_KEY_ROLE=viewer` 收窄；
+  跨机接入时把对端出口 IP 逐个列出（谨慎使用宽 CIDR），并考虑用 `AUTHZ_API_KEY_ROLE=guest` 收窄；
   泄漏等同于管理员凭据泄漏；
 - 匹配对象是 TCP `remote_addr`：网关前有反向代理时，代理所在 IP 就是白名单要收的来源；
   `X-Forwarded-For` 不参与匹配（可伪造）。
@@ -133,6 +135,7 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 
 回显**当次请求**在服务端看到的完整信息，用来自检接入链路（例如确认反向代理是否透传了真实客户端
 地址、上游收到了哪些头）。`guest` 角色的 Key 或登录会话即可访问，`admin` 也可用于核对。
+`guest` 的能力面只有两条：本页面，以及只回显调用者自身的 `GET /api/session`；其余控制面 API、管理页面与文件浏览一律拒绝。
 
 ```bash
 curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.html"
@@ -147,7 +150,7 @@ curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.ht
 - 回显内容是天然反射面：所有字段逐条 HTML 转义，响应 `Cache-Control: no-store`（诊断内容与当次
   请求绑定，缓存等于跨请求泄露）。这些行为在回归里是固定断言，改动前先看测试。
 - 浏览器直接访问且未登录时会跳 `/_authz/login`；呈现了无效 `x-api-key` 则直接 401，不回退 Cookie。
-- guest 拿不到任何控制面 API、管理页面与文件浏览：访问 `/_authz/apps/*` 会被引导到本页而非控制台。
+- guest 拿不到除上述两条以外的任何控制面 API、管理页面与文件浏览：访问 /_authz/apps/* 会被引导到登录页（机器 Key）或本页（浏览器会话）。例外端点由路由上的 self_service 标记显式声明，新增端点默认不在 guest 的能力面内。
 
 ## 4. API Key 管理（`admin` 角色）
 
@@ -164,11 +167,13 @@ curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.ht
 ```
 
 名称为 2–64 位 ASCII 字母、数字、点、下划线或连字符。`role` 可为
-`admin/staff/user/viewer/guest/api`，省略时默认 `guest`（最小权限：只能访问
+`admin/staff/user/guest/api`，省略时默认 `guest`（最小权限：只能访问
 `/_authz/app/guest.html` 请求诊断页，见「Guest 诊断页」一节）。需要调用控制面 API 时，
-再改成 `api`、`viewer` 或 `admin`。
+再改成 `api` 或 `admin`。
 
-创建响应中的 `token` 只出现一次：
+创建响应中的 `token` 只出现一次；同时返回 `token_prefix`（明文前 11 字符，形如 `ak_1a2b3c4d`）
+作为指纹，供列表页识别「这是哪一把」。指纹不是机密，也无法反推出密钥：
+库里除它以外只存 SHA-256 摘要。
 
 ```json
 {
@@ -176,6 +181,7 @@ curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.ht
     "id": 12,
     "name": "deployment-agent",
     "role": "staff",
+    "token_prefix": "ak_1a2b3c4d",
     "enabled": 1,
     "created_at": 1787580000,
     "updated_at": 1787580000,
@@ -184,14 +190,21 @@ curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.ht
 }
 ```
 
-SQLite 只保存 SHA-256 摘要，丢失明文后不能恢复，应删除旧 Key 并创建新 Key。
+SQLite 只保存 SHA-256 摘要，丢失明文后不能恢复。此时有两种收尾方式：
+`POST /api-keys/:id/rotate` 轮换出新密钥（名称与角色不变，旧值当场失效，
+新明文同样只在这一次响应里出现，需要 CSRF），或直接删除旧 Key 再创建新 Key。
+
+### `POST /api-keys/:id/rotate`
+
+轮换密钥。请求体为空，响应与创建同形（含一次性 `token` 与新 `token_prefix`）。
+轮换立即失效旧明文，因此调用方必须在同一变更窗口内更新它持有的 Key。
 
 ### `PATCH /api-keys/:id`
 
 允许字段：
 
 ```json
-{"name":"deployment-agent-2","role":"viewer","enabled":false}
+{"name":"deployment-agent-2","role":"guest","enabled":false}
 ```
 
 角色、名称或启用状态修改后立即作用于控制面与代理授权缓存。

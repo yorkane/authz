@@ -30,12 +30,17 @@ function _M.wrap(handler, options)
                 return error_payload("unauthenticated", "请先登录"), 401
             end
         end
-        -- guest 是最小权限角色：唯一入口是只读诊断页 /_authz/app/guest.html
-        -- （由 resty.authz.guest 自行认证）。这里统一拒绝 guest 调用任何控制面
-        -- API，包括那些默认不要求角色的只读接口（bindings/菜单/文件列表），
-        -- 避免 guest 借它们侦察内部端口、域名与目录。
-        if service.is_guest(current) then
-            return error_payload("forbidden", "guest 角色仅可访问 /_authz/app/guest.html"), 403
+        -- guest 是最小权限角色，能力面只有两条：只读诊断页 /_authz/app/guest.html
+        -- （由 resty.authz.guest 自行认证）与读取「自己」的身份。除此之外一律拒绝，
+        -- 包括那些默认不要求角色的只读接口（bindings/菜单/文件列表），避免 guest
+        -- 借它们侦察内部端口、域名与目录。
+        --
+        -- options.self_service 标出的就是「只回显调用者自身」的端点：它不含任何
+        -- 侦察价值，却是确认身份与在管理界面退出登录的前提，所以浏览器会话与
+        -- guest Key 都放行。写操作（例如注销）另外带 session_only，机器 Key 仍进不去。
+        if not options.self_service and service.is_guest(current) then
+            return error_payload("forbidden",
+                "guest 角色仅可访问 /_authz/app/guest.html 与自身的会话身份"), 403
         end
         if options.admin and not service.is_admin(current) then
             return error_payload("forbidden", "需要管理员权限"), 403

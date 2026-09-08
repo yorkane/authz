@@ -5,8 +5,8 @@ local remote_users = require "resty.authz.repository.remote_users"
 local users = require "resty.authz.repository.users"
 
 local _M = {
-    HUMAN_ROLES = { "admin", "staff", "user", "viewer", "guest" },
-    POLICY_ROLES = { "admin", "staff", "user", "viewer", "guest", "api" },
+    HUMAN_ROLES = { "admin", "staff", "user", "guest" },
+    POLICY_ROLES = { "admin", "staff", "user", "guest", "api" },
     HTTP_METHODS = {
         "*", "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE"
     },

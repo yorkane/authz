@@ -300,6 +300,22 @@ connection.execute("""CREATE TABLE policies(
 connection.execute("""INSERT INTO policies(ptype, v0, v1, v2)
     VALUES ('p', 'legacy_user', '/2999/*', 'GET')
 """)
+# viewer 退役迁移的存量样本（放在 remote_users：users 必须保持为空，
+# 否则 seed 不再创建 admin，后续用例全部登录不进去）
+connection.execute("INSERT INTO remote_users (provider, subject, username, roles, enabled, synced_at)"
+    " VALUES ('legacy', 'viewer-multi', 'legacy_viewer', 'admin,viewer', 1, 1)")
+connection.execute("INSERT INTO remote_users (provider, subject, username, roles, enabled, synced_at)"
+    " VALUES ('legacy', 'viewer-both', 'legacy_both', 'viewer,guest', 1, 1)")
+# g 线：同一用户同时持有 viewer 与 guest，迁移后必须收敛成一条 guest
+connection.execute("INSERT INTO policies(ptype, v0, v1, v2) VALUES"
+    " ('g', 'user:local:legacy_viewer', 'role:viewer', '-'),"
+    " ('g', 'user:local:legacy_viewer', 'role:guest', '-'),"
+    " ('g', 'user:local:legacy_both', 'role:viewer', '-')")
+# p 线：viewer 与 guest 撞 UNIQUE 的一组，外加一组只有 viewer
+connection.execute("INSERT INTO policies(ptype, v0, v1, v2) VALUES"
+    " ('p', 'role:viewer', '/2998/*', 'GET'),"
+    " ('p', 'role:guest', '/2998/*', 'GET'),"
+    " ('p', 'role:viewer', '/2997/*', 'GET')")
 connection.execute("""CREATE TABLE bindings(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain TEXT UNIQUE NOT NULL,
@@ -459,12 +475,42 @@ ac = columns("api_keys")
 schema = connection.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'api_keys'").fetchone()[0]
 policy = connection.execute("""SELECT 1 FROM policies
     WHERE ptype = 'p' AND v0 = 'role:api' AND v1 = '/*' AND v2 = '*'""").fetchone()
-api_valid = ac == {"id", "name", "token_hash", "role", "loopback_only", "enabled", "created_at", "updated_at"}
+api_valid = ac == {"id", "name", "token_hash", "token_prefix", "role", "loopback_only", "enabled", "created_at", "updated_at"}
 print("api_keys=" + ("yes" if api_valid and policy and "CHECK" not in schema.upper() else "no"))
 
 # legacy policy migrated to local identity
 row = connection.execute("SELECT v0 FROM policies WHERE v1 = '/2999/*'").fetchone()
 print("legacy_policy=" + (row[0] if row else "missing"))
+
+# viewer 退役：角色列与策略线都不再残留 viewer，且重复项已收敛。
+# 逗号列表必须逐项比对：fixture 里的用户名就叫 legacy_viewer，
+# 用 LIKE '%viewer%' 会把 user:local:legacy_viewer 误判成残留角色。
+def role_tokens(value):
+    return {token.strip().lower() for token in str(value or '').split(',') if token.strip()}
+
+residual = 0
+for table, column in (("users", "roles"), ("remote_users", "roles"),
+                      ("remote_users", "remote_roles")):
+    for row in connection.execute("SELECT " + column + " FROM " + table).fetchall():
+        if "viewer" in role_tokens(row[0]):
+            residual += 1
+residual += connection.execute("SELECT COUNT(*) FROM api_keys WHERE role = 'viewer'").fetchone()[0]
+for row in connection.execute("SELECT v0, v1, v2 FROM policies").fetchall():
+    if any(str(cell) == 'role:viewer' for cell in row):
+        residual += 1
+viewer_roles = [r[0] for r in connection.execute("SELECT roles FROM remote_users"
+    " WHERE username IN ('legacy_viewer','legacy_both') ORDER BY username").fetchall()]
+policy_counts = connection.execute("SELECT"
+    " (SELECT COUNT(*) FROM policies WHERE ptype = 'g' AND v1 = 'role:guest'"
+    "    AND v0 = 'user:local:legacy_viewer'),"
+    " (SELECT COUNT(*) FROM policies WHERE ptype = 'g' AND v1 = 'role:guest'"
+    "    AND v0 = 'user:local:legacy_both'),"
+    " (SELECT COUNT(*) FROM policies WHERE ptype = 'p' AND v0 = 'role:guest'"
+    "    AND v1 IN ('/2998/*','/2997/*'))").fetchone()
+# legacy_both 字典序在 legacy_viewer 之前，按角色集合比较避免依赖行序
+viewer_valid = (residual == 0 and sorted(viewer_roles) == sorted(["admin,guest", "guest"])
+                and policy_counts == (1, 1, 2))
+print("viewer_retired=" + ("yes" if viewer_valid else "no"))
 
 # ordered migration ledger
 rows = connection.execute(
@@ -481,8 +527,9 @@ assert_eq "local user timestamps migrated and seeded" "$(report_get users)" "yes
 assert_eq "legacy bindings receive safe proxy defaults" "$(report_get bindings)" "yes"
 assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "yes"
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
+assert_eq "retired viewer role folded into guest everywhere" "$(report_get viewer_retired)" "yes"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix"
 
 cookie_header() {
     awk '
@@ -712,7 +759,7 @@ assert_contains_all "menu editor page edits the tree and offers icon configurati
 request GET "$ADMIN_HOST" /_authz/apps/users.html "$ADMIN_COOKIE"
 assert_contains_all "users page has role select, remote rows and timestamps" "$BODY" \
     'multiple use-chips emit-value map-options' \
-    "['admin', 'staff', 'user', 'viewer', 'guest']" \
+    "['admin', 'staff', 'user', 'guest']" \
     "data.remote_users" \
     "restoreRemoteRoles" \
     'v-if="isAdmin" :model-value="props.row.enabled === 1"' \
@@ -852,13 +899,13 @@ request PATCH "$ADMIN_HOST" "/_authz/api/applications/$API_BINDING_ID" "" "" \
     '{"menu_name":"forbidden"}' "$API_KEY_TOKEN"
 assert_eq "API role cannot modify an existing binding" "$STATUS" "403"
 
-request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$API_KEY_ID" "$ADMIN_COOKIE" "$CSRF" '{"role":"viewer"}'
+request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$API_KEY_ID" "$ADMIN_COOKIE" "$CSRF" '{"role":"guest"}'
 assert_eq "admin changes an API key role" "$STATUS" "200"
 request GET agent.test.example / "" "" "" "$API_KEY_TOKEN"
-assert_eq "viewer API key loses api proxy permission immediately" "$STATUS" "403"
+assert_eq "guest-scoped key loses api proxy permission immediately" "$STATUS" "403"
 request POST "$ADMIN_HOST" /_authz/api/applications "" "" \
-    "{\"domain\":\"viewer-denied.test.example\",\"port\":$UPSTREAM_PORT}" "$API_KEY_TOKEN"
-assert_eq "viewer API key cannot create a binding" "$STATUS" "403"
+    "{\"domain\":\"guest-denied.test.example\",\"port\":$UPSTREAM_PORT}" "$API_KEY_TOKEN"
+assert_eq "guest-scoped key cannot create a binding" "$STATUS" "403"
 request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$API_KEY_ID" "$ADMIN_COOKIE" "$CSRF" '{"role":"api"}'
 assert_eq "admin restores the API key role" "$STATUS" "200"
 request GET agent.test.example / "" "" "" "$API_KEY_TOKEN"
@@ -904,7 +951,7 @@ assert_eq "admin API key creates a user without CSRF" "$STATUS" "201"
 request GET "$ADMIN_HOST" /_authz/api/users "" "" "" "$ADMIN_API_KEY_TOKEN"
 API_MANAGED_USER_ID=$(jq -er '.data.users[] | select(.username == "api-managed") | .id' "$TMP_DIR/body")
 request PATCH "$ADMIN_HOST" "/_authz/api/users/$API_MANAGED_USER_ID" "" "" \
-    '{"roles":["viewer"]}' "$ADMIN_API_KEY_TOKEN"
+    '{"roles":["guest"]}' "$ADMIN_API_KEY_TOKEN"
 assert_eq "admin API key updates a user" "$STATUS" "200"
 request PUT "$ADMIN_HOST" "/_authz/api/users/$API_MANAGED_USER_ID/password" "" "" \
     '{"password":"password456"}' "$ADMIN_API_KEY_TOKEN"
@@ -924,28 +971,38 @@ assert_eq "admin API key updates a binding" "$STATUS" "200"
 request GET admin-agent.test.example /identity "" "" "" "$ADMIN_API_KEY_TOKEN"
 assert_eq "admin API key accesses proxy targets through role:admin" "$STATUS" "200"
 request POST "$ADMIN_HOST" /_authz/api/policies "" "" \
-    "{\"ptype\":\"p\",\"v0\":\"role:viewer\",\"v1\":\"/$UPSTREAM_PORT/admin-agent\",\"v2\":\"GET\",\"eft\":\"allow\"}" "$ADMIN_API_KEY_TOKEN"
+    "{\"ptype\":\"p\",\"v0\":\"role:guest\",\"v1\":\"/$UPSTREAM_PORT/admin-agent\",\"v2\":\"GET\",\"eft\":\"allow\"}" "$ADMIN_API_KEY_TOKEN"
 assert_eq "admin API key creates an authorization policy" "$STATUS" "201"
 request GET "$ADMIN_HOST" /_authz/api/authorization "" "" "" "$ADMIN_API_KEY_TOKEN"
 ADMIN_API_POLICY_ID=$(jq -er --arg object "/$UPSTREAM_PORT/admin-agent" \
-    '.data.policies[] | select(.v0 == "role:viewer" and .v1 == $object) | .id' "$TMP_DIR/body")
+    '.data.policies[] | select(.v0 == "role:guest" and .v1 == $object) | .id' "$TMP_DIR/body")
 request DELETE "$ADMIN_HOST" "/_authz/api/policies/$ADMIN_API_POLICY_ID" "" "" "" "$ADMIN_API_KEY_TOKEN"
 assert_eq "admin API key deletes an authorization policy" "$STATUS" "200"
 request DELETE "$ADMIN_HOST" "/_authz/api/applications/$ADMIN_API_BINDING_ID" "" "" "" "$ADMIN_API_KEY_TOKEN"
 assert_eq "admin API key deletes a binding" "$STATUS" "200"
 
 request POST "$ADMIN_HOST" /_authz/api/api-keys "" "" \
-    '{"name":"viewer-agent","role":"viewer"}' "$ADMIN_API_KEY_TOKEN"
+    '{"name":"retired-viewer-agent","role":"viewer"}' "$ADMIN_API_KEY_TOKEN"
+assert_eq "retired viewer role is rejected for new API keys" "$STATUS" "422"
+request POST "$ADMIN_HOST" /_authz/api/api-keys "" "" \
+    '{"name":"guest-agent-key","role":"guest"}' "$ADMIN_API_KEY_TOKEN"
 assert_eq "admin API key creates another role-scoped key" "$STATUS" "201"
 VIEWER_API_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
 VIEWER_API_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
 jq '.data.token = "[REDACTED]"' "$TMP_DIR/body" >"$TMP_DIR/body-redacted"
 mv "$TMP_DIR/body-redacted" "$TMP_DIR/body"
 BODY=$(<"$TMP_DIR/body")
+# guest 的能力面只有两条：诊断页 + 读自己的身份（端点只回显调用者自身）。
 request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$VIEWER_API_KEY_TOKEN"
-assert_json "viewer API key receives viewer role" '.data.roles | join(",")' "viewer"
+assert_eq "guest-scoped key reads its own identity" "$STATUS" "200"
+assert_json "guest-scoped key reports only the guest role" '.data.roles | join(",")' "guest"
+assert_json "guest-scoped key is not admin" '.data.admin | tostring' "false"
+request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$ADMIN_API_KEY_TOKEN"
+assert_json "admin-scoped key still reads its own identity" '.data.roles | join(",")' "admin"
 request GET "$ADMIN_HOST" /_authz/api/users "" "" "" "$VIEWER_API_KEY_TOKEN"
-assert_eq "viewer API key cannot use admin APIs" "$STATUS" "403"
+assert_eq "guest-scoped key cannot use admin APIs" "$STATUS" "403"
+request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$VIEWER_API_KEY_TOKEN"
+assert_eq "guest-scoped key reaches only the diagnostic page" "$STATUS" "200"
 request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$VIEWER_API_KEY_ID" "" "" \
     '{"role":"user"}' "$ADMIN_API_KEY_TOKEN"
 assert_eq "admin API key changes another key role" "$STATUS" "200"
@@ -989,7 +1046,10 @@ assert_not_contains "guest page never echoes the session token" "$BODY" "$(cat "
 request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "" "x-role-key: $GUEST_API_KEY_TOKEN"
 assert_eq "guest key also opens the page through x-role-key" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
-assert_eq "guest key cannot read the control-plane session" "$STATUS" "403"
+assert_eq "guest key reads its own session identity" "$STATUS" "200"
+assert_json "guest key session identifies machine authentication" '.data.auth_type' "api_key"
+request DELETE "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key cannot sign out a browser session" "$STATUS" "403"
 request GET "$ADMIN_HOST" /_authz/api/applications "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "guest key cannot enumerate bindings" "$STATUS" "403"
 request GET "$ADMIN_HOST" /_authz/api/menu-tree "" "" "" "$GUEST_API_KEY_TOKEN"
@@ -1012,7 +1072,14 @@ login "$ADMIN_HOST" guest-browser guest12345 "$TMP_DIR/guest-cookie"
 request GET "$ADMIN_HOST" /_authz/app/guest.html "$TMP_DIR/guest-cookie"
 assert_eq "guest session opens the diagnostic page" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/session "$TMP_DIR/guest-cookie"
-assert_eq "guest session cannot read the control plane" "$STATUS" "403"
+# 唯一的自服务例外：guest 会话可以读到「自己」的身份，管理界面才退得出登录。
+assert_eq "guest session reads its own identity" "$STATUS" "200"
+assert_json "guest session reports only the guest role" '.data.roles | join(",")' "guest"
+GUEST_CSRF=$(jq -er '.data.csrf' "$TMP_DIR/body")
+request GET "$ADMIN_HOST" /_authz/api/applications "$TMP_DIR/guest-cookie"
+assert_eq "guest session cannot enumerate bindings" "$STATUS" "403"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=/" "$TMP_DIR/guest-cookie"
+assert_eq "guest session cannot browse files" "$STATUS" "403"
 request GET "$ADMIN_HOST" /_authz/apps/users.html "$TMP_DIR/guest-cookie"
 assert_eq "guest session is redirected away from admin pages" "$STATUS" "302"
 assert_contains "guest session lands on the diagnostic page" "$(cat "$TMP_DIR/headers")" \
@@ -1021,6 +1088,9 @@ request GET "$ADMIN_HOST" /_authz/apps/ "$TMP_DIR/guest-cookie"
 assert_eq "guest session cannot browse the console shell" "$STATUS" "302"
 request GET "$ADMIN_HOST" /_authz/api/session "$TMP_DIR/guest-cookie" "" "" "ak_invalid"
 assert_eq "guest session never falls back to an invalid API key" "$STATUS" "401"
+# 自服务注销放在最后：需要 CSRF，且注销后旧 Cookie 只剩「无效 Key 不回退」这一种用途。
+request DELETE "$ADMIN_HOST" /_authz/api/session "$TMP_DIR/guest-cookie" "$GUEST_CSRF"
+assert_eq "guest session can sign itself out" "$STATUS" "200"
 
 request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID" "$ADMIN_COOKIE" "$CSRF" '{"role":"api"}'
 assert_eq "admin promotes the guest key to the api role" "$STATUS" "200"
@@ -1028,17 +1098,40 @@ request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "promoted key reaches the control plane immediately" "$STATUS" "200"
 request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID" "$ADMIN_COOKIE" "$CSRF" '{"role":"guest"}'
 assert_eq "admin demotes the key back to guest" "$STATUS" "200"
+# 降级后仍保留 guest 的两项能力（读自身身份 + 诊断页），但控制面立刻关门。
 request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_json "demoted key keeps its own identity" '.data.roles | join(",")' "guest"
+request GET "$ADMIN_HOST" /_authz/api/applications "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "demoted key loses the control plane immediately" "$STATUS" "403"
 request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "demoted key keeps the diagnostic page" "$STATUS" "200"
+# 轮换：库里只存摘要，忘了密钥就只能换新的一把；旧值必须当场失效。
+request POST "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID/rotate" "$ADMIN_COOKIE" ""
+assert_eq "rotating an API key requires CSRF" "$STATUS" "403"
+request POST "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID/rotate" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "admin rotates an API key" "$STATUS" "200"
+GUEST_ROTATED_TOKEN=$(jq -er ".data.token" "$TMP_DIR/body")
+assert_json "rotated key keeps its role" ".data.role" "guest"
+assert_json "rotated key publishes a fingerprint" ".data.token_prefix" "${GUEST_ROTATED_TOKEN:0:11}"
+[[ "$GUEST_ROTATED_TOKEN" =~ ^ak_[a-f0-9]{64}$ ]] || fail "rotated key has an invalid format"
+[[ "$GUEST_ROTATED_TOKEN" != "$GUEST_API_KEY_TOKEN" ]] || fail "rotation reused the previous secret"
+pass "rotated key returns a fresh one-time secret"
+request GET "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE"
+assert_eq "admin lists API keys after rotation" "$STATUS" "200"
+assert_json "rotated fingerprint is visible in the list" "[.data[] | select(.id == $GUEST_API_KEY_ID)][0].token_prefix" "${GUEST_ROTATED_TOKEN:0:11}"
+assert_json "API key list still never exposes a secret" "[.data[] | has(\"token\")] | any | tostring" "false"
+request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "rotated API key invalidates the previous secret" "$STATUS" "401"
+request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_ROTATED_TOKEN"
+assert_eq "rotated secret opens the diagnostic page" "$STATUS" "200"
+GUEST_API_KEY_TOKEN="$GUEST_ROTATED_TOKEN"
 request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "admin deletes the guest key" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "deleted guest key is rejected on the diagnostic page" "$STATUS" "401"
 
 request POST "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE" "$CSRF" \
-    '{"username":"multi-guest","password":"password123","roles":["guest","viewer"]}'
+    '{"username":"multi-guest","password":"password123","roles":["guest","guest"]}'
 assert_eq "users accept the guest role alongside others" "$STATUS" "201"
 unset GUEST_API_KEY_TOKEN
 
@@ -1137,7 +1230,7 @@ request GET "$ADMIN_HOST" /_authz/api/session "$NOCO_OAUTH_COOKIE"
 assert_eq "NocoBase OAuth session API" "$STATUS" "200"
 assert_json "NocoBase OAuth shares source" '.data.source' "nocobase"
 assert_json "NocoBase OAuth username" '.data.username' "remote_user"
-assert_json "NocoBase OAuth uses local default role" '.data.roles | join(",")' "viewer"
+assert_json "NocoBase OAuth uses local default role" '.data.roles | join(",")' "guest"
 
 request GET "$ADMIN_HOST" '/_authz/oauth/start?provider=nocobase&next=/_authz/apps/'
 assert_eq "second NocoBase OAuth start" "$STATUS" "302"
@@ -1202,9 +1295,9 @@ save_session_cookie "$TMP_DIR/headers" "$DINGTALK_COOKIE"
 request GET "$ADMIN_HOST" /_authz/api/session "$DINGTALK_COOKIE"
 assert_json "DingTalk session source" '.data.source' "dingtalk"
 assert_json "DingTalk missing email uses stable username" '.data.username | startswith("dingtalk_") | tostring' "true"
-assert_json "DingTalk default role" '.data.roles | join(",")' "viewer"
+assert_json "DingTalk default role" '.data.roles | join(",")' "guest"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$DINGTALK_COOKIE"
-assert_eq "remote viewer authorization API denied" "$STATUS" "403"
+assert_eq "remote guest authorization API denied" "$STATUS" "403"
 
 request GET "$ADMIN_HOST" '/_authz/oauth/start?provider=wechat&next=/_authz/apps/'
 assert_eq "WeChat start redirects to provider" "$STATUS" "302"
@@ -1227,12 +1320,12 @@ save_session_cookie "$TMP_DIR/headers" "$WECHAT_COOKIE"
 request GET "$ADMIN_HOST" /_authz/api/session "$WECHAT_COOKIE"
 assert_json "WeChat session source" '.data.source' "wechat"
 assert_json "WeChat identity uses stable username" '.data.username | startswith("wechat_") | tostring' "true"
-assert_json "WeChat default role" '.data.roles | join(",")' "viewer"
+assert_json "WeChat default role" '.data.roles | join(",")' "guest"
 
 request GET "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE"
 assert_eq "users API" "$STATUS" "200"
 assert_json "seeded admin user" '.data.users[0].username' "admin"
-assert_json "fixed role catalog" '.data.available_roles | join(",")' "admin,staff,user,viewer,guest"
+assert_json "fixed role catalog" '.data.available_roles | join(",")' "admin,staff,user,guest"
 
 request POST "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE" "" '{"username":"bob","password":"bob123456","roles":"user"}'
 assert_eq "mutation without CSRF" "$STATUS" "403"
@@ -1344,13 +1437,13 @@ assert_json "remote identity exposes record and lifecycle timestamps" '.data.rem
 assert_json "remote management row exposes canonical identity" '.data.remote_users[] | select(.username == "remote_user") | .identity' "user:nocobase:remote_user"
 assert_json "recorded remote roles are exposed" '.data.remote_users[] | select(.username == "remote_user") | .remote_roles' "staff,user"
 assert_json "local management row exposes identity and timestamps" '.data.users[] | select(.username == "bob") | (.identity == "user:local:bob" and .created_at > 0 and .last_login_at > 0 and .updated_at > 0) | tostring' "true"
-request PATCH "$ADMIN_HOST" /_authz/api/remote-users/nocobase "$ADMIN_COOKIE" "$CSRF" '{"subject":"42","roles":["viewer"]}'
+request PATCH "$ADMIN_HOST" /_authz/api/remote-users/nocobase "$ADMIN_COOKIE" "$CSRF" '{"subject":"42","roles":["guest"]}'
 assert_eq "admin overrides remote roles" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/session "$REMOTE_COOKIE"
-assert_json "remote session sees role override immediately" '.data.roles | join(",")' "viewer"
+assert_json "remote session sees role override immediately" '.data.roles | join(",")' "guest"
 login "$ADMIN_HOST" remote@example.test remote123 "$REMOTE_COOKIE" nocobase
 request GET "$ADMIN_HOST" /_authz/api/session "$REMOTE_COOKIE"
-assert_json "remote login preserves local role override" '.data.roles | join(",")' "viewer"
+assert_json "remote login preserves local role override" '.data.roles | join(",")' "guest"
 request GET "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE"
 assert_json "remote override flag is visible" '.data.remote_users[] | select(.username == "remote_user") | .roles_overridden | tostring' "1"
 assert_json "next login refreshes recorded remote roles" '.data.remote_users[] | select(.username == "remote_user") | .remote_roles' "staff,user"
@@ -1379,7 +1472,7 @@ request GET "$ADMIN_HOST" /_authz/api/session "$SHADOW_COOKIE"
 assert_eq "same username from NocoBase gets a session" "$STATUS" "200"
 assert_json "same username keeps remote source" '.data.source' "nocobase"
 assert_json "same username keeps remote canonical identity" '.data.identity' "user:nocobase:bob"
-assert_json "same username keeps source-specific roles" '.data.roles | join(",")' "viewer"
+assert_json "same username keeps source-specific roles" '.data.roles | join(",")' "guest"
 login "$DYNAMIC_HOST" shadow@example.test remote123 "$SHADOW_DYNAMIC_COOKIE" nocobase
 request GET "$DYNAMIC_HOST" / "$SHADOW_DYNAMIC_COOKIE"
 assert_eq "remote same-name identity denied before direct policy" "$STATUS" "403"
@@ -1398,11 +1491,11 @@ assert_eq "delete source-specific user policy" "$STATUS" "200"
 request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:user\",\"v1\":\"$POLICY_OBJECT\",\"v2\":[\"POST\",\"GET\"],\"eft\":\"allow\"}"
 assert_eq "create access policy" "$STATUS" "201"
 CUSTOM_PATH_OBJECT="/$UPSTREAM_PORT/api/*"
-request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:viewer\",\"v1\":\"$CUSTOM_PATH_OBJECT\",\"v2\":[\"GET\"],\"eft\":\"allow\"}"
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:guest\",\"v1\":\"$CUSTOM_PATH_OBJECT\",\"v2\":[\"GET\"],\"eft\":\"allow\"}"
 assert_eq "create access policy with an editable binding path" "$STATUS" "201"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
-assert_json "custom binding path is stored as the final policy object" ".data.policies[] | select(.v0 == \"role:viewer\" and .v1 == \"$CUSTOM_PATH_OBJECT\") | .v1" "$CUSTOM_PATH_OBJECT"
-CUSTOM_PATH_POLICY_ID=$(jq -er --arg object "$CUSTOM_PATH_OBJECT" '.data.policies[] | select(.v0 == "role:viewer" and .v1 == $object) | .id' "$TMP_DIR/body")
+assert_json "custom binding path is stored as the final policy object" ".data.policies[] | select(.v0 == \"role:guest\" and .v1 == \"$CUSTOM_PATH_OBJECT\") | .v1" "$CUSTOM_PATH_OBJECT"
+CUSTOM_PATH_POLICY_ID=$(jq -er --arg object "$CUSTOM_PATH_OBJECT" '.data.policies[] | select(.v0 == "role:guest" and .v1 == $object) | .id' "$TMP_DIR/body")
 request DELETE "$ADMIN_HOST" "/_authz/api/policies/$CUSTOM_PATH_POLICY_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "delete custom binding path policy" "$STATUS" "200"
 request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:user\",\"v1\":\"$POLICY_OBJECT\",\"v2\":[\"GET\",\"BREW\"],\"eft\":\"allow\"}"
@@ -1416,7 +1509,7 @@ assert_eq "authorization API" "$STATUS" "200"
 assert_json "minimum dynamic port clamped" '.data.port_min | tostring' "2000"
 assert_json "local user policy identity option" '.data.policy_users[] | select(.username == "admin" and .source == "local") | .identity' "user:local:admin"
 assert_json "policy role options" '.data.policy_roles | index("user") != null | tostring' "true"
-assert_json "policy role catalog includes service api role" '.data.policy_roles | join(",")' "admin,staff,user,viewer,guest,api"
+assert_json "policy role catalog includes service api role" '.data.policy_roles | join(",")' "admin,staff,user,guest,api"
 assert_json "remote identity is a policy subject" '.data.policy_users[] | select(.username == "remote_user" and .source == "nocobase") | .identity' "user:nocobase:remote_user"
 assert_json "local same-name identity is listed separately" '.data.policy_users[] | select(.username == "bob" and .source == "local") | .identity' "user:local:bob"
 assert_json "remote same-name identity is listed separately" '.data.policy_users[] | select(.username == "bob" and .source == "nocobase") | .identity' "user:nocobase:bob"
@@ -1485,25 +1578,25 @@ assert_json "binding defaults to original upstream path" '.data.bindings[] | sel
 assert_json "existing port policy is associated with its binding" ".data.policies[] | select(.v0 == \"role:user\" and .v1 == \"$POLICY_OBJECT\") | .object_kind" "binding"
 assert_json "associated policy exposes the binding domain" ".data.policies[] | select(.v0 == \"role:user\" and .v1 == \"$POLICY_OBJECT\") | .binding_matches[0].domain" "fixed.test.example"
 assert_json "associated policy exposes the binding target" ".data.policies[] | select(.v0 == \"role:user\" and .v1 == \"$POLICY_OBJECT\") | .binding_matches[0].target_ip" "127.0.0.1"
-request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:viewer\",\"v1\":\"/$REMOTE_PORT/public/*\",\"binding_id\":$APP_ID,\"v2\":\"GET\",\"eft\":\"allow\"}"
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:guest\",\"v1\":\"/$REMOTE_PORT/public/*\",\"binding_id\":$APP_ID,\"v2\":\"GET\",\"eft\":\"allow\"}"
 assert_eq "policy binding and object port mismatch is rejected" "$STATUS" "422"
 BOUND_PATH_OBJECT="/$UPSTREAM_PORT/public/*"
-request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:viewer\",\"v1\":\"$BOUND_PATH_OBJECT\",\"binding_id\":$APP_ID,\"v2\":\"GET\",\"eft\":\"allow\"}"
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:guest\",\"v1\":\"$BOUND_PATH_OBJECT\",\"binding_id\":$APP_ID,\"v2\":\"GET\",\"eft\":\"allow\"}"
 assert_eq "create policy for the selected binding" "$STATUS" "201"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
-assert_json "selected binding policy keeps its path" ".data.policies[] | select(.v0 == \"role:viewer\" and .v1 == \"$BOUND_PATH_OBJECT\") | .object_path" "/public/*"
-assert_json "selected binding policy resolves to one binding" ".data.policies[] | select(.v0 == \"role:viewer\" and .v1 == \"$BOUND_PATH_OBJECT\") | .binding_matches | length | tostring" "1"
-assert_json "selected binding policy exposes target address" ".data.policies[] | select(.v0 == \"role:viewer\" and .v1 == \"$BOUND_PATH_OBJECT\") | .binding_matches[0] | \"\(.target_ip):\(.port)\"" "127.0.0.1:$UPSTREAM_PORT"
-BOUND_PATH_POLICY_ID=$(jq -er --arg object "$BOUND_PATH_OBJECT" '.data.policies[] | select(.v0 == "role:viewer" and .v1 == $object) | .id' "$TMP_DIR/body")
+assert_json "selected binding policy keeps its path" ".data.policies[] | select(.v0 == \"role:guest\" and .v1 == \"$BOUND_PATH_OBJECT\") | .object_path" "/public/*"
+assert_json "selected binding policy resolves to one binding" ".data.policies[] | select(.v0 == \"role:guest\" and .v1 == \"$BOUND_PATH_OBJECT\") | .binding_matches | length | tostring" "1"
+assert_json "selected binding policy exposes target address" ".data.policies[] | select(.v0 == \"role:guest\" and .v1 == \"$BOUND_PATH_OBJECT\") | .binding_matches[0] | \"\(.target_ip):\(.port)\"" "127.0.0.1:$UPSTREAM_PORT"
+BOUND_PATH_POLICY_ID=$(jq -er --arg object "$BOUND_PATH_OBJECT" '.data.policies[] | select(.v0 == "role:guest" and .v1 == $object) | .id' "$TMP_DIR/body")
 UPDATED_BOUND_PATH_OBJECT="/$UPSTREAM_PORT/private/*"
-request PATCH "$ADMIN_HOST" "/_authz/api/policies/$BOUND_PATH_POLICY_ID" "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:viewer\",\"v1\":\"$UPDATED_BOUND_PATH_OBJECT\",\"binding_id\":$APP_ID,\"v2\":[\"PATCH\",\"POST\"],\"eft\":\"deny\"}"
+request PATCH "$ADMIN_HOST" "/_authz/api/policies/$BOUND_PATH_POLICY_ID" "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:guest\",\"v1\":\"$UPDATED_BOUND_PATH_OBJECT\",\"binding_id\":$APP_ID,\"v2\":[\"PATCH\",\"POST\"],\"eft\":\"deny\"}"
 assert_eq "update selected binding policy" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
 assert_json "updated policy stores the new path" ".data.policies[] | select(.id == $BOUND_PATH_POLICY_ID) | .v1" "$UPDATED_BOUND_PATH_OBJECT"
 assert_json "updated policy normalizes methods" ".data.policies[] | select(.id == $BOUND_PATH_POLICY_ID) | .action" "POST,PATCH"
 assert_json "updated policy stores deny effect" ".data.policies[] | select(.id == $BOUND_PATH_POLICY_ID) | .effect" "deny"
 assert_json "updated policy retains binding details" ".data.policies[] | select(.id == $BOUND_PATH_POLICY_ID) | .binding_matches[0].domain" "fixed.test.example"
-request PATCH "$ADMIN_HOST" "/_authz/api/policies/$BOUND_PATH_POLICY_ID" "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:viewer\",\"v1\":\"/$REMOTE_PORT/private/*\",\"binding_id\":$APP_ID,\"v2\":\"GET\",\"eft\":\"allow\"}"
+request PATCH "$ADMIN_HOST" "/_authz/api/policies/$BOUND_PATH_POLICY_ID" "$ADMIN_COOKIE" "$CSRF" "{\"ptype\":\"p\",\"v0\":\"role:guest\",\"v1\":\"/$REMOTE_PORT/private/*\",\"binding_id\":$APP_ID,\"v2\":\"GET\",\"eft\":\"allow\"}"
 assert_eq "policy edit rejects binding and port mismatch" "$STATUS" "422"
 request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
 assert_json "rejected policy edit preserves previous object" ".data.policies[] | select(.id == $BOUND_PATH_POLICY_ID) | .v1" "$UPDATED_BOUND_PATH_OBJECT"
@@ -2786,24 +2879,29 @@ assert_json "raw env key is stripped from upstream" '.api_key == null | tostring
 envkey_req GET envkey.test.example "$ENVKEY_HTTP_PORT" /identity
 assert_eq "proxied service still requires a credential" "$STATUS" "302"
 
-# 第二个实例：来源与角色双约束（显式 IP/CIDR 白名单 + viewer）。
+# 第二个实例：来源与角色双约束（显式 IP/CIDR 白名单 + 退役角色 viewer，
+# 由加载期映射到 guest —— 同时验证旧部署不会因角色退役而启动失败）。
 envkey_wait_ready "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2"
 assert_eq "source outside every allow-list entry is rejected" "$STATUS" "401"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.0.0.2"
 assert_eq "explicit single-IP allow-list admits that source" "$STATUS" "200"
-assert_json "env key honours AUTHZ_API_KEY_ROLE" '.data.roles | join(",")' "viewer"
-assert_json "viewer-role env key is not admin" '.data.admin | tostring' "false"
+assert_json "retired AUTHZ_API_KEY_ROLE=viewer maps to guest" '.data.roles | join(",")' "guest"
+assert_json "guest-role env key is not admin" '.data.admin | tostring' "false"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/users "$ENV_KEY2" "" "127.0.0.2"
-assert_eq "viewer-role env key cannot manage users" "$STATUS" "403"
-envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.5.0.9"
+assert_eq "guest-role env key cannot manage users" "$STATUS" "403"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/app/guest.html "$ENV_KEY2" "" "127.5.0.9"
 assert_eq "CIDR allow-list entry admits an in-range source" "$STATUS" "200"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.6.0.9"
 assert_eq "source outside the CIDR range is rejected" "$STATUS" "401"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.0.0.9"
 assert_eq "allow-list without loopback rejects loopback too" "$STATUS" "401"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/apps/ "$ENV_KEY2" "" "127.0.0.2"
-assert_eq "allow-listed source opens the admin page" "$STATUS" "200"
+assert_eq "guest-role env key never opens the admin console" "$STATUS" "302"
+# 机器 Key 没有会话：与数据库 guest Key 一致，管理入口把它导向登录页，
+# 而不是把控制台渲染出来（诊断页要显式访问 /_authz/app/guest.html）。
+assert_contains "guest-role env key is sent to the login page" "$(cat "$TMP_DIR/headers")" \
+    "Location: /_authz/login"
 
 # 实例级 Key 只认 x-api-key：角色头 x-role-key 仅接受数据库 Key，绝不放行万能 Key。
 ENVKEY_ROLE_STATUS=$(curl -sS --max-time 5 --resolve "$ENVKEY_HOST:$ENVKEY_HTTP_PORT:127.0.0.1" \

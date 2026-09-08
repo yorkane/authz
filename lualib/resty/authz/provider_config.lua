@@ -9,26 +9,32 @@ local function env_bool(name, default)
     return value == "1" or value == "true" or value == "yes" or value == "on"
 end
 
+-- viewer 已退役为 guest：旧环境变量里写 viewer 的部署继续可用，按 guest 处理。
+local function normalize_role(role)
+    role = role:lower()
+    return role == "viewer" and "guest" or role
+end
+
 local function parse_roles(value, default)
-    local allowed = { admin = true, staff = true, user = true, viewer = true }
+    local allowed = { admin = true, staff = true, user = true, guest = true }
     local roles, selected = {}, {}
-    for role in tostring(value or default or "viewer"):gmatch("[^,%s]+") do
-        role = role:lower()
+    for role in tostring(value or default or "guest"):gmatch("[^,%s]+") do
+        role = normalize_role(role)
         if allowed[role] then selected[role] = true end
     end
-    for _, role in ipairs({ "admin", "staff", "user", "viewer" }) do
+    for _, role in ipairs({ "admin", "staff", "user", "guest" }) do
         if selected[role] then roles[#roles + 1] = role end
     end
-    if #roles == 0 then roles[1] = "viewer" end
+    if #roles == 0 then roles[1] = "guest" end
     return roles
 end
 
 local function parse_role_map(value)
-    local allowed = { admin = true, staff = true, user = true, viewer = true }
+    local allowed = { admin = true, staff = true, user = true, guest = true }
     local map = {}
     for entry in tostring(value or ""):gmatch("[^,;]+") do
         local source, target = entry:match("^%s*([%w_.-]+)%s*=%s*([%w_.-]+)%s*$")
-        if source and allowed[target:lower()] then map[source:lower()] = target:lower() end
+        if source and allowed[normalize_role(target)] then map[source:lower()] = normalize_role(target) end
     end
     return map
 end
@@ -68,7 +74,7 @@ function _M.configure(c)
             scope = "openid profile email api", subject_claim = "sub",
             username_claim = "preferred_username", role_claim = "roles",
             role_map = parse_role_map(c.noco_role_map),
-            default_roles = parse_roles(os.getenv("AUTHZ_NOCO_OAUTH_DEFAULT_ROLES"), "viewer"),
+            default_roles = parse_roles(os.getenv("AUTHZ_NOCO_OAUTH_DEFAULT_ROLES"), "guest"),
             require_verified_email = false, use_pkce = true,
             token_auth_method = "client_secret_basic",
         }
@@ -86,7 +92,7 @@ function _M.configure(c)
             redirect_uri = os.getenv("AUTHZ_GOOGLE_REDIRECT_URI") or "",
             scope = "openid email profile", subject_claim = "sub", username_claim = "email",
             role_claim = "roles", role_map = {},
-            default_roles = parse_roles(os.getenv("AUTHZ_GOOGLE_DEFAULT_ROLES"), "viewer"),
+            default_roles = parse_roles(os.getenv("AUTHZ_GOOGLE_DEFAULT_ROLES"), "guest"),
             access_type = "online", prompt = "select_account",
             require_verified_email = true, use_pkce = true,
         }
@@ -107,7 +113,7 @@ function _M.configure(c)
             redirect_uri = os.getenv("AUTHZ_DINGTALK_REDIRECT_URI") or "",
             scope = os.getenv("AUTHZ_DINGTALK_SCOPE") or "openid",
             subject_claim = "unionId", username_claim = "email", role_claim = "roles", role_map = {},
-            default_roles = parse_roles(os.getenv("AUTHZ_DINGTALK_DEFAULT_ROLES"), "viewer"),
+            default_roles = parse_roles(os.getenv("AUTHZ_DINGTALK_DEFAULT_ROLES"), "guest"),
             prompt = "consent", require_verified_email = false, use_pkce = false,
         }
         validate_provider(provider, allow_http)
@@ -126,7 +132,7 @@ function _M.configure(c)
                 "https://api.weixin.qq.com/sns/userinfo",
             redirect_uri = os.getenv("AUTHZ_WECHAT_REDIRECT_URI") or "", scope = "snsapi_login",
             subject_claim = "unionid", username_claim = "email", role_claim = "roles", role_map = {},
-            default_roles = parse_roles(os.getenv("AUTHZ_WECHAT_DEFAULT_ROLES"), "viewer"),
+            default_roles = parse_roles(os.getenv("AUTHZ_WECHAT_DEFAULT_ROLES"), "guest"),
             require_verified_email = false, use_pkce = false,
         }
         validate_provider(provider, allow_http)
@@ -152,7 +158,7 @@ function _M.configure(c)
             username_claim = os.getenv("AUTHZ_OAUTH_USERNAME_CLAIM") or "email",
             role_claim = os.getenv("AUTHZ_OAUTH_ROLE_CLAIM") or "roles",
             role_map = parse_role_map(os.getenv("AUTHZ_OAUTH_ROLE_MAP")),
-            default_roles = parse_roles(os.getenv("AUTHZ_OAUTH_DEFAULT_ROLES"), "viewer"),
+            default_roles = parse_roles(os.getenv("AUTHZ_OAUTH_DEFAULT_ROLES"), "guest"),
             require_verified_email = env_bool("AUTHZ_OAUTH_REQUIRE_VERIFIED_EMAIL", false),
             use_pkce = true,
         }

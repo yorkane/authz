@@ -76,15 +76,21 @@
       <q-card v-if="isAdmin" flat class="surface-card q-mt-lg">
         <q-card-section class="surface-heading">
           <div><div class="surface-title">{{ t.apiTitle }}</div><div class="surface-subtitle">{{ t.apiNote }}</div></div>
-          <q-btn unelevated no-caps icon="mdi-key-plus-outline" :label="t.apiCreate" class="primary-button" @click="openApiKey"></q-btn>
+          <q-btn unelevated no-caps icon="mdi-key-plus" :label="t.apiCreate" class="primary-button" @click="openApiKey"></q-btn>
         </q-card-section>
         <q-separator dark></q-separator>
         <q-table flat dark :rows="apiKeys" :columns="apiKeyColumns" row-key="id" :loading="apiLoading" :rows-per-page-options="[10, 20, 0]" class="linear-table">
+          <template v-slot:body-cell-prefix="props">
+            <q-td :props="props">
+              <span class="code-pill">{{ props.row.token_prefix || '—' }}</span>
+            </q-td>
+          </template>
           <template v-slot:body-cell-role="props"><q-td :props="props"><q-chip dense class="role-chip">{{ props.row.role }}</q-chip></q-td></template>
           <template v-slot:body-cell-enabled="props"><q-td :props="props"><q-toggle :model-value="props.row.enabled === 1" color="teal-4" @update:model-value="toggleApiKey(props.row, $event)"></q-toggle></q-td></template>
           <template v-slot:body-cell-actions="props">
             <q-td :props="props">
               <div class="row-actions">
+                <q-btn flat round dense icon="mdi-rotate-right" @click="rotateApiKey(props.row)"><q-tooltip>{{ t.apiRotateTitle }}</q-tooltip></q-btn>
                 <q-btn flat round dense icon="mdi-pencil-outline" @click="openApiKeyRole(props.row)"><q-tooltip>{{ t.apiRoleTitle }}</q-tooltip></q-btn>
                 <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeApiKey(props.row)"><q-tooltip>{{ t.deleteAction }}</q-tooltip></q-btn>
               </div>
@@ -109,22 +115,22 @@
       <q-dialog v-model="passwordOpen"><q-card class="dialog-card"><q-form @submit="changeMyPassword"><q-card-section><div class="dialog-title">{{ t.myPasswordTitle }}</div><div class="dialog-copy">{{ t.myPasswordCopy }}</div></q-card-section><q-card-section class="dialog-fields"><q-input v-model="passwordForm.oldpw" dark outlined type="password" :label="t.currentPassword" :rules="[required]"></q-input><q-input v-model="passwordForm.newpw" dark outlined type="password" :label="t.newPassword" :rules="[required, validPassword]"></q-input><q-input v-model="passwordForm.newpw_confirm" dark outlined type="password" :label="t.confirmNewPassword" :rules="[required, matchingPassword]"></q-input></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.updatePassword" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
       <q-dialog v-model="apiKeyOpen"><q-card class="dialog-card"><q-form @submit="createApiKey"><q-card-section><div class="dialog-title">{{ t.apiCreateTitle }}</div><div class="dialog-copy">{{ t.apiCreateCopy }}</div></q-card-section><q-card-section class="dialog-fields"><q-input v-model="apiKeyForm.name" dark outlined :label="t.apiName" :rules="[required, validApiKey]"></q-input><q-select v-model="apiKeyForm.role" dark outlined emit-value map-options :options="apiKeyRoleOptions" :label="t.role" :hint="t.apiRoleHint"></q-select></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.apiCreateAction" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
 
-      <q-dialog v-model="apiKeyTokenOpen"><q-card class="dialog-card"><q-card-section><div class="dialog-title">{{ t.apiTokenTitle }}</div><div class="dialog-copy">{{ t.apiTokenCopy }}</div></q-card-section><q-card-section><q-input :model-value="createdToken" dark readonly outlined autogrow class="mono-input"></q-input></q-card-section><q-card-actions align="right"><q-btn flat no-caps icon="mdi-content-copy" :label="t.apiCopy" @click="copyToken"></q-btn><q-btn unelevated no-caps :label="t.save" class="primary-button" v-close-popup></q-btn></q-card-actions></q-card></q-dialog>
+      <q-dialog v-model="apiKeyTokenOpen"><q-card class="dialog-card"><q-card-section><div class="dialog-title">{{ tokenMode === 'rotate' ? t.apiRotateTokenTitle : t.apiTokenTitle }}</div><div class="dialog-copy">{{ t.apiTokenCopy }}</div></q-card-section><q-card-section><q-input :model-value="createdToken" dark readonly outlined autogrow class="mono-input"></q-input></q-card-section><q-card-actions align="right"><q-btn flat no-caps icon="mdi-content-copy" :label="t.apiCopy" @click="copyToken"></q-btn><q-btn unelevated no-caps :label="t.save" class="primary-button" v-close-popup></q-btn></q-card-actions></q-card></q-dialog>
 
       <q-dialog v-model="apiKeyRoleOpen"><q-card class="dialog-card"><q-form @submit="saveApiKeyRole"><q-card-section><div class="dialog-title">{{ t.apiRoleTitle }}</div><div class="dialog-copy">{{ selectedApiKey?.name }}</div></q-card-section><q-card-section><q-select v-model="apiKeyRoleValue" dark outlined emit-value map-options :options="apiKeyRoleOptions" :label="t.role" :hint="t.apiRoleHint"></q-select></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.save" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
 
     </main>
   </div>
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./api.js?v=17"></script>
-  <script src="./i18n.js?v=36"></script>
+  <script src="./api.js?v=18"></script>
+  <script src="./i18n.js?v=37"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
     
     const app = createApp({
       setup () {
       const users = ref([])
-      const availableRoles = ref(['admin', 'staff', 'user', 'viewer', 'guest'])
+      const availableRoles = ref(['admin', 'staff', 'user', 'guest'])
       const locale = ref(window.adminI18n.getLocale())
       const t = computed(() => window.adminI18n.messages[locale.value].users)
       let unsubscribeLocale
@@ -152,6 +158,8 @@
         const apiKeyTokenOpen = ref(false)
         const apiKeyRoleOpen = ref(false)
         const createdToken = ref('')
+        // 一次性密钥面板是「新建」还是「轮换」出来的，只影响标题文案。
+        const tokenMode = ref('create')
         const selectedApiKey = ref(null)
         const apiKeyRoleValue = ref('guest')
         const apiKeyForm = reactive({ name: '', role: 'guest' })
@@ -169,6 +177,8 @@
 
       const apiKeyColumns = computed(() => [
         { name: 'name', label: t.value.apiName, field: 'name', align: 'left', sortable: true },
+        // 指纹：明文只在创建/轮换那一刻出现一次，之后靠它认出「这是哪一把」。
+        { name: 'prefix', label: t.value.apiPrefix, field: 'token_prefix', align: 'left', sortable: true },
         { name: 'role', label: t.value.role, field: 'role', align: 'left', sortable: true },
         { name: 'enabled', label: t.value.status, field: 'enabled', align: 'left', sortable: true },
         { name: 'created_at', label: t.value.createdAt, field: 'created_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
@@ -253,7 +263,7 @@
             const localUsers = (data.users || []).map(user => ({ ...user, source: user.source || 'local', _key: user.identity || `local:${user.id}` }))
             const remoteUsers = (data.remote_users || []).map(user => ({ ...user, source: user.source || user.provider, _key: user.identity || `${user.provider}:${user.subject}` }))
             users.value = [...localUsers, ...remoteUsers]
-            availableRoles.value = data.available_roles || ['admin', 'staff', 'user', 'viewer', 'guest']
+            availableRoles.value = data.available_roles || ['admin', 'staff', 'user', 'guest']
             csrf.value = data.csrf || ''
             isAdmin.value = Boolean(data.admin)
             currentSource.value = data.source || 'local'
@@ -366,8 +376,31 @@
           }, t.value.apiCreated)
           if (ok) {
             apiKeyOpen.value = false
+            tokenMode.value = 'create'
             apiKeyTokenOpen.value = true
           }
+        }
+
+        // 轮换：旧密钥当场失效，新明文同样只展示这一次。二次确认避免误点把
+        // 正在使用的 Agent 直接打断。
+        function rotateApiKey (key) {
+          Quasar.Dialog.create({
+            title: t.value.apiRotateTitle,
+            message: `${key.name} · ${t.value.apiRotateConfirm}`,
+            cancel: true,
+            persistent: true,
+            ok: { label: t.value.apiRotateAction, color: 'negative', flat: true }
+          })
+            .onOk(async () => {
+              const ok = await mutate(async () => {
+                const rotated = await window.adminApi.saveApiKey({ _csrf: csrf.value, action: 'rotate', id: key.id })
+                createdToken.value = rotated?.token || ''
+              }, t.value.apiRotated)
+              if (ok) {
+                tokenMode.value = 'rotate'
+                apiKeyTokenOpen.value = true
+              }
+            })
         }
 
         async function copyToken () {
@@ -421,7 +454,7 @@
 
       onBeforeUnmount(() => unsubscribeLocale?.())
     
-      return { apiKeyColumns, apiKeyForm, apiKeyOpen, apiKeyRoleOpen, apiKeyRoleOptions, apiKeyRoleValue, apiKeys, apiLoading, canChangePassword, changeMyPassword, columns, copyToken, createApiKey, createForm, createOpen, createUser, createdToken, enabledCount, error, filter, isAdmin, listNote, listTitle, load, loading, matchingPassword, openApiKey, openApiKeyRole, openReset, openRoles, passwordForm, passwordOpen, removeApiKey, removeUser, required, resetOpen, resetPassword, resetValue, restoreRemoteRoles, roleCount, roleList, roleOptions, rolesOpen, rolesValue, saveApiKeyRole, saveRoles, saving, selectedApiKey, selectedUser, sourceLabel, t, toggleApiKey, toggleUser, users, validApiKey, validPassword, validRoles, validUsername }
+      return { apiKeyColumns, apiKeyForm, apiKeyOpen, apiKeyRoleOpen, apiKeyRoleOptions, apiKeyRoleValue, apiKeys, apiLoading, canChangePassword, changeMyPassword, columns, copyToken, createApiKey, createForm, createOpen, createUser, createdToken, enabledCount, error, filter, isAdmin, listNote, listTitle, load, loading, matchingPassword, openApiKey, openApiKeyRole, openReset, openRoles, passwordForm, passwordOpen, removeApiKey, removeUser, required, resetOpen, resetPassword, resetValue, restoreRemoteRoles, roleCount, roleList, roleOptions, rolesOpen, rolesValue, rotateApiKey, saveApiKeyRole, saveRoles, saving, selectedApiKey, selectedUser, sourceLabel, t, tokenMode, toggleApiKey, toggleUser, users, validApiKey, validPassword, validRoles, validUsername }
       }
     })
     

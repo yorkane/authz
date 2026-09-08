@@ -17,7 +17,7 @@ Authz Gateway 可把 NocoBase 作为可选的远程身份源。NocoBase 只负�
 4. 登录成功后只在内存中使用 NocoBase JWT 调用 `GET /api/auth:check`，读取
    `data.username`、`data.id` 和 `data.roles[].name`。
 5. 远程角色按 `AUTHZ_NOCO_ROLE_MAP` 映射到本地固定角色
-   `admin/staff/user/viewer`；未知角色忽略，无任何映射时拒绝登录。
+   `admin/staff/user/guest`；未知角色忽略，无任何映射时拒绝登录。
 6. OpenResty 写入不含密码和 JWT 的 `remote_users` 快照，并签发自己的
    `authz_session` 服务端会话。
 7. 管理员可在“用户与角色”覆盖远程账号的有效角色；成功登录只刷新 `remote_roles` 远端记录，
@@ -45,7 +45,7 @@ user:google:kate@example.com
 - 管理页的用户选择项同时显示用户名与来源，策略库存储规范身份键。
 - 只有 `admin` 可以读取用户列表、应用绑定和 Casbin 策略；其他角色的管理首页只显示当前会话身份与角色。
 - 旧版裸用户名策略在数据库初始化时迁移为 `user:local:<username>`。
-- 角色主体仍使用 `role:admin`、`role:staff`、`role:user`、`role:viewer`。
+- 角色主体仍使用 `role:admin`、`role:staff`、`role:user`、`role:guest`。
 - 远程用户不能在本地修改密码，必须回对应身份源修改。
 - 本地与远程用户的认证状态都只有“启用/未启用”；管理员设为未启用后会立即撤销该身份的现有会话，后续登录记录不会自动重新启用。
 - 只有管理员主动删除用户快照时才清除本机状态、会话和该身份的直接授权；远程身份再次认证后会作为新快照重新创建并默认启用。
@@ -57,7 +57,7 @@ AUTHZ_NOCO_ENABLED=true
 AUTHZ_NOCO_URL=https://noco.example.com
 
 # source=target，多个映射用逗号分隔；目标只能是本地四个角色。
-AUTHZ_NOCO_ROLE_MAP=root=admin,admin=admin,staff=staff,member=user,user=user,viewer=viewer
+AUTHZ_NOCO_ROLE_MAP=root=admin,admin=admin,staff=staff,member=user,user=user,viewer=guest
 
 AUTHZ_NOCO_CONNECT_TIMEOUT_MS=3000
 AUTHZ_NOCO_SEND_TIMEOUT_MS=5000
@@ -109,7 +109,7 @@ AUTHZ_NOCO_OAUTH_TITLE=NocoBase
 AUTHZ_NOCO_OAUTH_CLIENT_ID=openresty-authz-xxxxxxxxxxxx
 AUTHZ_NOCO_OAUTH_CLIENT_SECRET=client-secret
 AUTHZ_NOCO_OAUTH_REDIRECT_URI=https://gateway.example.com/_authz/oauth/callback
-AUTHZ_NOCO_OAUTH_DEFAULT_ROLES=viewer
+AUTHZ_NOCO_OAUTH_DEFAULT_ROLES=guest
 ```
 
 OAuth 与密码登录都使用 `user:nocobase:<username>` 身份键。网关使用 OAuth access token 调用
@@ -132,7 +132,7 @@ AUTHZ_GOOGLE_ENABLED=true
 AUTHZ_GOOGLE_CLIENT_ID=example.apps.googleusercontent.com
 AUTHZ_GOOGLE_CLIENT_SECRET=replace-me
 AUTHZ_GOOGLE_REDIRECT_URI=https://gateway.example.com/_authz/oauth/callback
-AUTHZ_GOOGLE_DEFAULT_ROLES=viewer
+AUTHZ_GOOGLE_DEFAULT_ROLES=guest
 ```
 
 以当前网关入口为例，Google Cloud Console 的 **Authorized redirect URIs** 应填写：
@@ -159,7 +159,7 @@ AUTHZ_DINGTALK_ENABLED=true
 AUTHZ_DINGTALK_CLIENT_ID=dingxxxxxxxx
 AUTHZ_DINGTALK_CLIENT_SECRET=replace-me
 AUTHZ_DINGTALK_REDIRECT_URI=https://gateway.example.com/_authz/oauth/callback
-AUTHZ_DINGTALK_DEFAULT_ROLES=viewer
+AUTHZ_DINGTALK_DEFAULT_ROLES=guest
 ```
 
 若钉钉没有返回个人邮箱，网关使用 `unionId` 的不可逆摘要生成稳定本地用户名；真实
@@ -175,7 +175,7 @@ AUTHZ_WECHAT_ENABLED=true
 AUTHZ_WECHAT_APP_ID=wx1234567890
 AUTHZ_WECHAT_APP_SECRET=replace-me
 AUTHZ_WECHAT_REDIRECT_URI=https://gateway.example.com/_authz/oauth/callback
-AUTHZ_WECHAT_DEFAULT_ROLES=viewer
+AUTHZ_WECHAT_DEFAULT_ROLES=guest
 ```
 
 网关使用 `snsapi_login`、`qrconnect`、`sns/oauth2/access_token` 和 `sns/userinfo`；用户名由
@@ -198,8 +198,8 @@ AUTHZ_OAUTH_SCOPE=openid email profile
 AUTHZ_OAUTH_SUBJECT_CLAIM=sub
 AUTHZ_OAUTH_USERNAME_CLAIM=email
 AUTHZ_OAUTH_ROLE_CLAIM=roles
-AUTHZ_OAUTH_ROLE_MAP=admins=admin,employees=staff,members=user,guests=viewer
-AUTHZ_OAUTH_DEFAULT_ROLES=viewer
+AUTHZ_OAUTH_ROLE_MAP=admins=admin,employees=staff,members=user,guests=guest
+AUTHZ_OAUTH_DEFAULT_ROLES=guest
 AUTHZ_OAUTH_REQUIRE_VERIFIED_EMAIL=false
 ```
 

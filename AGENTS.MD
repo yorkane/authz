@@ -356,9 +356,12 @@ OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh        # authz
 三个脚本都会占用随机端口并起常驻 mock，**不要并发跑**（会互相污染日志与端口），也不要在脚本里用裸
 `wait` 等待后台请求——常驻 mock 会让 `wait` 永不返回。
 
-最近基线：Router 99、共享会话 29、authz 网关 858（含实例级 API Key x-api-key 免登录、IP/CIDR 白名单、
-以及 guest 角色与 `/_authz/app/guest.html` 诊断页套件：默认角色、控制面/管理页/文件浏览全拒、
-回显转义与凭据脱敏、角色升降即时生效）。
+最近基线：Router 99、共享会话 29、authz 网关 882（含实例级 API Key x-api-key 免登录、IP/CIDR 白名单、
+以及 guest 角色与 `/_authz/app/guest.html` 诊断页套件：默认角色 guest、诊断页 + 只回显自身的
+`GET /api/session` 之外的控制面/管理页/文件浏览全拒、回显转义与凭据脱敏、角色升降即时生效、
+密钥指纹 `token_prefix` 与 `POST /api/api-keys/:id/rotate` 轮换（旧明文当场失效）。
+viewer 角色已退役（迁移 18 把存量 viewer 就地改写为 guest，旧配置里的 `viewer` 值在加载期映射为
+guest 并告警，新建时提交 `viewer` 返回 422）。
 
 当前回归覆盖 Router/ctxvar、请求体 helper、框架错误处理和 merge 原子性。最近维护基线为
 99 项检查；测试数量会随覆盖增长，应以脚本最终输出为准，包括：

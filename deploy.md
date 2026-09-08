@@ -291,7 +291,7 @@ AUTHZ_REWRITE_BUFFER_MB=64                        # 正文改写的 worker 级�
 
 # ══════════════ 实例级预置 API Key（Agent 免登录，可选）══════════════
 AUTHZ_API_KEY=                                    # 留空即关闭。设置后用 `x-api-key: <值>` 免登录访问控制面 API、管理页面与代理入口；32-256 字符（如 openssl rand -hex 32）。不入库，随环境变量轮换；配置非法启动即失败。
-AUTHZ_API_KEY_ROLE=admin                          # 该 Key 的角色（admin/staff/user/viewer/guest/api），权限走同角色 Casbin 策略
+AUTHZ_API_KEY_ROLE=admin                          # 该 Key 的角色（admin/staff/user/guest/api）；旧值 viewer 由加载期映射为 guest，权限走同角色 Casbin 策略
 AUTHZ_API_KEY_ALLOWED_IPS=127.0.0.1               # 来源白名单：逗号分隔的 IP 或 CIDR（如 127.0.0.1,10.0.0.0/8），匹配 TCP remote_addr（XFF 不参与）。默认只信 127.0.0.1；跨机接入显式加对端 IP
 
 # ══════════════ OAuth：Google（可选）══════════════
@@ -299,26 +299,26 @@ AUTHZ_GOOGLE_ENABLED=false
 AUTHZ_GOOGLE_CLIENT_ID=your-google-client-id
 AUTHZ_GOOGLE_CLIENT_SECRET=your-google-client-secret
 AUTHZ_GOOGLE_REDIRECT_URI=https://gateway.example.com/_authz/oauth/callback
-AUTHZ_GOOGLE_DEFAULT_ROLES=viewer                 # 首次登录默认角色：admin,staff,user,viewer 组合（逗号分隔）
+AUTHZ_GOOGLE_DEFAULT_ROLES=guest                 # 首次登录默认角色：admin,staff,user,guest 组合（逗号分隔）
 
 # ══════════════ OAuth：钉钉（可选）══════════════
 AUTHZ_DINGTALK_ENABLED=false
 AUTHZ_DINGTALK_CLIENT_ID=your-dingtalk-client-id
 AUTHZ_DINGTALK_CLIENT_SECRET=your-dingtalk-client-secret
 AUTHZ_DINGTALK_REDIRECT_URI=https://gateway.example.com/_authz/oauth/callback
-AUTHZ_DINGTALK_DEFAULT_ROLES=viewer
+AUTHZ_DINGTALK_DEFAULT_ROLES=guest
 
 # ══════════════ OAuth：微信（可选）══════════════
 AUTHZ_WECHAT_ENABLED=false
 AUTHZ_WECHAT_APP_ID=your-wechat-app-id
 AUTHZ_WECHAT_APP_SECRET=your-wechat-app-secret
 AUTHZ_WECHAT_REDIRECT_URI=https://gateway.example.com/_authz/oauth/callback
-AUTHZ_WECHAT_DEFAULT_ROLES=viewer
+AUTHZ_WECHAT_DEFAULT_ROLES=guest
 
 # ══════════════ NocoBase 密码登录源（可选）══════════════
 AUTHZ_NOCO_ENABLED=false                          # 允许在登录表单选择 NocoBase 账号密码；AUTHZ_NOCO_URL 必须 https
 AUTHZ_NOCO_URL=https://your-nocobase.example/
-AUTHZ_NOCO_ROLE_MAP=root=admin,admin=admin,staff=staff,member=user,user=user,viewer=viewer
+AUTHZ_NOCO_ROLE_MAP=root=admin,admin=admin,staff=staff,member=user,user=user,viewer=guest
 AUTHZ_NOCO_CONNECT_TIMEOUT_MS=3000
 AUTHZ_NOCO_SEND_TIMEOUT_MS=5000
 AUTHZ_NOCO_READ_TIMEOUT_MS=5000
@@ -330,7 +330,7 @@ AUTHZ_NOCO_OAUTH_ENABLED=false
 AUTHZ_NOCO_OAUTH_CLIENT_ID=your-nocobase-client-id
 AUTHZ_NOCO_OAUTH_CLIENT_SECRET=your-nocobase-client-secret
 AUTHZ_NOCO_OAUTH_REDIRECT_URI=https://gateway.example.com/_authz/oauth/callback
-AUTHZ_NOCO_OAUTH_DEFAULT_ROLES=viewer
+AUTHZ_NOCO_OAUTH_DEFAULT_ROLES=guest
 
 # ══════════════ 通用 OAuth/OIDC Provider（可选）══════════════
 AUTHZ_OAUTH_ENABLED=false
@@ -347,7 +347,7 @@ AUTHZ_OAUTH_SUBJECT_CLAIM=sub                     # 唯一身份 claim（默认 
 AUTHZ_OAUTH_USERNAME_CLAIM=email                  # 用户名 claim（默认 email，回退 preferred_username）
 AUTHZ_OAUTH_ROLE_CLAIM=roles                      # 角色 claim（逗号分隔或数组）
 AUTHZ_OAUTH_ROLE_MAP=                             # 源角色→本地角色映射，如 employees=staff
-AUTHZ_OAUTH_DEFAULT_ROLES=viewer
+AUTHZ_OAUTH_DEFAULT_ROLES=guest
 AUTHZ_OAUTH_REQUIRE_VERIFIED_EMAIL=false
 AUTHZ_OAUTH_STATE_TTL=600                         # 授权 state 有效期秒数（>=60）
 

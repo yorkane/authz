@@ -26,7 +26,7 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
 - 登录、OAuth 与管理 API 统一收敛到 `/_authz/*` 下的单一 router；管理 API 位于 `/_authz/api/*`。
 - API 使用一个模块级 `klib.router("/_api_")`；路由代码注册，禁止请求期注册或数据库动态路由。
 - 身份键固定为 `user:<source>:<username>`；同名不同来源必须完全隔离。
-- 本地角色目录固定为 `admin/staff/user/viewer`，默认拒绝，只有 admin 默认拥有 `/*`。
+- 本地角色目录固定为 `admin/staff/user/guest`，默认拒绝，只有 admin 默认拥有 `/*`。
 - 管理写操作必须经过 service 并 bump cache revision；不要绕过 API 直接改库作为功能实现。
 - `lualib/resty/authz/db.lua` 是 SQLite 数据层，查询必须使用 vendored `resty.mlcache`；成功 `exec()`
   必须 bump `authz_cache:db_rev`，查询键必须包含 revision，保证多 worker 写后读到新数据。

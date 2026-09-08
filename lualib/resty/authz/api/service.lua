@@ -38,6 +38,7 @@ local _M = {
 
     create_api_key = api_keys.create,
     update_api_key = api_keys.update,
+    rotate_api_key = api_keys.rotate,
     delete_api_key = api_keys.delete,
 
     create_policy = policies.create,

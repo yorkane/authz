@@ -182,14 +182,15 @@ user:dingtalk:kate
 ```
 
 同名不同来源必须保留独立角色、启用状态、会话和用户直授权。人类角色目录固定为
-`admin`、`staff`、`user`、`viewer`；服务主体可绑定其中任一角色，另有不可分配给用户的 `api` 角色：
+`admin`、`staff`、`user`、`guest`（旧 `viewer` 已退役，由迁移 18 就地改写为 `guest`）；
+服务主体可绑定其中任一角色，另有不可分配给用户的 `api` 角色：
 
 - `admin` 可访问用户、应用绑定和 Casbin 管理 API；
 - `api-key:<id>` 继承 Key 记录中的单一角色，`admin` Key 可调用全部管理 API；
 - `api` 不能修改/删除绑定，不能管理用户、角色、策略、API Key 或核心认证；
 - 非 admin 只能读取自身 session/profile；
 - 默认仅 `role:admin` 拥有 `/*`，其他角色默认拒绝；
-- viewer 不得看到 Authorization/Casbin 数据；
+- guest 只能访问只读诊断页与只回显自身的 `GET /api/session`，看不到任何控制面数据；
 - 远程用户不能在本机修改密码。
 
 本地用户在管理端“修改我的密码”时必须输入两次新密码，页面会在提交前检查一致性，密码修改成功后该用户的所有本地 session（包括当前 session）都会失效，必须重新登录。API
@@ -236,7 +237,9 @@ API Key 安全约束：
 
 - Header 为 `x-role-key: ak_<64 hex>`（或 `x-api-key`），显式无效 Key 不得回退浏览器 Cookie；
 - 数据库 `api_keys` 只保存 SHA-256 摘要，明文只在创建响应中出现一次；
-- Key 可使用固定目录中的 `admin/staff/user/viewer/api` 单一角色，角色修改必须立即失效旧缓存；
+- Key 可使用固定目录中的 `admin/staff/user/guest/api` 单一角色，角色修改必须立即失效旧缓存；
+- 明文只在创建/轮换响应中出现一次，另有非机密的 `token_prefix` 指纹供列表识别；
+  忘记明文时用 `POST /api-keys/:id/rotate` 换新值（旧值当场失效），无法找回旧值；
 - `admin` Key 可管理全部控制面；`api` Key 只额外允许新建 binding；其他角色与同角色用户边界一致；
 - 代理前必须通过 `proxy_set_header X-Authz-Key ""` 清除凭据；
 - `target_ip` 允许可信 admin/api 主体连接其他机器，应将其视为内网访问能力；Casbin 对象仍按

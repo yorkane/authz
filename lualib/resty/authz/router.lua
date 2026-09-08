@@ -63,17 +63,20 @@ register("GET", "/app/guest.html", guest.handle)
 -- tokens created before a cookie-attribute change (SameSite=Lax to None)
 -- migrate transparently. HttpOnly cookies cannot be fixed from JS, and
 -- API-key calls have no session token, so they stay untouched.
+-- self_service：guest 的能力面之一就是「知道自己是谁」：该端点只回显调用者自身，
+-- 没有侦察价值，所以浏览器会话与 guest Key 都放行。它不含写操作；退出登录另外标了
+-- session_only，机器 Key 依然进不去。其余控制面端点对 guest 仍然全部 403。
 register("GET", "/api/session", guard.wrap(function(_, _, _, current, token)
     if token then session.set_cookie(token) end
     return { data = service.session_payload(current) }
-end))
+end, { self_service = true }))
 
 
 register("DELETE", "/api/session", guard.wrap(function(_, _, _, _, token)
     session.delete(token)
     session.clear_cookie()
     return { data = { message = "已退出登录" } }
-end, { csrf = true, session_only = true }))
+end, { csrf = true, session_only = true, self_service = true }))
 
 -- ── Users ───────────────────────────────────────────────────────────────────
 register("GET", "/api/users", guard.wrap(function(_, _, _, current)
@@ -143,6 +146,12 @@ end), { admin = true, csrf = true }))
 register("PATCH", "/api/api-keys/:id", guard.wrap(with_body(function(params, data)
     return service.update_api_key(tonumber(params.id), data)
 end), { admin = true, csrf = true }))
+
+-- 轮换：生成新密钥并让旧值立即失效。明文只出现在这一次响应里，
+-- 因此需要 CSRF（浏览器发起）且必须走 authz 事务以即时失效授权缓存。
+register("POST", "/api/api-keys/:id/rotate", guard.wrap(function(params)
+    return guard.result(service.rotate_api_key(params.id))
+end, { admin = true, csrf = true }))
 
 register("DELETE", "/api/api-keys/:id", guard.wrap(function(params)
     return guard.result(service.delete_api_key(tonumber(params.id)))

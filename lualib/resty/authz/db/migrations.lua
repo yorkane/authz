@@ -391,6 +391,81 @@ _M.list = {
             end
         end,
     },
+    {
+        version = 18,
+        name = "retire_viewer_role_into_guest",
+        up = function(db)
+            -- viewer 退役，由 guest 全面接管（最小权限角色）。存量数据里的 viewer
+            -- 就地改写为 guest，避免升级后出现角色目录外的孤儿角色。
+            --
+            -- 角色列是逗号列表（如 "admin,viewer"），逐行在 Lua 里重算：纯 SQL 的
+            -- replace 只能处理相邻项，老库里 "admin,viewer,guest" 这类顺序会漏网。
+            -- 重算顺带完成改名、去重与规范排序，语义与 validation.normalize_roles 一致。
+            local ORDER = { "admin", "staff", "user", "guest" }
+            local function rewrite_roles(csv)
+                local selected = {}
+                for role in tostring(csv or ""):gmatch("[^,%s]+") do
+                    role = role:lower()
+                    if role == "viewer" then role = "guest" end
+                    selected[role] = true
+                end
+                local roles = {}
+                for _, role in ipairs(ORDER) do
+                    if selected[role] then roles[#roles + 1] = role end
+                end
+                -- 只收录取于目录内的角色；整列都是脏值时保持原样，交由管理员处理，
+                -- 绝不静默把用户提权到任何默认角色。
+                if #roles == 0 then return nil end
+                return table.concat(roles, ",")
+            end
+
+            local function migrate_role_column(table_name, column, key_column)
+                local rows = db.query("SELECT " .. key_column .. " AS k, " .. column
+                    .. " AS v FROM " .. table_name .. " WHERE " .. column .. " LIKE '%viewer%'") or {}
+                for _, row in ipairs(rows) do
+                    local rewritten = rewrite_roles(row.v)
+                    if rewritten and rewritten ~= row.v then
+                        must(db.exec("UPDATE " .. table_name .. " SET " .. column .. " = ? WHERE "
+                            .. key_column .. " = ?", rewritten, row.k))
+                    end
+                end
+            end
+
+            migrate_role_column("users", "roles", "username")
+            migrate_role_column("remote_users", "roles", "rowid")
+            migrate_role_column("remote_users", "remote_roles", "rowid")
+            must(db.exec([[UPDATE api_keys SET role = 'guest' WHERE role = 'viewer']]))
+
+            -- policies 带 UNIQUE(ptype,v0,v1,v2)：改名前先删掉与既有 guest 行重复的
+            -- viewer 行，否则 UPDATE 撞唯一约束。g 线（角色分配）与 p 线（授权）同理。
+            -- 孪生行在「被改名的那一列」上必然取值 role:guest，所以只能拿其余两列
+            -- 与 dup 比对；把改名列也纳入等值比较会让条件自相矛盾、删不掉重复行。
+            -- 用 rowid 子查询而不是 DELETE ... AS 别名写法，兼容 SQLite 3.25 以下。
+            local function retire(ptype, column, others)
+                must(db.exec("DELETE FROM policies WHERE rowid IN ("
+                    .. "SELECT dup.rowid FROM policies AS dup "
+                    .. "WHERE dup.ptype = '" .. ptype .. "' AND dup." .. column .. " = 'role:viewer' AND EXISTS ("
+                    .. "SELECT 1 FROM policies AS twin WHERE twin.ptype = dup.ptype "
+                    .. "AND twin." .. column .. " = 'role:guest' AND " .. others .. "))"))
+                must(db.exec("UPDATE policies SET " .. column .. " = 'role:guest' "
+                    .. "WHERE ptype = '" .. ptype .. "' AND " .. column .. " = 'role:viewer'"))
+            end
+            retire("g", "v1", "twin.v0 = dup.v0 AND twin.v2 = dup.v2")
+            retire("p", "v0", "twin.v1 = dup.v1 AND twin.v2 = dup.v2")
+        end,
+    },
+    {
+        version = 19,
+        name = "api_keys_token_prefix",
+        up = function(db)
+            -- 密钥指纹列：明文只在创建/轮换那一刻展示一次，之后库里只有
+            -- SHA-256 摘要，列表页无从分辨「这是哪一把」。新 Key 写入明文前缀
+            -- （ak_ + 8 hex，非机密、不可反推）作识别指纹。
+            -- 存量 Key 的明文已不可恢复，指纹只能留空，前端显示为 —。
+            ensure_column(db, "api_keys", "token_prefix",
+                "token_prefix TEXT NOT NULL DEFAULT ''")
+        end,
+    },
 }
 
 function _M.run(db)

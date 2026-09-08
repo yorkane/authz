@@ -26,7 +26,14 @@ local function configure_api_key(c)
         return
     end
     if not api_key.valid_role(role) then
-        error("AUTHZ_API_KEY_ROLE must be one of admin, staff, user, viewer, api")
+        -- viewer 已退役为 guest：旧部署的环境变量继续可用，加载时映射并告警。
+        if role == "viewer" then
+            role = "guest"
+            ngx.log(ngx.WARN, "authz: AUTHZ_API_KEY_ROLE=viewer is deprecated, mapped to guest")
+        end
+        if not api_key.valid_role(role) then
+            error("AUTHZ_API_KEY_ROLE must be one of admin, staff, user, guest, api")
+        end
     end
     if #token < 32 or #token > 256 or token:find("[%c%s]") then
         error("AUTHZ_API_KEY must be 32-256 characters without spaces or control characters")
