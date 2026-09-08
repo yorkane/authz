@@ -356,7 +356,7 @@ OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh        # authz
 三个脚本都会占用随机端口并起常驻 mock，**不要并发跑**（会互相污染日志与端口），也不要在脚本里用裸
 `wait` 等待后台请求——常驻 mock 会让 `wait` 永不返回。
 
-最近基线：Router 99、共享会话 29、authz 网关 853（含实例级 API Key x-api-key 免登录、IP/CIDR 白名单、
+最近基线：Router 99、共享会话 29、authz 网关 858（含实例级 API Key x-api-key 免登录、IP/CIDR 白名单、
 以及 guest 角色与 `/_authz/app/guest.html` 诊断页套件：默认角色、控制面/管理页/文件浏览全拒、
 回显转义与凭据脱敏、角色升降即时生效）。
 
