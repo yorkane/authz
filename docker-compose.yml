@@ -69,7 +69,7 @@ services:
       # 实例级预置 API Key：`x-api-key` 请求头免登录访问控制面 API / 管理页面 / 代理入口
       AUTHZ_API_KEY: ${AUTHZ_API_KEY:-}
       AUTHZ_API_KEY_ROLE: ${AUTHZ_API_KEY_ROLE:-admin}
-      AUTHZ_API_KEY_LOOPBACK: ${AUTHZ_API_KEY_LOOPBACK:-false}
+      AUTHZ_API_KEY_ALLOWED_IPS: ${AUTHZ_API_KEY_ALLOWED_IPS:-127.0.0.1}
       AUTHZ_NOCO_ENABLED: ${AUTHZ_NOCO_ENABLED:-false}
       AUTHZ_NOCO_URL: ${AUTHZ_NOCO_URL:-}
       AUTHZ_NOCO_ROLE_MAP: ${AUTHZ_NOCO_ROLE_MAP:-root=admin,admin=admin,member=user}
