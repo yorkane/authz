@@ -86,7 +86,7 @@ nginx.conf.template
 - `p` 行: v0=主体(`user:<source>:<username>`或`role:x`), v1=对象"/<port><path模式>", v2=HTTP方法或`*`
   - deny 编码在 v2 尾部: `"GET|deny"`（表无独立 eft 列）
 - `g` 行: v0=`user:<source>:<username>`, v1=role:xxx；v2 固定 `-`
-- seed 默认: 仅 `p,role:admin,/*,*` allow，其他角色默认拒绝
+- seed 默认: 仅 `p,role:admin,/*,*` allow，其他角色默认拒绝（`guest` 无默认策略，因此代理默认拒绝）
 
 **密码哈希**: `hex = to_hex(H(salt,...H(salt,H(salt,password))))`, H=HMAC-SHA256(key=salt), 迭代5000次。
 Python 等价验证: `hmac.new(salt.encode(), prev, hashlib.sha256).digest()`。
@@ -149,6 +149,7 @@ Casbin 授权: enforce(principal, "/<port><uri>", HTTP_METHOD)
 | OAuth/OIDC | Authorization Code + PKCE；一次性 state；NocoBase 校验 issuer 并使用 Basic Client 认证；access token 不落库 |
 | 身份隔离 | 用户名与来源组成身份；同名多来源的会话、角色与直授权互不影响 |
 | 管理边界 | 仅 admin 可读取用户列表、应用和 Casbin 策略；非管理员只读取自身会话资料 |
+| guest 收口 | `guest` 角色的 Key 与会话被 guard 统一拒绝全部控制面 API，`authorize_request` 与 `/_authz/apps` 放行逻辑同样排除它；唯一入口是服务端渲染、逐字段 HTML 转义、凭据脱敏、禁缓存的只读诊断页 `/_authz/app/guest.html`（该页把请求头回显给调用方，是天然反射面，因此转义与脱敏在测试中作为固定断言） |
 | 远程密码 | NocoBase、Google、钉钉、微信等远程身份不能在本机修改密码 |
 | 远程生命周期 | 登录记录不覆盖本机启用状态；仅管理员删除记录后，下次认证才按新身份重新创建 |
 | 响应改写 | 绑定级 response_rewrite 仅覆盖透传类响应头：Set-Cookie、Content-Length/Transfer-Encoding 等分帧与 hop-by-hop、X-Authz-*/X-Forwarded-*/Proxy-*、以及 XFO/CSP/HSTS/NOSNIFF 等安全头在 validation 与运行期双层拒绝；正则保存时做 PCRE 编译校验并限长（16 条/512/4096/64KB），正文改写只在 200 文本响应上缓冲且上限 1MB，超限原样透传，不改写 WebSocket/Range/压缩流 |

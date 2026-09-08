@@ -73,6 +73,27 @@
         </q-table>
       </q-card>
 
+      <q-card v-if="isAdmin" flat class="surface-card q-mt-lg">
+        <q-card-section class="surface-heading">
+          <div><div class="surface-title">{{ t.apiTitle }}</div><div class="surface-subtitle">{{ t.apiNote }}</div></div>
+          <q-btn unelevated no-caps icon="mdi-key-plus-outline" :label="t.apiCreate" class="primary-button" @click="openApiKey"></q-btn>
+        </q-card-section>
+        <q-separator dark></q-separator>
+        <q-table flat dark :rows="apiKeys" :columns="apiKeyColumns" row-key="id" :loading="apiLoading" :rows-per-page-options="[10, 20, 0]" class="linear-table">
+          <template v-slot:body-cell-role="props"><q-td :props="props"><q-chip dense class="role-chip">{{ props.row.role }}</q-chip></q-td></template>
+          <template v-slot:body-cell-enabled="props"><q-td :props="props"><q-toggle :model-value="props.row.enabled === 1" color="teal-4" @update:model-value="toggleApiKey(props.row, $event)"></q-toggle></q-td></template>
+          <template v-slot:body-cell-actions="props">
+            <q-td :props="props">
+              <div class="row-actions">
+                <q-btn flat round dense icon="mdi-pencil-outline" @click="openApiKeyRole(props.row)"><q-tooltip>{{ t.apiRoleTitle }}</q-tooltip></q-btn>
+                <q-btn flat round dense icon="mdi-trash-can-outline" color="red-4" @click="removeApiKey(props.row)"><q-tooltip>{{ t.deleteAction }}</q-tooltip></q-btn>
+              </div>
+            </q-td>
+          </template>
+          <template v-slot:no-data><div class="full-width row flex-center q-pa-xl empty-state"><q-icon name="mdi-key-outline" size="28px"></q-icon><span>{{ t.apiNoData }}</span></div></template>
+        </q-table>
+      </q-card>
+
       <q-card v-if="canChangePassword" flat class="surface-card password-card q-mt-lg">
         <q-card-section class="surface-heading"><div><div class="surface-title">{{ t.myPassword }}</div><div class="surface-subtitle">{{ t.passwordNote }}</div></div><q-btn outline no-caps icon="mdi-lock-outline" :label="t.changePassword" class="secondary-button" @click="passwordOpen = true"></q-btn></q-card-section>
       </q-card>
@@ -86,18 +107,24 @@
       <q-dialog v-model="resetOpen"><q-card class="dialog-card"><q-form @submit="resetPassword"><q-card-section><div class="dialog-title">{{ t.resetTitle }}</div><div class="dialog-copy">{{ t.resetCopy }} · {{ selectedUser?.username }}</div></q-card-section><q-card-section><q-input v-model="resetValue" dark outlined autofocus type="password" :label="t.newPassword" :rules="[required, validPassword]"></q-input></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.reset" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
 
       <q-dialog v-model="passwordOpen"><q-card class="dialog-card"><q-form @submit="changeMyPassword"><q-card-section><div class="dialog-title">{{ t.myPasswordTitle }}</div><div class="dialog-copy">{{ t.myPasswordCopy }}</div></q-card-section><q-card-section class="dialog-fields"><q-input v-model="passwordForm.oldpw" dark outlined type="password" :label="t.currentPassword" :rules="[required]"></q-input><q-input v-model="passwordForm.newpw" dark outlined type="password" :label="t.newPassword" :rules="[required, validPassword]"></q-input><q-input v-model="passwordForm.newpw_confirm" dark outlined type="password" :label="t.confirmNewPassword" :rules="[required, matchingPassword]"></q-input></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.updatePassword" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
+      <q-dialog v-model="apiKeyOpen"><q-card class="dialog-card"><q-form @submit="createApiKey"><q-card-section><div class="dialog-title">{{ t.apiCreateTitle }}</div><div class="dialog-copy">{{ t.apiCreateCopy }}</div></q-card-section><q-card-section class="dialog-fields"><q-input v-model="apiKeyForm.name" dark outlined :label="t.apiName" :rules="[required, validApiKey]"></q-input><q-select v-model="apiKeyForm.role" dark outlined emit-value map-options :options="apiKeyRoleOptions" :label="t.role" :hint="t.apiRoleHint"></q-select></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.apiCreateAction" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
+
+      <q-dialog v-model="apiKeyTokenOpen"><q-card class="dialog-card"><q-card-section><div class="dialog-title">{{ t.apiTokenTitle }}</div><div class="dialog-copy">{{ t.apiTokenCopy }}</div></q-card-section><q-card-section><q-input :model-value="createdToken" dark readonly outlined autogrow class="mono-input"></q-input></q-card-section><q-card-actions align="right"><q-btn flat no-caps icon="mdi-content-copy" :label="t.apiCopy" @click="copyToken"></q-btn><q-btn unelevated no-caps :label="t.save" class="primary-button" v-close-popup></q-btn></q-card-actions></q-card></q-dialog>
+
+      <q-dialog v-model="apiKeyRoleOpen"><q-card class="dialog-card"><q-form @submit="saveApiKeyRole"><q-card-section><div class="dialog-title">{{ t.apiRoleTitle }}</div><div class="dialog-copy">{{ selectedApiKey?.name }}</div></q-card-section><q-card-section><q-select v-model="apiKeyRoleValue" dark outlined emit-value map-options :options="apiKeyRoleOptions" :label="t.role" :hint="t.apiRoleHint"></q-select></q-card-section><q-card-actions align="right"><q-btn flat no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated no-caps type="submit" :label="t.save" class="primary-button" :loading="saving"></q-btn></q-card-actions></q-form></q-card></q-dialog>
+
     </main>
   </div>
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./api.js?v=16"></script>
-  <script src="./i18n.js?v=35"></script>
+  <script src="./api.js?v=17"></script>
+  <script src="./i18n.js?v=36"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
     
     const app = createApp({
       setup () {
       const users = ref([])
-      const availableRoles = ref(['admin', 'staff', 'user', 'viewer'])
+      const availableRoles = ref(['admin', 'staff', 'user', 'viewer', 'guest'])
       const locale = ref(window.adminI18n.getLocale())
       const t = computed(() => window.adminI18n.messages[locale.value].users)
       let unsubscribeLocale
@@ -117,6 +144,18 @@
         const resetValue = ref('')
         const createForm = reactive({ username: '', password: '', roles: ['user'] })
         const passwordForm = reactive({ oldpw: '', newpw: '', newpw_confirm: '' })
+
+        // API 管理：token 只在创建成功时一次性返回（createdToken）。
+        const apiKeys = ref([])
+        const apiLoading = ref(false)
+        const apiKeyOpen = ref(false)
+        const apiKeyTokenOpen = ref(false)
+        const apiKeyRoleOpen = ref(false)
+        const createdToken = ref('')
+        const selectedApiKey = ref(null)
+        const apiKeyRoleValue = ref('guest')
+        const apiKeyForm = reactive({ name: '', role: 'guest' })
+        const apiKeyRoleOptions = computed(() => availableRoles.value.concat('api').map(role => ({ label: role, value: role })))
       const columns = computed(() => [
         { name: 'username', label: t.value.user, field: 'username', align: 'left', sortable: true },
         { name: 'source', label: t.value.source, field: 'source', align: 'left', sortable: true },
@@ -124,6 +163,15 @@
         { name: 'enabled', label: t.value.status, field: 'enabled', align: 'left', sortable: true },
         { name: 'created_at', label: t.value.createdAt, field: 'created_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
         { name: 'last_login_at', label: t.value.lastLoginAt, field: 'last_login_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
+        { name: 'updated_at', label: t.value.updatedAt, field: 'updated_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
+        { name: 'actions', label: '', field: 'actions', align: 'right' }
+      ])
+
+      const apiKeyColumns = computed(() => [
+        { name: 'name', label: t.value.apiName, field: 'name', align: 'left', sortable: true },
+        { name: 'role', label: t.value.role, field: 'role', align: 'left', sortable: true },
+        { name: 'enabled', label: t.value.status, field: 'enabled', align: 'left', sortable: true },
+        { name: 'created_at', label: t.value.createdAt, field: 'created_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
         { name: 'updated_at', label: t.value.updatedAt, field: 'updated_at', align: 'left', sortable: true, format: value => formatDate(value), style: 'min-width:170px;white-space:nowrap' },
         { name: 'actions', label: '', field: 'actions', align: 'right' }
       ])
@@ -205,10 +253,11 @@
             const localUsers = (data.users || []).map(user => ({ ...user, source: user.source || 'local', _key: user.identity || `local:${user.id}` }))
             const remoteUsers = (data.remote_users || []).map(user => ({ ...user, source: user.source || user.provider, _key: user.identity || `${user.provider}:${user.subject}` }))
             users.value = [...localUsers, ...remoteUsers]
-            availableRoles.value = data.available_roles || ['admin', 'staff', 'user', 'viewer']
+            availableRoles.value = data.available_roles || ['admin', 'staff', 'user', 'viewer', 'guest']
             csrf.value = data.csrf || ''
             isAdmin.value = Boolean(data.admin)
             currentSource.value = data.source || 'local'
+            await loadApiKeys()
           } catch (loadError) {
             error.value = loadError.message
           } finally {
@@ -222,6 +271,7 @@
             await action()
             notify(successMessage)
             await load()
+            await loadApiKeys()
             return true
           } catch (mutationError) {
             notify(mutationError.message, 'negative')
@@ -288,6 +338,67 @@
           .onOk(() => mutate(action, t.value.deleted))
         }
     
+        async function loadApiKeys () {
+          if (!isAdmin.value) return
+          apiLoading.value = true
+          try {
+            apiKeys.value = await window.adminApi.apiKeys() || []
+          } catch (loadError) {
+            notify(loadError.message, 'negative')
+          } finally {
+            apiLoading.value = false
+          }
+        }
+
+        function validApiKey (value) {
+          return /^[A-Za-z0-9._-]{2,64}$/.test(value || '') || t.value.apiNameRule
+        }
+
+        function openApiKey () {
+          Object.assign(apiKeyForm, { name: '', role: 'guest' })
+          apiKeyOpen.value = true
+        }
+
+        async function createApiKey () {
+          const ok = await mutate(async () => {
+            const created = await window.adminApi.saveApiKey({ _csrf: csrf.value, action: 'create', ...apiKeyForm })
+            createdToken.value = created?.token || ''
+          }, t.value.apiCreated)
+          if (ok) {
+            apiKeyOpen.value = false
+            apiKeyTokenOpen.value = true
+          }
+        }
+
+        async function copyToken () {
+          try {
+            await navigator.clipboard.writeText(createdToken.value)
+            notify(t.value.apiCopied)
+          } catch (copyError) {
+            notify(t.value.apiCopyFailed, 'negative')
+          }
+        }
+
+        function openApiKeyRole (key) {
+          selectedApiKey.value = key
+          apiKeyRoleValue.value = key.role
+          apiKeyRoleOpen.value = true
+        }
+
+        async function saveApiKeyRole () {
+          const ok = await mutate(() => window.adminApi.saveApiKey({ _csrf: csrf.value, action: 'edit', id: selectedApiKey.value.id, role: apiKeyRoleValue.value }), t.value.apiRoleUpdated)
+          if (ok) apiKeyRoleOpen.value = false
+        }
+
+        function toggleApiKey (key, enabled) {
+          mutate(() => window.adminApi.saveApiKey({ _csrf: csrf.value, action: 'edit', id: key.id, enabled }), enabled ? t.value.apiEnabledDone : t.value.apiDisabledDone)
+        }
+
+        function removeApiKey (key) {
+          Quasar.Dialog.create({ title: t.value.apiDeleteTitle, message: `${key.name} · ${t.value.deleteConfirm}`, cancel: true, persistent: true, ok: { label: t.value.deleteAction, color: 'negative', flat: true } })
+            .onOk(() => mutate(() => window.adminApi.saveApiKey({ _csrf: csrf.value, action: 'delete', id: key.id }), t.value.apiDeleted))
+        }
+
         async function changeMyPassword () {
         const ok = await mutate(() => window.adminApi.changePassword({ _csrf: csrf.value, ...passwordForm }), t.value.passwordUpdated)
           if (ok) {
@@ -295,7 +406,6 @@
             Object.assign(passwordForm, { oldpw: '', newpw: '', newpw_confirm: '' })
           }
         }
-    
       function applyLocale (nextLocale) {
         locale.value = nextLocale
         document.documentElement.lang = nextLocale
@@ -311,7 +421,7 @@
 
       onBeforeUnmount(() => unsubscribeLocale?.())
     
-      return { canChangePassword, columns, createForm, createOpen, createUser, enabledCount, error, filter, isAdmin, listNote, listTitle, load, loading, matchingPassword, openReset, openRoles, passwordForm, passwordOpen, changeMyPassword, removeUser, required, resetOpen, resetPassword, resetValue, restoreRemoteRoles, roleCount, roleList, roleOptions, rolesOpen, rolesValue, saveRoles, saving, selectedUser, sourceLabel, t, toggleUser, users, validPassword, validRoles, validUsername }
+      return { apiKeyColumns, apiKeyForm, apiKeyOpen, apiKeyRoleOpen, apiKeyRoleOptions, apiKeyRoleValue, apiKeys, apiLoading, canChangePassword, changeMyPassword, columns, copyToken, createApiKey, createForm, createOpen, createUser, createdToken, enabledCount, error, filter, isAdmin, listNote, listTitle, load, loading, matchingPassword, openApiKey, openApiKeyRole, openReset, openRoles, passwordForm, passwordOpen, removeApiKey, removeUser, required, resetOpen, resetPassword, resetValue, restoreRemoteRoles, roleCount, roleList, roleOptions, rolesOpen, rolesValue, saveApiKeyRole, saveRoles, saving, selectedApiKey, selectedUser, sourceLabel, t, toggleApiKey, toggleUser, users, validApiKey, validPassword, validRoles, validUsername }
       }
     })
     

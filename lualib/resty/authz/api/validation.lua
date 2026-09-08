@@ -44,7 +44,7 @@ function _M.normalize_roles(value)
     for _, item in ipairs(input) do
         for role in tostring(item):gmatch("[^,%s]+") do
             role = role:lower()
-            if not HUMAN_ROLE_SET[role] then return nil, "角色仅支持 admin、staff、user、viewer" end
+            if not HUMAN_ROLE_SET[role] then return nil, "角色仅支持 admin、staff、user、viewer、guest" end
             if not seen[role] then
                 seen[role] = true
                 roles[#roles + 1] = role
@@ -109,7 +109,7 @@ local REQUEST_HEADER_BLOCKED = {
     host = true, cookie = true, origin = true, forwarded = true,
     ["x-authz-user"] = true, ["x-authz-source"] = true, ["x-authz-identity"] = true,
     ["x-authz-key"] = true, ["x-real-ip"] = true,
-    ["x-api-key"] = true,
+    ["x-api-key"] = true, ["x-role-key"] = true,
     ["x-forwarded-for"] = true, ["x-forwarded-host"] = true,
     ["x-forwarded-proto"] = true, ["x-forwarded-port"] = true,
     ["content-length"] = true, ["transfer-encoding"] = true,
@@ -719,7 +719,7 @@ function _M.normalize_policy(data)
     else
         v1 = tostring(data.v1 or ""):gsub("%s+", "")
         if not HUMAN_ROLE_SET[v1:gsub("^role:", "")] then
-            return nil, "用户角色仅支持 admin、staff、user、viewer", 422
+            return nil, "用户角色仅支持 admin、staff、user、viewer、guest", 422
         end
         v1 = "role:" .. v1:gsub("^role:", "")
         if v0:sub(1, 5) ~= "user:" then v0 = identity.key("local", v0) or "" end

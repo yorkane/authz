@@ -39,6 +39,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "identity": self.headers.get("X-Authz-Identity"),
                 "authz_key": self.headers.get("X-Authz-Key"),
                 "api_key": self.headers.get("X-Api-Key"),
+                "role_key": self.headers.get("X-Role-Key"),
                 "host": self.headers.get("Host"),
                 "origin": self.headers.get("Origin"),
                 "forwarded_host": self.headers.get("X-Forwarded-Host"),

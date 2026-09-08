@@ -86,7 +86,7 @@
 - 授权管理支持域名绑定增删/启停及 Casbin 策略编辑
 - `/_authz/apps/` 由服务端会话保护，未登录自动跳转到 `/_authz/login?next=...`
 - 管理端统一调用 `/_authz/api/*` JSON API
-- 应用可使用 `x-authz-key` 作为服务身份；Key 可绑定固定角色，`admin` Key 可管理全部核心 API，完整
+- 应用可使用 `x-api-key` 作为服务身份；Key 可绑定固定角色，`admin` Key 可管理全部核心 API，完整
   契约见 [核心 API（Agent 使用手册）](docs/core-api.md)
 
 首次启动自动 seed：`admin / admin123`（务必尽快改密）。默认仅
@@ -177,7 +177,7 @@ docker exec <container_name> admin_password_reset
 | `AUTHZ_LOGIN_ATTEMPTS` / `AUTHZ_LOGIN_WINDOW` / `AUTHZ_LOGIN_FAIL_DELAY_MS` | `5` / `1800` / `1000` | 登录防护：失败延迟返回，按账户名+IP 连续失败达阈值后锁定该账户组合（窗口=锁定时长） |
 | `AUTHZ_AGENT_API_KEY` | 空 | 设置后自动创建仅限本机回环调用的 Agent 专用 API Key（`agent-default`，角色 admin），供本机自动化程序使用 |
 | `AUTHZ_API_KEY` | 空 | 实例级预置 API Key：用 `x-api-key` 请求头免登录访问控制面 API、管理页面与代理入口，Agent 无需手动登录取 Cookie；留空即关闭 |
-| `AUTHZ_API_KEY_ROLE` | `admin` | 上述 Key 的角色（admin/staff/user/viewer/api），权限走同角色 Casbin 策略 |
+| `AUTHZ_API_KEY_ROLE` | `admin` | 上述 Key 的角色（admin/staff/user/viewer/guest/api），权限走同角色 Casbin 策略 |
 | `AUTHZ_API_KEY_ALLOWED_IPS` | `127.0.0.1` | 上述 Key 的来源白名单：逗号分隔的 IP/CIDR（如 `127.0.0.1,10.0.0.0/8`），只有名单内的来源可用 |
 | `AUTHZ_NOCO_ENABLED` | `false` | 在密码登录表单启用 NocoBase 身份来源 |
 | `AUTHZ_NOCO_URL` | 空 | NocoBase 站点根地址（启用远程认证时必须为 HTTPS） |
@@ -209,8 +209,8 @@ docker exec <container_name> admin_password_reset
 - `lualib/resty/authz/repository/` 集中所有运行时 SQL；`db.lua` 只负责生命周期、缓存查询和事务。
   多步骤管理写入在 service 层统一提交，提交后自动递增数据库/授权 revision，回滚不失效缓存。
 - Schema 变化通过 `db/migrations.lua` 追加有序版本，并记录到 `schema_migrations`；不要改写已发布迁移。
-- 数字前缀动态端口默认允许 `2000` 起步；人类角色固定为 `admin`、`staff`、`user`、`viewer`，应用
-  Key 可绑定这些角色或专用 `api` 角色；HTTP 方法使用完整方法目录，并支持多选策略。
+- 数字前缀动态端口默认允许 `2000` 起步；人类角色固定为 `admin`、`staff`、`user`、`viewer`、`guest`，
+  应用 Key 可绑定这些角色或专用 `api` 角色；HTTP 方法使用完整方法目录，并支持多选策略。
 
 #### 身份与授权
 
@@ -219,6 +219,9 @@ docker exec <container_name> admin_password_reset
 - 本地用户和本地角色优先于远程记录；远程身份只单向同步用户名、来源、角色快照和时间信息，不回写身份源。
 - 启用状态由本机管理员控制，只有管理员主动删除后远程身份才会被清除；远程用户不能修改本地密码。
 - 普通 `viewer` 用户只能查看自己的会话/身份信息，不能读取或修改 Casbin 授权策略。
+- `guest` 是最小权限角色：唯一入口是只读诊断页 `/_authz/app/guest.html`（回显当次请求的请求头、
+  来源 IP 与代理转发头，凭据类头自动脱敏），拿不到任何控制面 API、管理页面与文件浏览。
+- 机器凭证统一走 `x-api-key` 单一请求头（旧 `x-authz-key` 已合并移除），该头被网关剥离、绝不转发上游。
 - `api` 角色只能新建域名绑定并按 Casbin 策略请求代理目标，不能管理用户、角色、策略、API Key 或核心认证。
 - 本系统不再同步 APISIX routes、用户、角色或策略；与外部系统保持松耦合、单向记录。
 
@@ -441,7 +444,7 @@ GHCR 推送使用内置 `GITHUB_TOKEN`，无需额外配置。
 │           ├── gateway/        # access/解析/缓存/代理构造
 │           ├── app.lua         # 登录、管理入口跳转、旧接口退役响应
 │           ├── api/            # Router、校验、薄门面和领域 services
-│           ├── api_key.lua     # x-authz-key 摘要校验与服务主体
+│           ├── api_key.lua     # x-api-key 摘要校验与服务主体
 │           ├── repository/     # 用户/会话/策略/绑定/API Key SQL
 │           ├── db.lua          # 生命周期、缓存查询和事务门面
 │           ├── db/             # 驱动/schema/版本迁移/seed/查询缓存

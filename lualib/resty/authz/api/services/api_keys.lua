@@ -14,8 +14,9 @@ end
 function _M.create(data)
     local name = validation.valid_api_key_name(data.name)
     if not name then return nil, "名称需为 2-64 位字母、数字、点、下划线或连字符", 422 end
-    local role = api_key.valid_role(data.role or "api")
-    if not role then return nil, "API Key 角色仅支持 admin、staff、user、viewer、api", 422 end
+    -- 新建 API 默认 guest 角色（只放行 /_authz/app/guest.html 只读页），可显式选其他角色。
+    local role = api_key.valid_role(data.role or "guest")
+    if not role then return nil, "API Key 角色仅支持 admin、staff、user、viewer、guest、api", 422 end
     local random_part = util.random_token(32)
     if not random_part then return nil, "生成 API Key 失败", 500 end
     local token = "ak_" .. random_part
@@ -53,7 +54,7 @@ function _M.update(id, data)
     end
     if data.role ~= nil then
         local role = api_key.valid_role(data.role)
-        if not role then return nil, "API Key 角色仅支持 admin、staff、user、viewer、api", 422 end
+        if not role then return nil, "API Key 角色仅支持 admin、staff、user、viewer、guest、api", 422 end
         fields[#fields + 1], values[#values + 1] = "role = ?", role
     end
     if #fields == 0 then return nil, "没有可更新字段", 422 end

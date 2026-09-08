@@ -280,18 +280,21 @@ lualib/tracker/
    启动时 seed 为 `agent-default` key（角色 admin、`loopback_only=1`）。使用方式：
 
    ```bash
-   curl -H "x-authz-key: $AUTHZ_AGENT_API_KEY" http://127.0.0.1:6080/_authz/api/...
+   curl -H "x-api-key: $AUTHZ_AGENT_API_KEY" http://127.0.0.1:6080/_authz/api/...
    ```
 
    该 key **只能从本机回环地址调用**，非回环来源一律 401。值保存在部署目录（如 `/data/app/.env`），
    不入库、不进 git；轮换时改环境变量并重建容器。
 
-3. **普通 API Key**：管理员通过 `POST /_authz/api/api-keys` 创建，角色决定控制面与代理权限，
+3. **普通 API Key**：管理员通过 `POST /_authz/api/api-keys` 创建（新建默认角色 `guest`，
+   仅可访问 `/_authz/app/guest.html` 请求诊断页），角色决定控制面与代理权限，
    不限来源但无 CSRF 豁免差异（API key 本身免 CSRF）。
 4. **浏览器会话**：人用，修改请求需 `X-CSRF-Token`。Agent 不应使用会话方式，避免 CSRF 与 Cookie 管理。
 
-`x-api-key` 与 `x-authz-key` 都是网关凭据头：同时呈现时以 `x-authz-key` 为准；Key 无效直接 401，
-绝不回退到同时携带的 Cookie；两者都被网关剥离，绝不转发上游，绑定级改写请求也禁止设置它们。
+机器凭证头有两个：`x-role-key`（只认数据库 API Key）与 `x-api-key`（先按 `ak_` 格式查库，
+未命中再比对实例级环境变量 Key）；旧 `x-authz-key` 已合并移除。只要呈现了任一凭证头，Key
+无效就直接 401，绝不回退到同时携带的 Cookie；这些头被网关剥离，绝不转发上游，绑定级改写
+请求也禁止设置它们。
 
 ### 控制面路径（全部在 `/_authz` 下）
 
@@ -301,6 +304,8 @@ lualib/tracker/
   （`response_rewrite` 字段配置绑定级响应改写，字段与限制见 `docs/core-api.md`）
 - 策略：`GET /_authz/api/authorization`、`POST /_authz/api/policies`、`PATCH|DELETE /_authz/api/policies/:id`
 - API Key：`GET|POST /_authz/api/api-keys`、`PATCH|DELETE /_authz/api/api-keys/:id`
+- Guest 诊断页：`GET /_authz/app/guest.html`（guest/admin 角色；加 `?json=1` 返回 JSON）
+  ——回显当次请求的全部请求头、来源 IP 与代理转发头，凭据类头自动脱敏。
 - 菜单树：`GET /_authz/api/menu-tree`（渲染用）；`GET|POST /_authz/api/menu-entries`、
   `PUT /_authz/api/menu-entries/reorder`、`PATCH|DELETE /_authz/api/menu-entries/:id`（编辑用）
 
@@ -310,8 +315,8 @@ lualib/tracker/
 
 - **只走本机**：Agent 必须在网关宿主机上运行，通过 `127.0.0.1:<AUTHZ_HTTP_PORT>` 访问；
   禁止把控制面端口暴露到公网或跨机访问。
-- **请求头**：修改类请求必须带 `Content-Type: application/json`；API key 放在 `x-authz-key`，
-  不用 Cookie、不用 `Authorization: Bearer`。实例级 Key 放 `x-api-key`。
+- **请求头**：修改类请求必须带 `Content-Type: application/json`；API key 放 `x-api-key`
+  （数据库 Key 也可用 `x-role-key`），不用 Cookie、不用 `Authorization: Bearer`。
 - **响应契约**：成功 `{"data": ...}`，失败 `{"error":{"code","message"}}`，JSON 为 UTF-8。
   状态码语义：401 未认证/Key 无效、403 无权限或 CSRF 失败、404 不存在、409 冲突、422 参数校验失败。
 - **最小权限**：Agent 用 `AUTHZ_AGENT_API_KEY` 时拥有 admin 权限，只应调用其任务所需的最小接口集合；
@@ -351,7 +356,9 @@ OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh        # authz
 三个脚本都会占用随机端口并起常驻 mock，**不要并发跑**（会互相污染日志与端口），也不要在脚本里用裸
 `wait` 等待后台请求——常驻 mock 会让 `wait` 永不返回。
 
-最近基线：Router 99、共享会话 29、authz 网关 815（含实例级 API Key x-api-key 免登录与 IP/CIDR 白名单套件）。
+最近基线：Router 99、共享会话 29、authz 网关 853（含实例级 API Key x-api-key 免登录、IP/CIDR 白名单、
+以及 guest 角色与 `/_authz/app/guest.html` 诊断页套件：默认角色、控制面/管理页/文件浏览全拒、
+回显转义与凭据脱敏、角色升降即时生效）。
 
 当前回归覆盖 Router/ctxvar、请求体 helper、框架错误处理和 merge 原子性。最近维护基线为
 99 项检查；测试数量会随覆盖增长，应以脚本最终输出为准，包括：
@@ -391,7 +398,7 @@ ssh 241.t 'cd /data/app/authz-test && sudo docker compose up -d --force-recreate
 
 241.t 是共享会话 **reader**，按设计不允许本地登录（本地创建会话返回 503）。在它上面做控制面验证：
 
-- 控制面写操作：用实例自带的 loopback-only Agent Key，请求头 `x-authz-key: <key>`；
+- 控制面写操作：用实例自带的 loopback-only Agent Key，请求头 `x-api-key: <key>`；
 - 需要已登录会话的代理入口：先在本机 writer（`http://10.252.25.235:6080/_authz/login`）登录，
   取 `authz_session` token 后带 `Cookie: authz_session=<token>` 访问 241.t；
 - 退出登录只在 writer 上做，reader 会在下一次请求立刻拒绝该 token（已验证跨实例撤销生效）。

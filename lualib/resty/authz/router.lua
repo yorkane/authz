@@ -9,6 +9,7 @@ local session = require "resty.authz.session"
 local ui = require "resty.authz.ui"
 local files = require "resty.authz.files"
 local nginxconf = require "resty.authz.nginxconf"
+local guest = require "resty.authz.guest"
 
 local router = require("klib.router").new("/_authz")
 
@@ -48,6 +49,14 @@ register("GET",  "/login",         ui.login_get)
 register("POST", "/login",         ui.login_post)
 register("GET",  "/oauth/start",   ui.oauth_start)
 register("GET",  "/oauth/callback", ui.oauth_callback)
+
+-- ── Guest 诊断页 ────────────────────────────────────────────────────────────
+-- /_authz/app/guest.html：guest 角色专属（角色 guest 的数据库 API Key，或持有
+-- guest 角色的登录会话），回显本次请求的请求头 / 来源 IP / 代理转发信息。
+-- 服务端渲染、敏感头脱敏；?json=1 返回同一数据的 JSON 形态。
+-- admin 也可访问，便于管理员核对某次请求在网关侧看到的真实信息。
+-- 认证与角色门禁内聚在 guest.handle：浏览器未登录跳登录页，无效 Key 直接 401。
+register("GET", "/app/guest.html", guest.handle)
 
 -- ── Session ─────────────────────────────────────────────────────────────────
 -- The SPA shell calls this on startup; re-issue the session cookie so

@@ -291,7 +291,7 @@ AUTHZ_REWRITE_BUFFER_MB=64                        # 正文改写的 worker 级�
 
 # ══════════════ 实例级预置 API Key（Agent 免登录，可选）══════════════
 AUTHZ_API_KEY=                                    # 留空即关闭。设置后用 `x-api-key: <值>` 免登录访问控制面 API、管理页面与代理入口；32-256 字符（如 openssl rand -hex 32）。不入库，随环境变量轮换；配置非法启动即失败。
-AUTHZ_API_KEY_ROLE=admin                          # 该 Key 的角色（admin/staff/user/viewer/api），权限走同角色 Casbin 策略
+AUTHZ_API_KEY_ROLE=admin                          # 该 Key 的角色（admin/staff/user/viewer/guest/api），权限走同角色 Casbin 策略
 AUTHZ_API_KEY_ALLOWED_IPS=127.0.0.1               # 来源白名单：逗号分隔的 IP 或 CIDR（如 127.0.0.1,10.0.0.0/8），匹配 TCP remote_addr（XFF 不参与）。默认只信 127.0.0.1；跨机接入显式加对端 IP
 
 # ══════════════ OAuth：Google（可选）══════════════

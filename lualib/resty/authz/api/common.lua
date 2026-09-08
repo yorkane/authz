@@ -5,8 +5,8 @@ local remote_users = require "resty.authz.repository.remote_users"
 local users = require "resty.authz.repository.users"
 
 local _M = {
-    HUMAN_ROLES = { "admin", "staff", "user", "viewer" },
-    POLICY_ROLES = { "admin", "staff", "user", "viewer", "api" },
+    HUMAN_ROLES = { "admin", "staff", "user", "viewer", "guest" },
+    POLICY_ROLES = { "admin", "staff", "user", "viewer", "guest", "api" },
     HTTP_METHODS = {
         "*", "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE"
     },
@@ -55,6 +55,15 @@ function _M.is_admin(subject)
     if not subject then return false end
     for _, role in ipairs(_M.roles_for(subject)) do
         if role == "admin" then return true end
+    end
+    return false
+end
+
+-- guest 角色：只放行只读诊断页，控制面 API、管理页面与文件浏览一律拒绝。
+function _M.is_guest(subject)
+    if not subject then return false end
+    for _, role in ipairs(_M.roles_for(subject)) do
+        if role == "guest" then return true end
     end
     return false
 end

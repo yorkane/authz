@@ -105,6 +105,15 @@ function saveNginxConf (values) {
   throw new Error('Unsupported nginx conf action')
 }
 
+// API 管理：创建返回一次性明文 token；角色/启停/删除走标准动作。
+function saveApiKey (values) {
+  const { action, id, ...payload } = values
+  if (action === 'create') return mutation('POST', '/api-keys', payload)
+  if (action === 'edit') return mutation('PATCH', `/api-keys/${id}`, payload)
+  if (action === 'delete') return mutation('DELETE', `/api-keys/${id}`, payload)
+  throw new Error('Unsupported api key action')
+}
+
 window.adminApi = {
   session: () => request('/session'),
   applications: () => request('/applications'),
@@ -115,6 +124,7 @@ window.adminApi = {
   menuServices: () => request('/menu-services'),
   files: path => request('/files?path=' + encodeURIComponent(path || '')),
   nginxConf: () => request('/nginx-conf'),
+  apiKeys: () => request('/api-keys'),
   saveUser,
   saveRemoteUser,
   saveBinding: saveApplication,
@@ -122,6 +132,7 @@ window.adminApi = {
   saveMenuEntry,
   saveMenuService,
   saveNginxConf,
+  saveApiKey,
   changePassword: values => mutation('PUT', '/me/password', values),
   logout: values => mutation('DELETE', '/session', values),
   fetchJson

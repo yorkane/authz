@@ -14,6 +14,7 @@ local _M = {
     roles_for = common.roles_for,
     has_any_role = common.has_any_role,
     is_admin = common.is_admin,
+    is_guest = common.is_guest,
 
     session_payload = read_models.session,
     list_users = read_models.users,

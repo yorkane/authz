@@ -234,7 +234,7 @@ Content-Type: application/json; charset=UTF-8
 
 API Key 安全约束：
 
-- Header 固定为 `x-authz-key: ak_<64 hex>`，显式无效 Key 不得回退浏览器 Cookie；
+- Header 为 `x-role-key: ak_<64 hex>`（或 `x-api-key`），显式无效 Key 不得回退浏览器 Cookie；
 - 数据库 `api_keys` 只保存 SHA-256 摘要，明文只在创建响应中出现一次；
 - Key 可使用固定目录中的 `admin/staff/user/viewer/api` 单一角色，角色修改必须立即失效旧缓存；
 - `admin` Key 可管理全部控制面；`api` Key 只额外允许新建 binding；其他角色与同角色用户边界一致；
@@ -295,7 +295,7 @@ NocoBase OAuth 的 `/api/idpOAuth/me` 只提供标准身份 claim，不使用 Ba
 - token 使用 `client_secret_basic`，并同时携带 PKCE verifier；
 - 公网 Client 通过 `oidcStates:create` collection API 一次性注册，不安装 NocoBase 插件；
 - NocoBase Client 注册 API Key 不注入运行容器，配置以 `docs/thirdparty-oauth-login.md` 为准；它与
-  Authz Gateway 的 `x-authz-key` 应用凭据不是同一种密钥。
+  Authz Gateway 的 `x-api-key` 应用凭据不是同一种密钥。
 
 同一 Client ID、Secret 和回调 URI 必须同时注入 NocoBase 与网关。环境变量改变必须重建容器，
 普通 `docker restart` 不会改变容器环境。详细配置见 `docs/sso-jwt-auth.md`。

@@ -31,22 +31,25 @@ CSRF=$(curl -sS -b cookie.txt "${GATEWAY}/_authz/api/session" | jq -r '.data.csr
 
 ### 2.2 应用 API Key
 
-应用在每次请求中发送：
+应用在每次请求中提交（旧 `x-authz-key` 已合并移除）：
 
 ```http
-x-authz-key: ak_<64 个小写十六进制字符>
+x-role-key: ak_<64 个小写十六进制字符>
 ```
 
+`x-role-key` 是角色 Key 专用头，只接受数据库 Key；`x-api-key` 也接受数据库 Key（并额外接受
+2.4 的实例级 Key）。两个头同时呈现时以 `x-role-key` 为准。
 API Key 的主体是 `api-key:<id>`，创建或修改时可绑定一个固定目录角色：`admin`、`staff`、`user`、
-`viewer`、`api`。控制面权限与同角色用户一致，代理权限由对应的 `role:<role>` Casbin 策略决定。
+`viewer`、`guest`、`api`，新建默认为 `guest`（仅可访问 `/_authz/app/guest.html` 诊断页）。
+控制面权限与同角色用户一致，代理权限由对应的 `role:<role>` Casbin 策略决定。
 `role:admin` 和 `role:api` 默认可访问所有已解析代理目标，管理员可用 deny 策略继续收紧。
 
 ```bash
-curl -sS -H "x-authz-key: ${AUTHZ_KEY}" \
+curl -sS -H "x-api-key: ${AUTHZ_KEY}" \
   "https://2077-m.ws.example.com:99/api/status"
 ```
 
-网关不会把 `x-authz-key` 转发到上游。上游只会收到安全身份头：
+网关不会把 `x-api-key` 转发到上游。上游只会收到安全身份头：
 
 ```text
 X-Authz-User: <API Key 名称>
@@ -54,7 +57,7 @@ X-Authz-Source: api-key
 X-Authz-Identity: api-key:<id>
 ```
 
-如果请求显式携带无效或已禁用的 `x-authz-key`，网关返回 `401 invalid_api_key`，不会回退到同时携带的
+如果请求显式携带无效或已禁用的 `x-api-key`，网关返回 `401 invalid_api_key`，不会回退到同时携带的
 浏览器 Cookie。
 
 ### 2.3 Agent 专用 API Key（仅限本机）
@@ -64,7 +67,7 @@ X-Authz-Identity: api-key:<id>
 非回环来源一律 401，适合本机运行的自动化程序（Agent）安全使用控制面。
 
 ```bash
-curl -H "x-authz-key: $AUTHZ_AGENT_API_KEY" http://127.0.0.1:6080/_authz/api/session
+curl -H "x-api-key: $AUTHZ_AGENT_API_KEY" http://127.0.0.1:6080/_authz/api/session
 ```
 
 要求与约束：
@@ -93,15 +96,14 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AUTHZ_API_KEY` | 空 | Key 本体；留空即完全关闭该认证路径 |
-| `AUTHZ_API_KEY_ROLE` | `admin` | 角色（admin/staff/user/viewer/api），权限走同角色 Casbin 策略 |
+| `AUTHZ_API_KEY_ROLE` | `admin` | 角色（admin/staff/user/viewer/guest/api），权限走同角色 Casbin 策略 |
 | `AUTHZ_API_KEY_ALLOWED_IPS` | `127.0.0.1` | 来源白名单：逗号分隔的 IP 或 CIDR（如 `127.0.0.1,10.0.0.0/8`），只有 `remote_addr` 命中者可用 Key |
 
 - 主体固定为 `api-key:0`，上游收到 `X-Authz-Identity: api-key:0`；
 - 不写入数据库，因此不受管理界面的禁用/删除影响；轮换方式是改环境变量并**重建**容器；
-- 网关不签发也不读取会话 Cookie：呈现了 `x-api-key`（或 `x-authz-key`）就只看 Key，
-  Key 无效直接 401，绝不回退到同时携带的浏览器 Cookie；
-- `x-api-key` 与 `x-authz-key` 一样被网关剥离，绝不转发给上游；绑定级「改写请求」也禁止设置该头；
-- 两个头同时呈现时以 `x-authz-key` 为准；
+- 网关不签发也不读取会话 Cookie：只要呈现了凭证头（`x-api-key` 或 `x-role-key`）就只看 Key，
+  Key 无效直接 401，绝不回退到同时携带的浏览器 Cookie；实例级 Key 在 `x-role-key` 上永远无效；
+- 凭证头被网关剥离，绝不转发给上游；绑定级「改写请求」也禁止设置这些头；
 - 配置非法（Key 过短/含空白、角色不在目录内、白名单条目非法）时容器**启动即失败**，不会静默降级成未启用；
 - 它是实例级万能钥匙：来源边界就是 `AUTHZ_API_KEY_ALLOWED_IPS`，默认只信 `127.0.0.1`；
   跨机接入时把对端出口 IP 逐个列出（谨慎使用宽 CIDR），并考虑用 `AUTHZ_API_KEY_ROLE=viewer` 收窄；
@@ -111,9 +113,10 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 
 ## 3. 权限矩阵
 
-| 接口能力 | 普通用户/Key | `admin` 用户/Key | `api` Key |
-|---|---:|---:|---:|
-| 读取自身身份和应用入口 | 是 | 是 | 是 |
+| 接口能力 | `guest` | 普通用户/Key | `admin` 用户/Key | `api` Key |
+|---|---:|---:|---:|---:|
+| 打开 `/_authz/app/guest.html` 诊断页 | 是 | 否 | 是 | 否 |
+| 读取自身身份和应用入口 | 否 | 是 | 是 | 是 |
 | 浏览器注销/修改自己的密码 | 仅用户会话 | 仅用户会话 | 否 |
 | 新建域名与端口绑定 | 否 | 是 | 是 |
 | 修改或删除绑定 | 否 | 是 | 否 |
@@ -123,7 +126,28 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 | 请求受保护的代理目标 | 按绑定角色策略 | 按 `admin` 策略 | 按 `api` 策略 |
 
 用户会话的修改请求必须发送 CSRF；API Key 请求不使用 CSRF。`api` 是服务主体专用角色，不能分配给
-本地或远程用户。角色目录固定，不提供动态新建角色 API。
+本地或远程用户；`guest` 反过来只能分配给用户与 Key，且被 guard 统一拒绝全部控制面 API。角色目录
+固定，不提供动态新建角色 API。
+
+## 3.1 Guest 诊断页（`/_authz/app/guest.html`）
+
+回显**当次请求**在服务端看到的完整信息，用来自检接入链路（例如确认反向代理是否透传了真实客户端
+地址、上游收到了哪些头）。`guest` 角色的 Key 或登录会话即可访问，`admin` 也可用于核对。
+
+```bash
+curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.html"
+curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.html?json=1"
+```
+
+- 页面为服务端渲染；`?json=1` 返回同一数据的 JSON 形态（`{data: {ip, proxy, request, headers}}`）。
+- 展示内容：TCP `remote_addr`、网关解析出的真实客户端、`X-Forwarded-For` 代理链（首项 = 客户端原始
+  IP，末项 = 上一跳代理）、`Forwarded`/`X-Forwarded-*`/`Via`、请求行，以及全部请求头。
+- `Cookie`/`Authorization`/`x-api-key` 等凭据类头，以及名字里含 `token`/`secret`/`password`/`api-key`
+  的头，一律显示为脱敏占位符，即使调用方是管理员也不给明文。
+- 回显内容是天然反射面：所有字段逐条 HTML 转义，响应 `Cache-Control: no-store`（诊断内容与当次
+  请求绑定，缓存等于跨请求泄露）。这些行为在回归里是固定断言，改动前先看测试。
+- 浏览器直接访问且未登录时会跳 `/_authz/login`；呈现了无效 `x-api-key` 则直接 401，不回退 Cookie。
+- guest 拿不到任何控制面 API、管理页面与文件浏览：访问 `/_authz/apps/*` 会被引导到本页而非控制台。
 
 ## 4. API Key 管理（`admin` 角色）
 
@@ -140,7 +164,9 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 ```
 
 名称为 2–64 位 ASCII 字母、数字、点、下划线或连字符。`role` 可为
-`admin/staff/user/viewer/api`，省略时默认 `api`。
+`admin/staff/user/viewer/guest/api`，省略时默认 `guest`（最小权限：只能访问
+`/_authz/app/guest.html` 请求诊断页，见「Guest 诊断页」一节）。需要调用控制面 API 时，
+再改成 `api`、`viewer` 或 `admin`。
 
 创建响应中的 `token` 只出现一次：
 
@@ -190,7 +216,7 @@ Admin 左侧菜单悬浮在显式绑定名称上时显示 `note`，不会把主�
 
 ```bash
 curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
-  -H "x-authz-key: ${AUTHZ_KEY}" \
+  -H "x-api-key: ${AUTHZ_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"domain":"code","target_ip":"192.168.1.20","port":2077,"menu_name":"Code Server","enabled":true}'
 ```

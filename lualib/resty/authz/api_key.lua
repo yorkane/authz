@@ -2,11 +2,13 @@
 -- Service API key authentication. Only SHA-256 digests are stored in SQLite.
 --
 -- 两类 Key：
---   1. 数据库 Key：管理界面创建，用 `x-authz-key` 提交，可选 loopback_only；
---   2. 环境变量 Key（AUTHZ_API_KEY）：用 `x-api-key` 提交的实例级预置 Key，
---      免登录直接调用控制面 API、管理页面与代理入口，专供 Agent 使用。
+--   1. 数据库 Key：管理界面创建（ak_ + 64 hex），可选 loopback_only。可用
+--      `x-role-key`（角色 Key 专用头）或 `x-api-key` 提交；
+--   2. 环境变量 Key（AUTHZ_API_KEY）：实例级预置 Key，只能用 `x-api-key` 提交，
 --      配置由 config.load() 通过 configure_env 注入（本模块不 require 上层模块，
---      避免 init_by_lua 加载链上的 require 循环），权限仍走 Casbin 角色模型。
+--      避免 init_by_lua 加载链上的 require 循环）。
+-- `x-api-key` 的认证顺序：先按 ak_ 格式查库，未命中再与环境变量 Key 常量时间比较。
+-- 权限统一走 Casbin 角色模型。旧 `x-authz-key` 已合并移除，不再接受。
 
 local repository = require "resty.authz.repository.api_keys"
 local util = require "resty.authz.util"
@@ -16,7 +18,7 @@ local target = require "resty.authz.target"
 local _M = {}
 
 local TOKEN_PATTERN = [[^ak_[0-9a-f]{64}$]]
-local ROLE_SET = { admin = true, staff = true, user = true, viewer = true, api = true }
+local ROLE_SET = { admin = true, staff = true, user = true, viewer = true, guest = true, api = true }
 
 -- 环境变量 Key 的固定 principal（Casbin g 线用）与运行期配置；token 为空即未启用。
 -- allowed_ips 是来源白名单（target.normalize_cidr_list 的条目集合），config.load() 已保证非空。
@@ -71,20 +73,25 @@ function _M.authenticate(token)
     }
 end
 
+-- 机器凭证头：`x-role-key`（仅数据库 Key）与 `x-api-key`（数据库 Key 或环境变量 Key）。
+-- 旧 `x-authz-key` 已合并进 `x-api-key`。
+_M.headers = { "x-role-key", "x-api-key" }
+
 -- Returns presented, identity. A malformed or duplicate header is presented
 -- but unauthenticated, so callers never fall back to a browser cookie.
--- `x-authz-key` 优先：一旦呈现就只认它，绝不因 Key 无效而回退到 Cookie 或其他头。
+-- 只要呈现了任一凭证头就只认它，绝不因 Key 无效而回退到 Cookie。两个头同时
+-- 呈现时以 `x-role-key` 为准（更具体的头优先）。
 function _M.authenticate_request()
     local headers = ngx.req.get_headers()
-    local token = headers["x-authz-key"]
-    if token == nil then
-        token = headers["x-api-key"]
-        if token == nil then return false, nil end
-        if type(token) ~= "string" then return true, nil end
-        return true, _M.authenticate_env(token)
+    local role_token = headers["x-role-key"]
+    if role_token ~= nil then
+        if type(role_token) ~= "string" then return true, nil end
+        return true, _M.authenticate(role_token)
     end
+    local token = headers["x-api-key"]
+    if token == nil then return false, nil end
     if type(token) ~= "string" then return true, nil end
-    return true, _M.authenticate(token)
+    return true, _M.authenticate(token) or _M.authenticate_env(token)
 end
 
 -- 环境变量 Key（`x-api-key`）：常量时间比较 + 来源 IP/CIDR 白名单。
@@ -117,13 +124,18 @@ function _M.authenticate_env(token)
     }
 end
 
--- 管理页面 / 文件浏览的免登录放行：合法 Key（数据库 Key 或环境变量 Key）直接
--- 取页面与静态资源，不签发会话 Cookie。Agent 只需给每个请求带上 `x-api-key`
--- （Playwright 用 setExtraHTTPHeaders，curl 用 -H），页面内 JS 对 /_authz/api/*
--- 的调用也会沿用同一请求头。
+-- 管理页面 / 文件浏览的免登录放行：合法 Key 直接取页面与静态资源，不签发会话
+-- Cookie。Agent 只需给每个请求带上 `x-api-key`（Playwright 用
+-- setExtraHTTPHeaders，curl 用 -H），页面内 JS 对 /_authz/api/* 的调用也会
+-- 沿用同一请求头。
+--
+-- guest 是唯一被排除在外的角色：它只能访问只读诊断页 /_authz/app/guest.html
+-- （由 resty.authz.guest 自行认证），拿不到管理页面、静态资源与文件浏览。
 function _M.authorize_request()
     local presented, current = _M.authenticate_request()
-    return presented and current ~= nil
+    if not presented or not current then return false end
+    if current.role == "guest" then return false end
+    return true
 end
 
 return _M

@@ -510,7 +510,7 @@ request() {
     local args=(--silent --show-error --max-time 5 --request "$method" --resolve "$host:$HTTP_PORT:127.0.0.1" -H 'Accept: application/json' -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}')
     [[ -n "$cookie" ]] && args+=(-H "Cookie: $(cookie_header "$cookie")")
     [[ -n "$csrf" ]] && args+=(-H "X-CSRF-Token: $csrf")
-    [[ -n "$api_key" ]] && args+=(-H "x-authz-key: $api_key")
+    [[ -n "$api_key" ]] && args+=(-H "x-api-key: $api_key")
     [[ -n "$extra" ]] && args+=(-H "$extra")
     if [[ -n "$data" ]]; then args+=(-H 'Content-Type: application/json' --data "$data"); fi
     STATUS=$(curl "${args[@]}" "http://$host:$HTTP_PORT$path")
@@ -712,7 +712,7 @@ assert_contains_all "menu editor page edits the tree and offers icon configurati
 request GET "$ADMIN_HOST" /_authz/apps/users.html "$ADMIN_COOKIE"
 assert_contains_all "users page has role select, remote rows and timestamps" "$BODY" \
     'multiple use-chips emit-value map-options' \
-    "['admin', 'staff', 'user', 'viewer']" \
+    "['admin', 'staff', 'user', 'viewer', 'guest']" \
     "data.remote_users" \
     "restoreRemoteRoles" \
     'v-if="isAdmin" :model-value="props.row.enabled === 1"' \
@@ -787,7 +787,7 @@ assert_json "applications API discovers local HTTP service" ".data | map(select(
 
 request GET "$ADMIN_HOST" /_authz/api/api-keys
 assert_eq "API key management requires a session" "$STATUS" "401"
-request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name":"agent-test"}'
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name":"agent-test","role":"api"}'
 assert_eq "admin creates an API key" "$STATUS" "201"
 API_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
 API_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
@@ -796,7 +796,7 @@ mv "$TMP_DIR/body-redacted" "$TMP_DIR/body"
 BODY=$(<"$TMP_DIR/body")
 [[ "$API_KEY_TOKEN" =~ ^ak_[a-f0-9]{64}$ ]] || fail "created API key has an invalid format"
 pass "raw API key is returned once with a stable format"
-assert_json "API key defaults to the api role" '.data.role' "api"
+assert_json "API key honours the requested role" '.data.role' "api"
 
 request GET "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE"
 assert_eq "admin lists API keys" "$STATUS" "200"
@@ -834,6 +834,10 @@ assert_json "upstream receives API key display name" '.user' "agent-test"
 assert_json "upstream receives API key source" '.source' "api-key"
 assert_json "upstream receives API key principal" ".identity" "api-key:$API_KEY_ID"
 assert_json "raw API key is stripped from upstream" '.authz_key == null | tostring' "true"
+request GET agent.test.example /identity "" "" "" "" "x-role-key: $API_KEY_TOKEN"
+assert_eq "role-key header authenticates a proxy request" "$STATUS" "200"
+assert_json "upstream sees the same API key identity through role-key" ".identity" "api-key:$API_KEY_ID"
+assert_json "role-key is stripped from upstream" '.role_key == null | tostring' "true"
 request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" \
     "{\"ptype\":\"p\",\"v0\":\"role:api\",\"v1\":\"/$UPSTREAM_PORT/blocked\",\"v2\":\"GET\",\"eft\":\"deny\"}"
 assert_eq "admin can constrain the API role with a deny policy" "$STATUS" "201"
@@ -953,6 +957,90 @@ assert_json "API key role update is immediately visible" '.data.roles | join(","
 request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$VIEWER_API_KEY_ID" "" "" "" "$ADMIN_API_KEY_TOKEN"
 assert_eq "admin API key deletes another key" "$STATUS" "200"
 unset VIEWER_API_KEY_TOKEN
+
+# -- guest 角色：最小权限 API Key，唯一入口是只读诊断页 --------------------------
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name":"guest-agent"}'
+assert_eq "admin creates a guest API key" "$STATUS" "201"
+GUEST_API_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+GUEST_API_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+assert_json "new API key defaults to the guest role" '.data.role' "guest"
+
+request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key opens the diagnostic page" "$STATUS" "200"
+assert_contains "diagnostic page reports the TCP source address" "$BODY" "remote_addr"
+assert_contains "diagnostic page reports the proxy chain" "$BODY" "X-Forwarded-For"
+assert_contains "diagnostic page renders the request Host" "$BODY" "$ADMIN_HOST"
+
+request GET "$ADMIN_HOST" "/_authz/app/guest.html?json=1" "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "diagnostic page serves JSON on request" "$STATUS" "200"
+assert_json "diagnostic JSON reports the request host" '.data.request.host' "$ADMIN_HOST"
+assert_json "diagnostic JSON reports the TCP source" '.data.ip.remote_addr' "127.0.0.1"
+
+# 诊断页把请求头回显给调用方，是天然反射面：内容必须转义、凭据必须脱敏。
+request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN" \
+    'X-Test-Xss: <svg onload=alert(1)>'
+assert_eq "guest page answers requests carrying HTML payloads" "$STATUS" "200"
+assert_not_contains "guest page escapes echoed header markup" "$BODY" "<svg onload=alert(1)>"
+assert_contains "guest page keeps echoed header content as text" "$BODY" "&lt;svg onload=alert(1)&gt;"
+request GET "$ADMIN_HOST" /_authz/app/guest.html "$ADMIN_COOKIE" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key page request with a cookie still succeeds" "$STATUS" "200"
+assert_not_contains "guest page never echoes the session token" "$BODY" "$(cat "$ADMIN_COOKIE")"
+
+request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "" "x-role-key: $GUEST_API_KEY_TOKEN"
+assert_eq "guest key also opens the page through x-role-key" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key cannot read the control-plane session" "$STATUS" "403"
+request GET "$ADMIN_HOST" /_authz/api/applications "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key cannot enumerate bindings" "$STATUS" "403"
+request GET "$ADMIN_HOST" /_authz/api/menu-tree "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key cannot read the menu tree" "$STATUS" "403"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=/" "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key cannot browse files" "$STATUS" "403"
+request GET "$ADMIN_HOST" /_authz/api/api-keys "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key cannot manage API keys" "$STATUS" "403"
+request GET "$ADMIN_HOST" /_authz/apps/users.html "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key cannot open admin pages" "$STATUS" "302"
+assert_contains "guest key is sent to the login page" "$(cat "$TMP_DIR/headers")" \
+    "Location: /_authz/login"
+request GET "$ADMIN_HOST" /_authz/files/ "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "guest key cannot open the file browser" "$STATUS" "302"
+
+request POST "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE" "$CSRF" \
+    '{"username":"guest-browser","password":"guest12345","roles":["guest"]}'
+assert_eq "admin creates a guest-role user" "$STATUS" "201"
+login "$ADMIN_HOST" guest-browser guest12345 "$TMP_DIR/guest-cookie"
+request GET "$ADMIN_HOST" /_authz/app/guest.html "$TMP_DIR/guest-cookie"
+assert_eq "guest session opens the diagnostic page" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/session "$TMP_DIR/guest-cookie"
+assert_eq "guest session cannot read the control plane" "$STATUS" "403"
+request GET "$ADMIN_HOST" /_authz/apps/users.html "$TMP_DIR/guest-cookie"
+assert_eq "guest session is redirected away from admin pages" "$STATUS" "302"
+assert_contains "guest session lands on the diagnostic page" "$(cat "$TMP_DIR/headers")" \
+    "Location: /_authz/app/guest.html"
+request GET "$ADMIN_HOST" /_authz/apps/ "$TMP_DIR/guest-cookie"
+assert_eq "guest session cannot browse the console shell" "$STATUS" "302"
+request GET "$ADMIN_HOST" /_authz/api/session "$TMP_DIR/guest-cookie" "" "" "ak_invalid"
+assert_eq "guest session never falls back to an invalid API key" "$STATUS" "401"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID" "$ADMIN_COOKIE" "$CSRF" '{"role":"api"}'
+assert_eq "admin promotes the guest key to the api role" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "promoted key reaches the control plane immediately" "$STATUS" "200"
+request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID" "$ADMIN_COOKIE" "$CSRF" '{"role":"guest"}'
+assert_eq "admin demotes the key back to guest" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "demoted key loses the control plane immediately" "$STATUS" "403"
+request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "demoted key keeps the diagnostic page" "$STATUS" "200"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "admin deletes the guest key" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
+assert_eq "deleted guest key is rejected on the diagnostic page" "$STATUS" "401"
+
+request POST "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE" "$CSRF" \
+    '{"username":"multi-guest","password":"password123","roles":["guest","viewer"]}'
+assert_eq "users accept the guest role alongside others" "$STATUS" "201"
+unset GUEST_API_KEY_TOKEN
 
 request PUT "$ADMIN_HOST" /_authz/api/me/password "" "" \
     '{"old_password":"ignored","new_password":"ignored"}' "$ADMIN_API_KEY_TOKEN"
@@ -1144,7 +1232,7 @@ assert_json "WeChat default role" '.data.roles | join(",")' "viewer"
 request GET "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE"
 assert_eq "users API" "$STATUS" "200"
 assert_json "seeded admin user" '.data.users[0].username' "admin"
-assert_json "fixed role catalog" '.data.available_roles | join(",")' "admin,staff,user,viewer"
+assert_json "fixed role catalog" '.data.available_roles | join(",")' "admin,staff,user,viewer,guest"
 
 request POST "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE" "" '{"username":"bob","password":"bob123456","roles":"user"}'
 assert_eq "mutation without CSRF" "$STATUS" "403"
@@ -1328,7 +1416,7 @@ assert_eq "authorization API" "$STATUS" "200"
 assert_json "minimum dynamic port clamped" '.data.port_min | tostring' "2000"
 assert_json "local user policy identity option" '.data.policy_users[] | select(.username == "admin" and .source == "local") | .identity' "user:local:admin"
 assert_json "policy role options" '.data.policy_roles | index("user") != null | tostring' "true"
-assert_json "policy role catalog includes service api role" '.data.policy_roles | join(",")' "admin,staff,user,viewer,api"
+assert_json "policy role catalog includes service api role" '.data.policy_roles | join(",")' "admin,staff,user,viewer,guest,api"
 assert_json "remote identity is a policy subject" '.data.policy_users[] | select(.username == "remote_user" and .source == "nocobase") | .identity' "user:nocobase:remote_user"
 assert_json "local same-name identity is listed separately" '.data.policy_users[] | select(.username == "bob" and .source == "local") | .identity' "user:local:bob"
 assert_json "remote same-name identity is listed separately" '.data.policy_users[] | select(.username == "bob" and .source == "nocobase") | .identity' "user:nocobase:bob"
@@ -2361,7 +2449,7 @@ AGENT_LOOPBACK_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
 STATUS=$(curl -sS --max-time 5 --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1" \
     -o "$TMP_DIR/body" -w '%{http_code}' \
     "http://$ADMIN_HOST:$HTTP_PORT/_authz/api/session" \
-    -H "x-authz-key: $AGENT_LOOPBACK_TOKEN")
+    -H "x-api-key: $AGENT_LOOPBACK_TOKEN")
 assert_eq "loopback api key works from loopback" "$STATUS" "200"
 
 docker exec "$CONTAINER_NAME" env AUTHZ_ADMIN_PASSWORD=admin123 admin_password_reset >/dev/null
@@ -2717,6 +2805,12 @@ assert_eq "allow-list without loopback rejects loopback too" "$STATUS" "401"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/apps/ "$ENV_KEY2" "" "127.0.0.2"
 assert_eq "allow-listed source opens the admin page" "$STATUS" "200"
 
+# 实例级 Key 只认 x-api-key：角色头 x-role-key 仅接受数据库 Key，绝不放行万能 Key。
+ENVKEY_ROLE_STATUS=$(curl -sS --max-time 5 --resolve "$ENVKEY_HOST:$ENVKEY_HTTP_PORT:127.0.0.1" \
+    -o "$TMP_DIR/body" -w '%{http_code}' -H "x-role-key: $ENV_KEY" \
+    "http://$ENVKEY_HOST:$ENVKEY_HTTP_PORT/_authz/api/session")
+assert_eq "instance env key is rejected on x-role-key" "$ENVKEY_ROLE_STATUS" "401"
+
 # 呈现 x-api-key 就绝不回退到浏览器 Cookie；未配置 Key 的实例该头完全无效。
 ENVKEY_COOKIE="$TMP_DIR/envkey.cookie"
 ENVKEY_LOGIN_STATUS=$(curl -sS --max-time 5 \
@@ -2789,8 +2883,9 @@ set -e
 (( STARTUP_RC != 0 )) || fail "retired AUTHZ_API_KEY_LOOPBACK started anyway"
 assert_contains "retired loopback switch names the replacement" "$(<"$STARTUP_LOG")" "AUTHZ_API_KEY_ALLOWED_IPS"
 
-assert_contains_all "server template strips both credential headers" "$SERVER_TEMPLATE" \
+assert_contains_all "server template strips every credential header" "$SERVER_TEMPLATE" \
     'proxy_set_header X-Authz-Key       "";' \
-    'proxy_set_header X-API-Key         "";'
+    'proxy_set_header X-API-Key         "";' \
+    'proxy_set_header X-Role-Key        "";'
 
 printf '\nAll %d authz gateway checks passed.\n' "$PASS"
