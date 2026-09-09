@@ -9,6 +9,14 @@
 维护 Authz Gateway 全栈时，同时读取 `docs/maintenance-handbook.md`；项目级维护 Skill 位于
 `docs/maintain_skill.md`。
 
+按场景选择 Skill（三者边界不同，别用错）：
+
+| 场景 | Skill |
+|---|---|
+| 配服务 / 域名 / 权限 / API Key / 菜单 / 改写 | `skill/authz-helper` |
+| 部署 / 备份 / 升级 / 排障 / 日志 / 多实例 | `skill/authz-ops` |
+| 改网关自身代码 / 模板 / 测试 | `docs/maintain_skill.md` |
+
 涉及 `ngx`、请求阶段或 worker 生命周期的实现，必须在真实 OpenResty 实例中验证，不能只用系统 Lua 解释器代替。
 
 ## 总体设计模式
