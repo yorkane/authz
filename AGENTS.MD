@@ -276,15 +276,14 @@ lualib/tracker/
    curl -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/...
    ```
 
-2. **Agent 专用 API Key**：环境变量 `AUTHZ_AGENT_API_KEY` 指定一个 `ak_<64 hex>` token，
-   启动时 seed 为 `agent-default` key（角色 admin、`loopback_only=1`）。使用方式：
+2. **本机自动化**：原 `AUTHZ_AGENT_API_KEY`（自动 seed 的 `agent-default` Key）已移除。
+   等价替代：实例级 `AUTHZ_API_KEY`（`AUTHZ_API_KEY_ALLOWED_IPS` 默认仅 127.0.0.1）
+   或管理界面创建 `loopback_only=1` 的数据库 Key，均用 `x-api-key` 头提交：
 
    ```bash
-   curl -H "x-api-key: $AUTHZ_AGENT_API_KEY" http://127.0.0.1:6080/_authz/api/...
+   curl -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/...
    ```
 
-   该 key **只能从本机回环地址调用**，非回环来源一律 401。值保存在部署目录（如 `/data/app/.env`），
-   不入库、不进 git；轮换时改环境变量并重建容器。
 
 3. **普通 API Key**：管理员通过 `POST /_authz/api/api-keys` 创建（新建默认角色 `guest`，
    仅可访问 `/_authz/app/guest.html` 请求诊断页），角色决定控制面与代理权限，
@@ -319,8 +318,8 @@ lualib/tracker/
   （数据库 Key 也可用 `x-role-key`），不用 Cookie、不用 `Authorization: Bearer`。
 - **响应契约**：成功 `{"data": ...}`，失败 `{"error":{"code","message"}}`，JSON 为 UTF-8。
   状态码语义：401 未认证/Key 无效、403 无权限或 CSRF 失败、404 不存在、409 冲突、422 参数校验失败。
-- **最小权限**：Agent 用 `AUTHZ_AGENT_API_KEY` 时拥有 admin 权限，只应调用其任务所需的最小接口集合；
-  不要把该 key 写入日志、代码或 git。
+- **最小权限**：Agent 凭证（实例级 `AUTHZ_API_KEY` 或数据库 Key）权限按角色而定，只应调用其任务
+  所需的最小接口集合；不要把 key 写入日志、代码或 git。
   写绑定（`POST/PATCH /_authz/api/applications`）时要意识到它包含两条高危能力：
   `target_ip` 等同内网访问能力，`response_rewrite` 会改写返回给浏览器的响应；
   除非任务明确要求，Agent 不得提交 `response_rewrite`，也不得用它改写安全响应头或注入脚本。

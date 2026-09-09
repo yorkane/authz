@@ -85,10 +85,8 @@ host 网络或其他方式让目标服务位于网关容器的 `127.0.0.1` 网�
 `DELETE` 恢复默认（均为 admin + CSRF）；删除绑定会联动清理其覆盖行。键只接受 `binding:<数字>` / `port:<数字>`
 （浏览器 `%3A` 编码会被安全解码后严格校验）。
 
-Agent/API 控制面接入：设置 `AUTHZ_AGENT_API_KEY` 环境变量后启动，会 seed 名为 `agent-default` 的
-API Key（角色 admin、`loopback_only=1`），只能从网关宿主机本机调用 `/_authz/api/*`，非回环来源 401。
-轮换时更换该环境变量并重建容器。接入约定与硬性要求见 `AGENTS.MD` 的「Authz Gateway 的 API 控制」章节；
-接口明细见 `docs/core-api.md` 2.3 节。
+Agent/API 控制面接入：原 `AUTHZ_AGENT_API_KEY`（自动 seed `agent-default`）已移除；本机自动化改用实例级 `AUTHZ_API_KEY`（`AUTHZ_API_KEY_ALLOWED_IPS` 默认仅回环）或管理界面创建 `loopback_only=1` 的数据库 Key。
+接入约定与硬性要求见 `AGENTS.MD` 的「Authz Gateway 的 API 控制」章节；接口明细见 `docs/core-api.md` 2.3 节。
 
 实例级预置 API Key（免登录，`docs/core-api.md` 2.4 节）：`AUTHZ_API_KEY` 设定后用 `x-api-key`
 请求头免登录访问控制面 API、管理页面与代理入口，Agent 不必手动登录取 Cookie。角色由

@@ -64,8 +64,6 @@ services:
       AUTHZ_LOGIN_ATTEMPTS: ${AUTHZ_LOGIN_ATTEMPTS:-5}
       AUTHZ_LOGIN_WINDOW: ${AUTHZ_LOGIN_WINDOW:-1800}
       AUTHZ_LOGIN_FAIL_DELAY_MS: ${AUTHZ_LOGIN_FAIL_DELAY_MS:-1000}
-      # Agent 专用 API Key（仅本机可用，角色 admin）；留空不创建
-      AUTHZ_AGENT_API_KEY: ${AUTHZ_AGENT_API_KEY:-}
       # 实例级预置 API Key：`x-api-key` 请求头免登录访问控制面 API / 管理页面 / 代理入口
       AUTHZ_API_KEY: ${AUTHZ_API_KEY:-}
       AUTHZ_API_KEY_ROLE: ${AUTHZ_API_KEY_ROLE:-admin}

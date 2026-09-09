@@ -16,7 +16,6 @@ description: 配置 Authz Gateway 实例的助手：用 x-api-key 走控制面 A
 
 - `AUTHZ_API_KEY` — 实例级 Key，`x-api-key` 提交，免登录、免 CSRF，来源受
   `AUTHZ_API_KEY_ALLOWED_IPS` 限制（默认仅 127.0.0.1）；
-- `AUTHZ_AGENT_API_KEY` — 回环专用 Key，作用相同。
 
 ```bash
 source <(grep -E '^AUTHZ_API_KEY=' /data/app/.env)

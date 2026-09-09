@@ -175,7 +175,6 @@ docker exec <container_name> admin_password_reset
 | `AUTHZ_COOKIE_SECURE` | `false` | 生产入口始终为 HTTPS 时强制 Cookie `Secure` |
 | `AUTHZ_COOKIE_DOMAIN` | 从请求 Host 动态推导 | 可选的 Cookie 父域提示，支持逗号分隔多个值；仅匹配当前 Host 时生效，例如 `.ws.example.com,.w.wtvdev.com` |
 | `AUTHZ_LOGIN_ATTEMPTS` / `AUTHZ_LOGIN_WINDOW` / `AUTHZ_LOGIN_FAIL_DELAY_MS` | `5` / `1800` / `1000` | 登录防护：失败延迟返回，按账户名+IP 连续失败达阈值后锁定该账户组合（窗口=锁定时长） |
-| `AUTHZ_AGENT_API_KEY` | 空 | 设置后自动创建仅限本机回环调用的 Agent 专用 API Key（`agent-default`，角色 admin），供本机自动化程序使用 |
 | `AUTHZ_API_KEY` | 空 | 实例级预置 API Key：用 `x-api-key` 请求头免登录访问控制面 API、管理页面与代理入口，Agent 无需手动登录取 Cookie；留空即关闭 |
 | `AUTHZ_API_KEY_ROLE` | `admin` | 上述 Key 的角色（admin/staff/user/guest/api）；旧值 viewer 映射为 guest 并告警，权限走同角色 Casbin 策略 |
 | `AUTHZ_API_KEY_ALLOWED_IPS` | `127.0.0.1` | 上述 Key 的来源白名单：逗号分隔的 IP/CIDR（如 `127.0.0.1,10.0.0.0/8`），只有名单内的来源可用 |

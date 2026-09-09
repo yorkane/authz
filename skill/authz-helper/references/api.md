@@ -53,9 +53,9 @@
    `X-Authz-User: <Key名称>`、`X-Authz-Source: api-key`、`X-Authz-Identity: api-key:<id>`，
    第三方可据此区分身份（Key 名称建 Key 时就定好，见名知用途）。
 5. **来源限制**：数据库 Key 本身不限来源，安全边界是"谁拿着 Key"。需要限定来源时：
-   跨机固定出口 IP 的场景优先改用实例级 `AUTHZ_API_KEY`（配
-   `AUTHZ_API_KEY_ALLOWED_IPS` 白名单，只认 `x-api-key` 头）；只能本机的自动化用
-   `AUTHZ_AGENT_API_KEY`（回环强制 401）。
+   跨机固定出口 IP 或本机自动化的场景优先改用实例级 `AUTHZ_API_KEY`（配
+   `AUTHZ_API_KEY_ALLOWED_IPS` 白名单，默认 127.0.0.1，只认 `x-api-key` 头）；
+   也可创建 `loopback_only=1` 的数据库 Key（原 AUTHZ_AGENT_API_KEY 自动 seed 已移除）。
 6. **保管要求**：Key 放环境变量或密钥管理系统，不写 URL query、Cookie、日志、git；
    明文只在创建/轮换响应里出现一次，丢了只能轮换或重建。停用第三方时
    `PATCH {"enabled":false}` 立即失效，比删除温和。
