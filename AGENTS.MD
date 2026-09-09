@@ -401,6 +401,9 @@ guest 并告警，新建时提交 `viewer` 返回 422）。
 
 `241.t`（10.252.25.241）是本项目专用测试/回归实例，生产实例跑在本机（writer）。
 
+ **所有回归测试一律在 241.t 上运行；除非用户明确要求，不要向本机生产实例部署新代码或镜像**
+ （rsync 与 docker compose 只针对 241.t 的 /data/app/authz-test/，不动本机 /data/app/）。
+
 ```text
 /data/app/authz-test/        # docker-compose.yml + .env + rsync 进来的代码
 ├── docker-compose.yml       # authz:latest，network_mode: host，端口 6080/6443
