@@ -2984,8 +2984,9 @@ run_envkey_container "$ENVKEY_CONTAINER_NAME" "$ENVKEY_HTTP_PORT" "$ENVKEY_HTTPS
     "$TMP_DIR/envkey-data" "$ENV_KEY" "" admin
 # 实例 2：白名单 = 一个 /32 地址 + 一个 CIDR 段（都是 loopback 可 bind 地址，
 # 配合 envkey_req 的 --local-address 精确控制来源），角色 viewer。
+# 角色用 guest：viewer 已退役（提交即 422/启动失败），guest 是它的正式继承者。
 run_envkey_container "$ENVKEY2_CONTAINER_NAME" "$ENVKEY2_HTTP_PORT" "$ENVKEY2_HTTPS_PORT" \
-    "$TMP_DIR/envkey2-data" "$ENV_KEY2" "127.0.0.2/32,127.5.0.0/16" viewer
+    "$TMP_DIR/envkey2-data" "$ENV_KEY2" "127.0.0.2/32,127.5.0.0/16" guest
 
 envkey_wait_ready "$ENVKEY_HOST" "$ENVKEY_HTTP_PORT"
 

@@ -378,8 +378,8 @@ TEST_ONLY=guest,envkey TEST_DEBUG=1 OPENRESTY_TEST_IMAGE=authz:latest bash test/
  以及 guest 角色与 `/_authz/guest` 探针套件：默认角色 guest、探针 + 只回显自身的
  `GET /api/session` 之外的控制面/管理页/文件浏览全拒、回显转义与请求头完整明文回显、角色升降即时生效、
 密钥指纹 `token_prefix` 与 `POST /api/api-keys/:id/rotate` 轮换（旧明文当场失效）。
-viewer 角色已退役（迁移 18 把存量 viewer 就地改写为 guest，旧配置里的 `viewer` 值在加载期映射为
-guest 并告警，新建时提交 `viewer` 返回 422）。
+viewer 角色已退役（迁移 18 把存量 viewer 就地改写为 guest；现在提交 `viewer` 直接 422，
+不再有映射兼容）。
 
 当前回归覆盖 Router/ctxvar、请求体 helper、框架错误处理和 merge 原子性。最近维护基线为
 99 项检查；测试数量会随覆盖增长，应以脚本最终输出为准，包括：

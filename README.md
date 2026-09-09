@@ -176,7 +176,7 @@ docker exec <container_name> admin_password_reset
 | `AUTHZ_COOKIE_DOMAIN` | 从请求 Host 动态推导 | 可选的 Cookie 父域提示，支持逗号分隔多个值；仅匹配当前 Host 时生效，例如 `.ws.example.com,.w.wtvdev.com` |
 | `AUTHZ_LOGIN_ATTEMPTS` / `AUTHZ_LOGIN_WINDOW` / `AUTHZ_LOGIN_FAIL_DELAY_MS` | `5` / `1800` / `1000` | 登录防护：失败延迟返回，按账户名+IP 连续失败达阈值后锁定该账户组合（窗口=锁定时长） |
 | `AUTHZ_API_KEY` | `eeeec9f034335f136f87ad84b625ffff` | 实例级预置 API Key：用 `x-api-key` 请求头免登录访问控制面 API、管理页面与代理入口，Agent 无需手动登录取 Cookie；内置默认值仅适合本机/测试环境，生产务必更换，留空即关闭 |
-| `AUTHZ_API_KEY_ROLE` | `admin` | 上述 Key 的角色（admin/staff/user/guest/api）；旧值 viewer 映射为 guest 并告警，权限走同角色 Casbin 策略 |
+| `AUTHZ_API_KEY_ROLE` | `admin` | 上述 Key 的角色（admin/staff/user/guest/api），权限走同角色 Casbin 策略 |
 | `AUTHZ_API_KEY_ALLOWED_IPS` | `127.0.0.1` | 上述 Key 的来源白名单：逗号分隔的 IP/CIDR（如 `127.0.0.1,10.0.0.0/8`），只有名单内的来源可用 |
 | `AUTHZ_NOCO_ENABLED` | `false` | 在密码登录表单启用 NocoBase 身份来源 |
 | `AUTHZ_NOCO_URL` | 空 | NocoBase 站点根地址（启用远程认证时必须为 HTTPS） |
@@ -208,7 +208,7 @@ docker exec <container_name> admin_password_reset
 - `lualib/resty/authz/repository/` 集中所有运行时 SQL；`db.lua` 只负责生命周期、缓存查询和事务。
   多步骤管理写入在 service 层统一提交，提交后自动递增数据库/授权 revision，回滚不失效缓存。
 - Schema 变化通过 `db/migrations.lua` 追加有序版本，并记录到 `schema_migrations`；不要改写已发布迁移。
-- 数字前缀动态端口默认允许 `2000` 起步；人类角色固定为 `admin`、`staff`、`user`、`guest`（旧 `viewer` 已退役），
+- 数字前缀动态端口默认允许 `2000` 起步；人类角色固定为 `admin`、`staff`、`user`、`guest`
   应用 Key 可绑定这些角色或专用 `api` 角色；HTTP 方法使用完整方法目录，并支持多选策略。
 
 #### 身份与授权
@@ -217,8 +217,8 @@ docker exec <container_name> admin_password_reset
   wechat 或通用 OAuth 身份可以并存，角色和策略不能按用户名跨来源混用。
 - 本地用户和本地角色优先于远程记录；远程身份只单向同步用户名、来源、角色快照和时间信息，不回写身份源。
 - 启用状态由本机管理员控制，只有管理员主动删除后远程身份才会被清除；远程用户不能修改本地密码。
-- 旧目录里的 `viewer` 已退役，由 `guest` 接管：存量数据由迁移自动改写，旧配置里的
-  `viewer` 值会被映射为 `guest` 并告警，新建时提交 `viewer` 直接 422。
+- `viewer` 已退役并由 `guest` 接管：存量数据由迁移自动改写为 guest；现在提交 `viewer`
+  直接 422（不再映射兼容，按非法值拒绝）。
  - `guest` 是匿名用户角色，默认能力面只有两条：只读探针 `/_authz/guest`（**明文完整**回显当次
    请求的全部请求头、来源 IP 与代理转发链，用于 debug 链路），以及只回显自身身份的
    `GET /api/session`。其余控制面 API、管理页面与文件浏览一律拿不到；guest 可以访问的

@@ -9,11 +9,9 @@ local function env_bool(name, default)
     return value == "1" or value == "true" or value == "yes" or value == "on"
 end
 
--- viewer 已退役为 guest：旧环境变量里写 viewer 的部署继续可用，按 guest 处理。
-local function normalize_role(role)
-    role = role:lower()
-    return role == "viewer" and "guest" or role
-end
+ local function normalize_role(role)
+     return tostring(role or ""):lower()
+ end
 
 local function parse_roles(value, default)
     local allowed = { admin = true, staff = true, user = true, guest = true }
