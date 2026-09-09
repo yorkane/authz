@@ -129,7 +129,7 @@ end
 -- setExtraHTTPHeaders，curl 用 -H），页面内 JS 对 /_authz/api/* 的调用也会
 -- 沿用同一请求头。
 --
--- guest 是唯一被排除在外的角色：它只能访问只读诊断页 /_authz/app/guest.html
+-- guest 是唯一被排除在外的角色：它只能访问只读诊断页 /_authz/guest
 -- （由 resty.authz.guest 自行认证），拿不到管理页面、静态资源与文件浏览。
 function _M.authorize_request()
     local presented, current = _M.authenticate_request()

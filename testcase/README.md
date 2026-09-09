@@ -25,7 +25,7 @@ TEST_ONLY=t01,t04,t05 KEEP_GOING=1 bash testcase/ui_api_tests.sh
 | t01 | 框架/会话 | 实例 Key 建立会话；`GET /api/session` 返回 admin 身份与 `api-key:` identity |
 | t02 | 认证边界 | 无 Key 与无效 Key 访问控制面一律 401，绝不回退 Cookie（api.md §0） |
 | t03 | users.html 账户区块 | 建用户（默认角色）→ 改角色（user→staff）→ 重置密码 → 表单登录 302 → Cookie 会话生效 → 写操作缺 CSRF 403、带 X-CSRF-Token 200 |
-| t04 | users.html API 管理区块 | 建 guest Key（token 明文只出现一次、格式 ak_+64hex）→ 列表永不含明文 → guest 可 `GET /session`、可开 guest.html 诊断页、控制面 403 → 禁用即 401 → rotate 后旧 token 失效 → 删除 |
+| t04 | users.html API 管理区块 | 建 guest Key（token 明文只出现一次、格式 ak_+64hex）→ 列表永不含明文 → guest 可 `GET /session`、可开 `/_authz/guest` 探针、控制面 403 → 禁用即 401 → rotate 后旧 token 失效 → 删除 |
 | t05 | authorization.html 绑定/策略 + 代理链路 | 建前缀绑定 → 重复 409 → allow 策略放行 guest → deny 策略挡 `/secret.html` → `<port>-<域名>` 动态入口代理 200 且内容命中 → deny 优先返回 403 → 未认证 302 登录页 → menu-services 改名/重置 → 删绑定 |
 | t06 | menu-editor.html 菜单结构 | menu-tree 含 builtin `domains`/`local` 两组；menu-services 返回 binding 注入行 |
 | t07 | nginx_conf.html | 读三个 include 文件；非法配置 validate 被拒（staging，不落盘） |

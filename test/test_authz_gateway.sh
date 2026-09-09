@@ -1086,7 +1086,7 @@ request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$ADMIN_API_KEY_TOKEN"
 assert_json "admin-scoped key still reads its own identity" '.data.roles | join(",")' "admin"
 request GET "$ADMIN_HOST" /_authz/api/users "" "" "" "$VIEWER_API_KEY_TOKEN"
 assert_eq "guest-scoped key cannot use admin APIs" "$STATUS" "403"
-request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$VIEWER_API_KEY_TOKEN"
+request GET "$ADMIN_HOST" /_authz/guest "" "" "" "$VIEWER_API_KEY_TOKEN"
 assert_eq "guest-scoped key reaches only the diagnostic page" "$STATUS" "200"
 request PATCH "$ADMIN_HOST" "/_authz/api/api-keys/$VIEWER_API_KEY_ID" "" "" \
     '{"role":"user"}' "$ADMIN_API_KEY_TOKEN"
@@ -1110,28 +1110,30 @@ GUEST_API_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
 GUEST_API_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
 assert_json "new API key defaults to the guest role" '.data.role' "guest"
 
-request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
+request GET "$ADMIN_HOST" /_authz/guest "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "guest key opens the diagnostic page" "$STATUS" "200"
 assert_contains "diagnostic page reports the TCP source address" "$BODY" "remote_addr"
 assert_contains "diagnostic page reports the proxy chain" "$BODY" "X-Forwarded-For"
 assert_contains "diagnostic page renders the request Host" "$BODY" "$ADMIN_HOST"
 
-request GET "$ADMIN_HOST" "/_authz/app/guest.html?json=1" "" "" "" "$GUEST_API_KEY_TOKEN"
+request GET "$ADMIN_HOST" "/_authz/guest?json=1" "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "diagnostic page serves JSON on request" "$STATUS" "200"
 assert_json "diagnostic JSON reports the request host" '.data.request.host' "$ADMIN_HOST"
 assert_json "diagnostic JSON reports the TCP source" '.data.ip.remote_addr' "127.0.0.1"
 
-# 诊断页把请求头回显给调用方，是天然反射面：内容必须转义、凭据必须脱敏。
-request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN" \
+# 诊断页把请求头回显给调用方，是天然反射面：内容必须转义。
+# 调试需求：所有请求头（含会话 Cookie）均明文完整回显，因此该断言反过来
+# 要求会话 Cookie 必须出现在页面里（入口始终有 guest/admin 门禁兜底）。
+request GET "$ADMIN_HOST" /_authz/guest "" "" "" "$GUEST_API_KEY_TOKEN" \
     'X-Test-Xss: <svg onload=alert(1)>'
 assert_eq "guest page answers requests carrying HTML payloads" "$STATUS" "200"
 assert_not_contains "guest page escapes echoed header markup" "$BODY" "<svg onload=alert(1)>"
 assert_contains "guest page keeps echoed header content as text" "$BODY" "&lt;svg onload=alert(1)&gt;"
-request GET "$ADMIN_HOST" /_authz/app/guest.html "$ADMIN_COOKIE" "" "" "$GUEST_API_KEY_TOKEN"
+request GET "$ADMIN_HOST" /_authz/guest "$ADMIN_COOKIE" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "guest key page request with a cookie still succeeds" "$STATUS" "200"
-assert_not_contains "guest page never echoes the session token" "$BODY" "$(cat "$ADMIN_COOKIE")"
+assert_contains "guest page echoes headers in full (plaintext debug)" "$BODY" "$(cat "$ADMIN_COOKIE")"
 
-request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "" "x-role-key: $GUEST_API_KEY_TOKEN"
+request GET "$ADMIN_HOST" /_authz/guest "" "" "" "" "x-role-key: $GUEST_API_KEY_TOKEN"
 assert_eq "guest key also opens the page through x-role-key" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "guest key reads its own session identity" "$STATUS" "200"
@@ -1157,7 +1159,7 @@ request POST "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE" "$CSRF" \
     '{"username":"guest-browser","password":"guest12345","roles":["guest"]}'
 assert_eq "admin creates a guest-role user" "$STATUS" "201"
 login "$ADMIN_HOST" guest-browser guest12345 "$TMP_DIR/guest-cookie"
-request GET "$ADMIN_HOST" /_authz/app/guest.html "$TMP_DIR/guest-cookie"
+request GET "$ADMIN_HOST" /_authz/guest "$TMP_DIR/guest-cookie"
 assert_eq "guest session opens the diagnostic page" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/session "$TMP_DIR/guest-cookie"
 # 唯一的自服务例外：guest 会话可以读到「自己」的身份，管理界面才退得出登录。
@@ -1171,7 +1173,7 @@ assert_eq "guest session cannot browse files" "$STATUS" "403"
 request GET "$ADMIN_HOST" /_authz/apps/users.html "$TMP_DIR/guest-cookie"
 assert_eq "guest session is redirected away from admin pages" "$STATUS" "302"
 assert_contains "guest session lands on the diagnostic page" "$(cat "$TMP_DIR/headers")" \
-    "Location: /_authz/app/guest.html"
+    "Location: /_authz/guest"
 request GET "$ADMIN_HOST" /_authz/apps/ "$TMP_DIR/guest-cookie"
 assert_eq "guest session cannot browse the console shell" "$STATUS" "302"
 request GET "$ADMIN_HOST" /_authz/api/session "$TMP_DIR/guest-cookie" "" "" "ak_invalid"
@@ -1191,7 +1193,7 @@ request GET "$ADMIN_HOST" /_authz/api/session "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_json "demoted key keeps its own identity" '.data.roles | join(",")' "guest"
 request GET "$ADMIN_HOST" /_authz/api/applications "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "demoted key loses the control plane immediately" "$STATUS" "403"
-request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
+request GET "$ADMIN_HOST" /_authz/guest "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "demoted key keeps the diagnostic page" "$STATUS" "200"
 # 轮换：库里只存摘要，忘了密钥就只能换新的一把；旧值必须当场失效。
 request POST "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID/rotate" "$ADMIN_COOKIE" ""
@@ -1208,14 +1210,14 @@ request GET "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE"
 assert_eq "admin lists API keys after rotation" "$STATUS" "200"
 assert_json "rotated fingerprint is visible in the list" "[.data[] | select(.id == $GUEST_API_KEY_ID)][0].token_prefix" "${GUEST_ROTATED_TOKEN:0:11}"
 assert_json "API key list still never exposes a secret" "[.data[] | has(\"token\")] | any | tostring" "false"
-request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
+request GET "$ADMIN_HOST" /_authz/guest "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "rotated API key invalidates the previous secret" "$STATUS" "401"
-request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_ROTATED_TOKEN"
+request GET "$ADMIN_HOST" /_authz/guest "" "" "" "$GUEST_ROTATED_TOKEN"
 assert_eq "rotated secret opens the diagnostic page" "$STATUS" "200"
 GUEST_API_KEY_TOKEN="$GUEST_ROTATED_TOKEN"
 request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$GUEST_API_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "admin deletes the guest key" "$STATUS" "200"
-request GET "$ADMIN_HOST" /_authz/app/guest.html "" "" "" "$GUEST_API_KEY_TOKEN"
+request GET "$ADMIN_HOST" /_authz/guest "" "" "" "$GUEST_API_KEY_TOKEN"
 assert_eq "deleted guest key is rejected on the diagnostic page" "$STATUS" "401"
 
 request POST "$ADMIN_HOST" /_authz/api/users "$ADMIN_COOKIE" "$CSRF" \
@@ -3038,7 +3040,7 @@ assert_json "retired AUTHZ_API_KEY_ROLE=viewer maps to guest" '.data.roles | joi
 assert_json "guest-role env key is not admin" '.data.admin | tostring' "false"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/users "$ENV_KEY2" "" "127.0.0.2"
 assert_eq "guest-role env key cannot manage users" "$STATUS" "403"
-envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/app/guest.html "$ENV_KEY2" "" "127.5.0.9"
+envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/guest "$ENV_KEY2" "" "127.5.0.9"
 assert_eq "CIDR allow-list entry admits an in-range source" "$STATUS" "200"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/api/session "$ENV_KEY2" "" "127.6.0.9"
 assert_eq "source outside the CIDR range is rejected" "$STATUS" "401"
@@ -3047,7 +3049,7 @@ assert_eq "allow-list without loopback rejects loopback too" "$STATUS" "401"
 envkey_req GET "$ENVKEY2_HOST" "$ENVKEY2_HTTP_PORT" /_authz/apps/ "$ENV_KEY2" "" "127.0.0.2"
 assert_eq "guest-role env key never opens the admin console" "$STATUS" "302"
 # 机器 Key 没有会话：与数据库 guest Key 一致，管理入口把它导向登录页，
-# 而不是把控制台渲染出来（诊断页要显式访问 /_authz/app/guest.html）。
+# 而不是把控制台渲染出来（诊断页要显式访问 /_authz/guest）。
 assert_contains "guest-role env key is sent to the login page" "$(cat "$TMP_DIR/headers")" \
     "Location: /_authz/login"
 

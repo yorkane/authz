@@ -69,10 +69,10 @@ Cookie 会话或 `x-api-key` 头（Playwright setExtraHTTPHeaders）均可认证
 | 保存/重载 | 保存成功才落盘；reload 失败显示 nginx 报错 | `PUT /api/nginx-conf`、`POST /api/nginx-conf/reload` |
 | 持久化提示 | 模板目录只读时提示重启丢失 | 响应 `persistent:false` |
 
-## 6. guest.html — 访客诊断页
+ ## 6. /_authz/guest — 访客探针
 
-无管理入口，直接访问 `/_authz/app/guest.html`；guest 角色 Key/会话可打开，admin 也可。
-回显调用者的请求头/来源 IP/代理转发链（服务端转义+脱敏）；`?json=1` 返回 JSON。
+无管理入口，直接访问 `/_authz/guest`；guest 角色 Key/会话可打开，admin 也可。
+ 明文完整回显调用者的请求头（含凭据头）/来源 IP/代理转发链（服务端转义）；`?json=1` 返回 JSON。
 用于第三方/Agent 链路自检。
 
 ## 7. 登录页（ui.lua 服务端渲染）

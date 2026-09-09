@@ -286,7 +286,7 @@ lualib/tracker/
 
 
 3. **普通 API Key**：管理员通过 `POST /_authz/api/api-keys` 创建（新建默认角色 `guest`，
-   仅可访问 `/_authz/app/guest.html` 请求诊断页），角色决定控制面与代理权限，
+   仅可访问 `/_authz/guest` 请求诊断页），角色决定控制面与代理权限，
    不限来源但无 CSRF 豁免差异（API key 本身免 CSRF）。
 4. **浏览器会话**：人用，修改请求需 `X-CSRF-Token`。Agent 不应使用会话方式，避免 CSRF 与 Cookie 管理。
 
@@ -303,8 +303,9 @@ lualib/tracker/
   （`response_rewrite` 字段配置绑定级响应改写，字段与限制见 `docs/core-api.md`）
 - 策略：`GET /_authz/api/authorization`、`POST /_authz/api/policies`、`PATCH|DELETE /_authz/api/policies/:id`
 - API Key：`GET|POST /_authz/api/api-keys`、`PATCH|DELETE /_authz/api/api-keys/:id`
-- Guest 诊断页：`GET /_authz/app/guest.html`（guest/admin 角色；加 `?json=1` 返回 JSON）
-  ——回显当次请求的全部请求头、来源 IP 与代理转发头，凭据类头自动脱敏。
+- Guest 诊断页：`GET /_authz/guest`（guest/admin 角色；加 `?json=1` 返回 JSON）
+  ——**明文完整**回显当次请求的全部请求头（含 Cookie/Authorization/API Key）、来源 IP
+  与代理转发头，用于 debug；guest 的代理访问范围可像其他角色一样用策略配置。
 - 菜单树：`GET /_authz/api/menu-tree`（渲染用）；`GET|POST /_authz/api/menu-entries`、
   `PUT /_authz/api/menu-entries/reorder`、`PATCH|DELETE /_authz/api/menu-entries/:id`（编辑用）
 
@@ -374,8 +375,8 @@ TEST_ONLY=guest,envkey TEST_DEBUG=1 OPENRESTY_TEST_IMAGE=authz:latest bash test/
 `wait` 等待后台请求——常驻 mock 会让 `wait` 永不返回。
 
 最近基线：Router 99、共享会话 29、authz 网关 882（含实例级 API Key x-api-key 免登录、IP/CIDR 白名单、
-以及 guest 角色与 `/_authz/app/guest.html` 诊断页套件：默认角色 guest、诊断页 + 只回显自身的
-`GET /api/session` 之外的控制面/管理页/文件浏览全拒、回显转义与凭据脱敏、角色升降即时生效、
+ 以及 guest 角色与 `/_authz/guest` 探针套件：默认角色 guest、探针 + 只回显自身的
+ `GET /api/session` 之外的控制面/管理页/文件浏览全拒、回显转义与请求头完整明文回显、角色升降即时生效、
 密钥指纹 `token_prefix` 与 `POST /api/api-keys/:id/rotate` 轮换（旧明文当场失效）。
 viewer 角色已退役（迁移 18 把存量 viewer 就地改写为 guest，旧配置里的 `viewer` 值在加载期映射为
 guest 并告警，新建时提交 `viewer` 返回 422）。

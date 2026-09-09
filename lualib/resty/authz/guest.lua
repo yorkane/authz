@@ -1,16 +1,20 @@
 -- resty.authz.guest
--- Guest 诊断页 /_authz/app/guest.html：以服务端视角回显「当前请求」的完整
--- 信息（全部请求头、来源 IP、代理链与转发头），供 guest 角色访客或管理员
--- 自检接入链路（例如确认反代是否透传了真实客户端地址）。
+-- Guest 探针 /_authz/guest：以服务端视角回显「当前请求」的完整信息
+-- （全部请求头、来源 IP、代理链与转发头），供 guest 角色访客或管理员
+-- 调试接入链路（例如确认反代是否透传了真实客户端地址、上游实际收到的凭据头）。
+--
+-- guest 是匿名用户角色：默认能力就是这条探针（外加只回显自身身份的
+-- GET /api/session）；管理员可以像配置其他角色一样，在策略里为
+-- role:guest 追加可访问的代理目标范围。
 --
 -- 准入：携带 guest（或 admin）角色的 API Key（x-api-key），或以 guest/admin
 -- 角色登录的浏览器会话；浏览器未登录时跳转 /_authz/login。
 --
 -- 安全约束：
 --   * HTML 全部服务端渲染并逐字段 HTML 转义，不回显任何可执行内容；
---   * Cookie / Authorization / API Key / token / secret 类请求头一律脱敏，
---     即使调用方本身是管理员也不给明文；
 --   * 响应禁止缓存（诊断内容与当次请求绑定，缓存等于跨请求泄露）。
+--   * 调试需求：所有请求头（含 Cookie / Authorization / API Key）均明文
+--     完整回显，因此该入口必须始终保持 guest/admin 角色门禁。
 
 local cjson = require "cjson.safe"
 local util = require "resty.authz.util"
@@ -23,30 +27,6 @@ local authz = require "resty.authz"
 
 local _M = {}
 local escape_html = util.escape_html
-
--- 整值脱敏的头（凭据类，任何角色都不应看到明文）。
-local SECRET_HEADERS = {
-    ["cookie"] = true,
-    ["authorization"] = true,
-    ["proxy-authorization"] = true,
-    ["x-api-key"] = true,
-    ["x-authz-key"] = true,
-    ["x-role-key"] = true,
-    ["x-noco-token"] = true,
-}
-
-local function masked_value(name, value)
-    local lower = string.lower(name)
-    if SECRET_HEADERS[lower]
-        or lower:find("api[_-]?key", 1, true)
-        or lower:find("secret", 1, true)
-        or lower:find("token", 1, true)
-        or lower:find("password", 1, true) then
-        return "***已脱敏***", true
-    end
-    return value, false
-end
-
 local function sorted_header_names(headers)
     local names = {}
     for name in pairs(headers) do
@@ -83,10 +63,7 @@ function _M.request_info()
         local list = type(raw) == "table" and raw or { raw }
         for _, item in ipairs(list) do
             if type(item) ~= "string" then item = tostring(item) end
-            local value, masked = masked_value(name, item)
-            header_rows[#header_rows + 1] = {
-                name = name, value = value, masked = masked and true or false,
-            }
+            header_rows[#header_rows + 1] = { name = name, value = item }
         end
     end
 
@@ -123,7 +100,7 @@ function _M.request_info()
     }
 end
 
--- 入口：/_authz/app/guest.html。认证在此内聚：
+-- 入口：/_authz/guest。认证在此内聚：
 --   * 呈现 x-api-key：必须是合法 Key（数据库 Key 或环境变量 Key），无效直接
 --     401，绝不回退 Cookie；
 --   * 未呈现 Key：按浏览器会话处理，未登录跳登录页；
@@ -143,7 +120,7 @@ function _M.handle()
         current = token and session.get(token) or nil
         if not current then
             return ngx.redirect("/_authz/login?next=" ..
-                ngx.escape_uri(ngx.var.request_uri or "/_authz/app/guest.html"),
+                ngx.escape_uri(ngx.var.request_uri or "/_authz/guest"),
                 ngx.HTTP_MOVED_TEMPORARILY)
         end
     end
@@ -186,9 +163,8 @@ end
 local function header_table_html(rows)
     local lines = {}
     for _, row in ipairs(rows) do
-        local badge = row.masked and " <span class='badge'>masked</span>" or ""
         lines[#lines + 1] = "<tr><th>" .. escape_html(row.name) .. "</th><td>" ..
-            escape_html(row.value) .. badge .. "</td></tr>"
+            escape_html(row.value) .. "</td></tr>"
     end
     if #lines == 0 then lines[1] = "<tr><td>—</td></tr>" end
     return table.concat(lines, "")
@@ -202,7 +178,7 @@ local function proxy_chain_html(list, raw)
     return "<tr><th>X-Forwarded-For 代理链</th><td>" .. html .. "</td></tr>"
 end
 
--- GET /_authz/app/guest.html —— server-side 渲染，不做任何客户端注入。
+-- GET /_authz/guest —— server-side 渲染，不做任何客户端注入。
 function _M.page()
     local info = _M.request_info()
     local args = info.request.args
@@ -229,12 +205,11 @@ table{border-collapse:collapse;width:100%;table-layout:fixed}
 th,td{text-align:left;vertical-align:top;padding:6px 10px;border-bottom:1px solid rgba(139,145,184,.12);word-break:break-all}
 th{width:220px;color:#8f96b8;font-weight:500}
 tr:last-child th,tr:last-child td{border-bottom:0}
-.badge{font-size:11px;color:#ffd479;border:1px solid rgba(255,212,121,.4);border-radius:6px;padding:0 6px;margin-left:6px}
 .arrow{color:#6d7394}
 code{background:rgba(139,145,184,.15);padding:1px 6px;border-radius:6px}
 </style></head><body><main>
 <h1>Guest 请求诊断</h1>
-<p class="sub">以下信息来自网关收到的<b>本次请求</b>本身（服务端视角）。凭据类 Header 已脱敏。</p>
+<p class="sub">以下信息来自网关收到的<b>本次请求</b>本身（服务端视角）。全部请求头均明文回显（该入口仅限 guest/admin 角色）。</p>
 <section><h2>来源 IP</h2><table>
 ]] .. row_html("TCP 来源地址 (remote_addr)", info.ip.remote_addr)
     .. row_html("网关解析的真实客户端 (real_ip)", info.ip.real_ip)

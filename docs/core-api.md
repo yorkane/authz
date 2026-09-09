@@ -40,7 +40,7 @@ x-role-key: ak_<64 个小写十六进制字符>
 `x-role-key` 是角色 Key 专用头，只接受数据库 Key；`x-api-key` 也接受数据库 Key（并额外接受
 2.4 的实例级 Key）。两个头同时呈现时以 `x-role-key` 为准。
 API Key 的主体是 `api-key:<id>`，创建或修改时可绑定一个固定目录角色：`admin`、`staff`、`user`、
-`guest`、`api`，新建默认为 `guest`（仅可访问 `/_authz/app/guest.html` 诊断页）。
+`guest`、`api`，新建默认为 `guest`（仅可访问 `/_authz/guest` 诊断页）。
 旧目录里的 `viewer` 已退役，由 `guest` 接管：新建时提交 `viewer` 会被拒绝（422），
 存量数据由迁移 `18:retire_viewer_role_into_guest` 就地改写。
 控制面权限与同角色用户一致，代理权限由对应的 `role:<role>` Casbin 策略决定。
@@ -107,7 +107,7 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 
 | 接口能力 | `guest` | 普通用户/Key | `admin` 用户/Key | `api` Key |
 |---|---:|---:|---:|---:|
-| 打开 `/_authz/app/guest.html` 诊断页 | 是 | 否 | 是 | 否 |
+| 打开 `/_authz/guest` 诊断页 | 是 | 否 | 是 | 否 |
 | 读取自身身份和应用入口 | 否 | 是 | 是 | 是 |
 | 浏览器注销/修改自己的密码 | 仅用户会话 | 仅用户会话 | 否 |
 | 新建域名与端口绑定 | 否 | 是 | 是 |
@@ -121,22 +121,22 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 本地或远程用户；`guest` 反过来只能分配给用户与 Key，且被 guard 统一拒绝全部控制面 API。角色目录
 固定，不提供动态新建角色 API。
 
-## 3.1 Guest 诊断页（`/_authz/app/guest.html`）
+## 3.1 Guest 诊断页（`/_authz/guest`）
 
 回显**当次请求**在服务端看到的完整信息，用来自检接入链路（例如确认反向代理是否透传了真实客户端
 地址、上游收到了哪些头）。`guest` 角色的 Key 或登录会话即可访问，`admin` 也可用于核对。
 `guest` 的能力面只有两条：本页面，以及只回显调用者自身的 `GET /api/session`；其余控制面 API、管理页面与文件浏览一律拒绝。
 
 ```bash
-curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.html"
-curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.html?json=1"
+curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/guest"
+curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/guest?json=1"
 ```
 
 - 页面为服务端渲染；`?json=1` 返回同一数据的 JSON 形态（`{data: {ip, proxy, request, headers}}`）。
 - 展示内容：TCP `remote_addr`、网关解析出的真实客户端、`X-Forwarded-For` 代理链（首项 = 客户端原始
   IP，末项 = 上一跳代理）、`Forwarded`/`X-Forwarded-*`/`Via`、请求行，以及全部请求头。
-- `Cookie`/`Authorization`/`x-api-key` 等凭据类头，以及名字里含 `token`/`secret`/`password`/`api-key`
-  的头，一律显示为脱敏占位符，即使调用方是管理员也不给明文。
+ - 调试需求：所有请求头（含 `Cookie`/`Authorization`/`x-api-key` 等凭据类头）**明文完整回显**，
+   因此该入口必须始终保持 guest/admin 角色门禁，不得放开给匿名访问。
 - 回显内容是天然反射面：所有字段逐条 HTML 转义，响应 `Cache-Control: no-store`（诊断内容与当次
   请求绑定，缓存等于跨请求泄露）。这些行为在回归里是固定断言，改动前先看测试。
 - 浏览器直接访问且未登录时会跳 `/_authz/login`；呈现了无效 `x-api-key` 则直接 401，不回退 Cookie。
@@ -158,7 +158,7 @@ curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/app/guest.ht
 
 名称为 2–64 位 ASCII 字母、数字、点、下划线或连字符。`role` 可为
 `admin/staff/user/guest/api`，省略时默认 `guest`（最小权限：只能访问
-`/_authz/app/guest.html` 请求诊断页，见「Guest 诊断页」一节）。需要调用控制面 API 时，
+`/_authz/guest` 请求诊断页，见「Guest 诊断页」一节）。需要调用控制面 API 时，
 再改成 `api` 或 `admin`。
 
 创建响应中的 `token` 只出现一次；同时返回 `token_prefix`（明文前 11 字符，形如 `ak_1a2b3c4d`）

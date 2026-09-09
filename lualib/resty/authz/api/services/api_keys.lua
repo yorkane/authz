@@ -14,7 +14,7 @@ end
 function _M.create(data)
     local name = validation.valid_api_key_name(data.name)
     if not name then return nil, "名称需为 2-64 位字母、数字、点、下划线或连字符", 422 end
--- 新建 API 默认 guest 角色（只放行 /_authz/app/guest.html 只读页），可显式选其他角色。
+-- 新建 API 默认 guest 角色（只放行 /_authz/guest 只读页），可显式选其他角色。
     local role = api_key.valid_role(data.role or "guest")
     if not role then return nil, "API Key 角色仅支持 admin、staff、user、guest、api", 422 end
     local random_part = util.random_token(32)

@@ -50,13 +50,15 @@ register("POST", "/login",         ui.login_post)
 register("GET",  "/oauth/start",   ui.oauth_start)
 register("GET",  "/oauth/callback", ui.oauth_callback)
 
--- ── Guest 诊断页 ────────────────────────────────────────────────────────────
--- /_authz/app/guest.html：guest 角色专属（角色 guest 的数据库 API Key，或持有
--- guest 角色的登录会话），回显本次请求的请求头 / 来源 IP / 代理转发信息。
--- 服务端渲染、敏感头脱敏；?json=1 返回同一数据的 JSON 形态。
--- admin 也可访问，便于管理员核对某次请求在网关侧看到的真实信息。
+-- ── Guest 探针 ──────────────────────────────────────────────────────────────
+-- /_authz/guest：guest 是匿名用户角色，默认能力就是这条只读探针（guest 角色的
+-- 数据库 API Key，或持有 guest 角色的登录会话），完整回显本次请求的全部请求头
+-- （含 Cookie / Authorization / API Key，明文，调试用）、来源 IP 与代理转发信息。
+-- admin 也可访问，便于核对某次请求在网关侧看到的真实信息。
+-- 除探针外，guest 的可访问代理范围与其他角色一样由策略（role:guest 主体）配置。
+-- 服务端渲染、逐字段 HTML 转义；?json=1 返回同一数据的 JSON 形态。
 -- 认证与角色门禁内聚在 guest.handle：浏览器未登录跳登录页，无效 Key 直接 401。
-register("GET", "/app/guest.html", guest.handle)
+register("GET", "/guest", guest.handle)
 
 -- ── Session ─────────────────────────────────────────────────────────────────
 -- The SPA shell calls this on startup; re-issue the session cookie so
@@ -65,7 +67,7 @@ register("GET", "/app/guest.html", guest.handle)
 -- API-key calls have no session token, so they stay untouched.
 -- self_service：guest 的能力面之一就是「知道自己是谁」：该端点只回显调用者自身，
 -- 没有侦察价值，所以浏览器会话与 guest Key 都放行。它不含写操作；退出登录另外标了
--- session_only，机器 Key 依然进不去。其余控制面端点对 guest 仍然全部 403。
+-- session_only，机器 Key 依然进不去。其余控制面端点对 guest 按各自角色门禁放行。
 register("GET", "/api/session", guard.wrap(function(_, _, _, current, token)
     if token then session.set_cookie(token) end
     return { data = service.session_payload(current) }

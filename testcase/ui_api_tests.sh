@@ -99,7 +99,7 @@ t04_api_keys() {
   check t04.guest_not_admin "$(jget '.data.admin' | grep -qx false && echo 1)"
   raw "$API/users" -H "x-api-key: $gk"
   check t04.guest_users_403 "$([ "$APICODE" = 403 ] && echo 1)" "$APICODE"
-  raw "$GATEWAY/_authz/app/guest.html" -H "x-api-key: $gk"
+  raw "$GATEWAY/_authz/guest" -H "x-api-key: $gk"
   check t04.guest_diag_200 "$([ "$APICODE" = 200 ] && echo 1)" "$APICODE"
   api "/api-keys/$kid" -X PATCH -H 'Content-Type: application/json' -d '{"enabled":false}'
   raw "$API/session" -H "x-api-key: $gk"

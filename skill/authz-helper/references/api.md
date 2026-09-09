@@ -24,7 +24,7 @@
 
 - `GET /api-keys` — 元数据列表，永不含明文；`token_prefix`（前 11 字符）是识别指纹。
 - `POST /api-keys` — `{"name":"ci-agent","role":"guest"}`；角色省略默认 `guest`
-  （仅 `/_authz/app/guest.html` 诊断页 + `GET /session`）。要调控制面 API 选
+  （仅 `/_authz/guest` 探针 + `GET /session`，代理范围可用策略另行授予）。要调控制面 API 选
   `api`/`staff`/`admin`。响应里的 `token`（`ak_<64hex>`）**只出现一次**。
 - `POST /api-keys/:id/rotate` — 轮换，旧值当场失效，新 `token` 同样只出现一次。
 - `PATCH /api-keys/:id` — `{"name","role","enabled":false}`，立即生效。
@@ -42,7 +42,7 @@
    - 代理入口：域名/端口绑定与 `<port>-域名` 动态入口，如
      `https://code-235.ai-t.wtvdev.com:6443/api/...`。
 3. **权限边界 = 角色 + Casbin 策略**：
-   - `guest`：只有 `GET /_authz/app/guest.html` 诊断页和只回显自身的
+   - `guest`：只有 `GET /_authz/guest` 诊断页和只回显自身的
      `GET /_authz/api/session`；其余控制面 API、管理页、文件浏览一律拒绝。
      给第三方做链路自检（确认来源 IP、代理头、上游收到的头）用 guest 即可。
    - `user`/`staff`/`admin`：按角色的 Casbin 策略决定控制面与代理目标权限；
@@ -66,7 +66,7 @@
 
 ```bash
 KEY=ak_xxx   # 创建时一次性返回的 token
-curl -H "x-api-key: $KEY" "https://<入口>/_authz/app/guest.html?json=1"  # guest 自检链路
+curl -H "x-api-key: $KEY" "https://<入口>/_authz/guest?json=1"  # guest 自检链路
 curl -H "x-api-key: $KEY" "https://<绑定域名>/api/status"                # 代理入口
 curl -H "x-api-key: $KEY" "https://<入口>/_authz/api/applications"       # 控制面（按角色）
 ```
@@ -238,8 +238,8 @@ core-api.md 与代码为准）。
 
 ## 11. 其他端点与语义速查
 
-- `GET /_authz/app/guest.html?json=1` — guest 角色诊断页（回显请求头/来源/代理链，
-  服务端转义+脱敏）；guest Key 只能访问它和 `GET /session`，admin 也可看。
+ - `GET /_authz/guest?json=1` — guest 角色探针（明文完整回显请求头/来源/代理链，
+   服务端转义）；guest Key 默认只能访问它和 `GET /session`，admin 也可看。
 - `GET /api/files?path=` — 只读列 `AUTHZ_FILES_ROOT` 目录（登录或非 guest Key）。
 - `PUT /api/me/password` — 改自己密码（session_only；改完其他会话全部下线）。
 - `PUT /api/users/:id/password` — admin 重置他人密码。

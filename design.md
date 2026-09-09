@@ -234,7 +234,7 @@ resolver（gateway/resolver.lua）按序命中：
 | OAuth/OIDC | Authorization Code + PKCE；一次性 state；NocoBase 校验 issuer 并使用 Basic Client 认证；access token 不落库 |
 | 身份隔离 | 用户名与来源组成身份；同名多来源的会话、角色与直授权互不影响 |
 | 管理边界 | 仅 admin 可读取用户列表、应用和 Casbin 策略；非管理员只读取自身会话资料 |
-| guest 收口 | `guest` 只保留两项能力：只读诊断页 `/_authz/app/guest.html`，以及只回显调用者自身的 `GET /api/session`（例外由路由上的 `self_service` 标记显式声明，新增端点默认不放开）；其余控制面 API 被 guard 统一拒绝，`authorize_request` 与 `/_authz/apps` 放行逻辑同样排除 guest。诊断页服务端渲染、逐字段 HTML 转义、凭据脱敏、禁缓存（该页把请求头回显给调用方，是天然反射面，因此转义与脱敏在测试中作为固定断言） |
+| guest 收口 | `guest` 是匿名用户角色，默认只保留两项能力：只读探针 `/_authz/guest`，以及只回显调用者自身的 `GET /api/session`（例外由路由上的 `self_service` 标记显式声明，新增端点默认不放开）；其余控制面 API 被 guard 统一拒绝，`authorize_request` 与 `/_authz/apps` 放行逻辑同样排除 guest。guest 的代理访问范围与其他角色一样由策略（`role:guest` 主体）配置。探针页服务端渲染、逐字段 HTML 转义、禁缓存，但**全部请求头明文回显（含 Cookie/Authorization/API Key）**——调试需求，因此 guest/admin 门禁是不可拆除的兜底（转义与完整回显在测试中作为固定断言） |
 | 远程密码 | NocoBase、Google、钉钉、微信等远程身份不能在本机修改密码 |
 | 远程生命周期 | 登录记录不覆盖本机启用状态；仅管理员删除记录后，下次认证才按新身份重新创建 |
 | 响应改写 | 绑定级 response_rewrite 仅覆盖透传类响应头：Set-Cookie、Content-Length/Transfer-Encoding 等分帧与 hop-by-hop、X-Authz-*/X-Forwarded-*/Proxy-*、以及 XFO/CSP/HSTS/NOSNIFF 等安全头在 validation 与运行期双层拒绝；正则保存时做 PCRE 编译校验并限长（16 条/512/4096/64KB），正文改写只在 200 文本响应上缓冲且上限 1MB，超限原样透传，不改写 WebSocket/Range/压缩流 |
@@ -325,7 +325,7 @@ Redis ACL 单写多读与故障失败关闭、Relay 退役 410。
 **只要呈现了任一凭证头就只认它**：Key 无效直接 401，绝不回退浏览器 Cookie。
 凭证头不透传上游；代理/管理页的机器请求 401/403 返回 JSON 而非重定向。
 `authorize_request`（管理页/静态资源/文件浏览免登录放行）唯一排除 guest——
-guest 只能走 `/_authz/app/guest.html` 诊断页。
+guest 只能走 `/_authz/guest` 探针（以及策略另行放行的代理目标）。
 
 上游身份头：数据库 Key 收到 `X-Authz-User: <Key名>`、`X-Authz-Source: api-key`、
 `X-Authz-Identity: api-key:<id>`；环境变量 Key 固定 id=0（identity `api-key:0`）。
@@ -386,10 +386,10 @@ template include；compose 可把模板目录只读挂载实现外置。
 
 - 文件浏览：`GET /api/files?path=` 只读列目录（root=AUTHZ_FILES_ROOT），前端
   `files.html`；会话或合法 Key 均可访问， guest 除外。
-- guest 诊断页 `/_authz/app/guest.html`（guest.lua 自含认证）：guest 角色的数据库
-  Key 或 guest 会话可访问，admin 也可；服务端渲染回显调用者请求头/来源 IP/代理转发
-  链，逐字段 HTML 转义 + 敏感头脱敏 + 禁缓存；`?json=1` 返回同数据 JSON。该页是
-  天然反射面，转义与脱敏是回归测试固定断言。
+- guest 诊断页 `/_authz/guest`（guest.lua 自含认证）：guest 角色的数据库
+  Key 或 guest 会话可访问，admin 也可；服务端渲染回显调用者全部请求头（明文完整，
+  含凭据类头）/来源 IP/代理转发链，逐字段 HTML 转义 + 禁缓存；`?json=1` 返回同数据
+  JSON。该页是天然反射面，转义与完整回显是回归测试固定断言。
 
 ## 16. 控制面 API 概览（router.lua 注册序）
 

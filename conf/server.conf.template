@@ -33,7 +33,7 @@ location = /_authz/apps/ {
         -- guest 是最小权限角色：管理页面、静态资源与文件浏览都不属于它，
         -- 统一引导到唯一可用的只读诊断页（页面自身会重新认证与鉴权）。
         if require("resty.authz.api.common").is_guest(current) then
-            return ngx.redirect("/_authz/app/guest.html")
+            return ngx.redirect("/_authz/guest")
         end
     }
 }
@@ -62,7 +62,7 @@ location = /_authz/apps/index.html {
         -- guest 是最小权限角色：管理页面、静态资源与文件浏览都不属于它，
         -- 统一引导到唯一可用的只读诊断页（页面自身会重新认证与鉴权）。
         if require("resty.authz.api.common").is_guest(current) then
-            return ngx.redirect("/_authz/app/guest.html")
+            return ngx.redirect("/_authz/guest")
         end
     }
 }
@@ -99,7 +99,7 @@ location ^~ /_authz/apps/ {
         -- guest 是最小权限角色：管理页面、静态资源与文件浏览都不属于它，
         -- 统一引导到唯一可用的只读诊断页（页面自身会重新认证与鉴权）。
         if require("resty.authz.api.common").is_guest(current) then
-            return ngx.redirect("/_authz/app/guest.html")
+            return ngx.redirect("/_authz/guest")
         end
     }
 }
@@ -155,7 +155,7 @@ location ^~ /_authz/files/ {
         -- guest 是最小权限角色：管理页面、静态资源与文件浏览都不属于它，
         -- 统一引导到唯一可用的只读诊断页（页面自身会重新认证与鉴权）。
         if require("resty.authz.api.common").is_guest(current) then
-            return ngx.redirect("/_authz/app/guest.html")
+            return ngx.redirect("/_authz/guest")
         end
     }
 }
