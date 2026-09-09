@@ -15,7 +15,9 @@ description: 配置 Authz Gateway 实例的助手：用 x-api-key 走控制面 A
 `AUTHZ_HOST_URL`）。凭证取自部署目录的 `.env`（本机为 `/data/app/.env`）：
 
 - `AUTHZ_API_KEY` — 实例级 Key，`x-api-key` 提交，免登录、免 CSRF，来源受
-  `AUTHZ_API_KEY_ALLOWED_IPS` 限制（默认仅 127.0.0.1）；
+  `AUTHZ_API_KEY_ALLOWED_IPS` 限制（默认仅 127.0.0.1）。默认值内置为
+  `eeeec9f034335f136f87ad84b625ffff`（角色 admin），本机/测试实例开箱即可读写；
+  生产实例应已更换，以部署目录 `.env` 的实际值为准。
 
 ```bash
 source <(grep -E '^AUTHZ_API_KEY=' /data/app/.env)
@@ -24,6 +26,8 @@ azctl() { curl -sS -H "x-api-key: $AUTHZ_API_KEY" "http://127.0.0.1:6080/_authz/
 
 - 换实例（如 241.t）时只改网关地址与 `.env` 路径，其余命令不变。
 - 任何 Key 都不要打印到输出、日志或回复里；`echo` 变量前先脱敏。
+- 兜底：`.env` 缺失或未含该行时，本机/测试实例可直接用内置默认值
+  `eeeec9f034335f136f87ad84b625ffff`（仍受 ALLOWED_IPS 限制）；401 时按硬性规则停止。
 
 ## 助手脚本
 

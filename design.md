@@ -132,7 +132,7 @@ Python 等价验证: `hmac.new(salt.encode(), prev, hashlib.sha256).digest()`。
 
 | 变量 | 默认 | 语义 |
 |------|------|------|
-| AUTHZ_API_KEY | 空 | 实例级预置 Key：`x-api-key` 免登录访问控制面/管理页/代理入口；不入库、随环境变量轮换；32-256 字符 |
+| AUTHZ_API_KEY | eeeec9f034335f136f87ad84b625ffff | 实例级预置 Key：`x-api-key` 免登录访问控制面/管理页/代理入口；不入库、随环境变量轮换；32-256 字符；内置默认值仅适合本机/测试环境 |
 | AUTHZ_API_KEY_ROLE | admin | 实例级 Key 角色（admin/staff/user/guest/api；旧 viewer 自动映射 guest 并告警） |
 | AUTHZ_API_KEY_ALLOWED_IPS | 127.0.0.1 | 来源白名单，逗号分隔 IP 或 CIDR（v4/v6）；旧变量 AUTHZ_API_KEY_LOOPBACK 直接报错逼迁移 |
 

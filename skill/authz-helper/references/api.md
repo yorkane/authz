@@ -56,6 +56,8 @@
    跨机固定出口 IP 或本机自动化的场景优先改用实例级 `AUTHZ_API_KEY`（配
    `AUTHZ_API_KEY_ALLOWED_IPS` 白名单，默认 127.0.0.1，只认 `x-api-key` 头）；
    也可创建 `loopback_only=1` 的数据库 Key（原 AUTHZ_AGENT_API_KEY 自动 seed 已移除）。
+    实例级 Key 的内置默认值为 `eeeec9f034335f136f87ad84b625ffff`（角色 admin），
+    仅适合本机/测试实例；生产实例应已在部署 `.env` 中更换。
 6. **保管要求**：Key 放环境变量或密钥管理系统，不写 URL query、Cookie、日志、git；
    明文只在创建/轮换响应里出现一次，丢了只能轮换或重建。停用第三方时
    `PATCH {"enabled":false}` 立即失效，比删除温和。
