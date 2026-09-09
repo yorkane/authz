@@ -42,21 +42,32 @@ Docker Desktop（macOS/Windows）的 host 网络语义与 Linux 不同，容器�
 
 ## 3. 最小部署（推荐）
 
-在工作目录（例如 `/opt/authz-gateway`）创建 `.env` 与 `docker-compose.yml`，然后 `docker compose up -d`。
+统一在 `/data/app/authz/` 下以 docker-compose 方式部署：在该目录创建 `.env` 与 `docker-compose.yml`，然后 `docker compose up -d`。
 这种方式**不挂载任何代码**，全部使用镜像内置文件，是最干净的生产形态。
 
 ### 3.1 `.env`（最小可用示例）
 
+这是**开箱即用**的最小集：复制后改掉两个值即可启动。
+缺 `AUTHZ_API_KEY` 会没有机器凭证（Agent/脚本无法免登录操作），务必保留。
+
 ```bash
 # ── 必填 ────────────────────────────────────────────────
 # 首次启动创建的 admin 密码（仅 users 表为空时生效，登录后请立即改密）
-AUTHZ_ADMIN_PASSWORD=change-me-strong-password
+AUTHZ_ADMIN_PASSWORD=<改成强密码: openssl rand -hex 16>
 # 对外访问的 Origin（OAuth 回调基准等），没有公网域名时可留空（按请求 Host 推导）
-AUTHZ_HOST_URL=https://gateway.example.com
+AUTHZ_HOST_URL=https://<你的入口域名>
 # Cookie 父域：多个子域共享登录时设置，如 .example.com；仅 IP/localhost 访问时留空
 AUTHZ_COOKIE_DOMAIN=
 # 入口始终为 HTTPS（例如外层有 TLS 反代）时设 true，否则 false
 AUTHZ_COOKIE_SECURE=false
+
+# ── 机器凭证（Agent / 脚本免登录调用，开箱即用必需）────
+# 实例级 Key：请求头 x-api-key 提交，免登录、免 CSRF。
+# 下面是内置默认值，仅本机/测试可用；生产务必换成: openssl rand -hex 32
+AUTHZ_API_KEY=eeeec9f034335f136f87ad84b625ffff
+AUTHZ_API_KEY_ROLE=admin
+# 来源白名单（逗号分隔 IP 或 CIDR），默认只信本机回环；跨机接入加对端 IP
+AUTHZ_API_KEY_ALLOWED_IPS=127.0.0.1
 
 # ── 可选：入口端口 ─────────────────────────────────────
 AUTHZ_HTTP_PORT=6080
@@ -71,7 +82,8 @@ AUTHZ_PORT_MAX=20000
 DATA_DIR=./data
 ```
 
-> 完整变量清单见附录 A。
+> 旧变量 `AUTHZ_AGENT_API_KEY` 已移除，不要再写进 `.env`；现在统一用上面的
+> `AUTHZ_API_KEY`（或管理界面创建的数据库 Key）。完整变量清单见附录 A。
 
 ### 3.2 `docker-compose.yml`（最小，纯镜像）
 
@@ -101,7 +113,7 @@ services:
 ### 3.3 启动
 
 ```bash
-mkdir -p /opt/authz-gateway && cd /opt/authz-gateway
+mkdir -p /data/app/authz && cd /data/app/authz
 # 写入 .env 与 docker-compose.yml 后:
 docker compose up -d
 docker compose logs --tail=20
@@ -290,7 +302,7 @@ AUTHZ_SESSION_SIGNING_KEY=                        # 共享记录 HMAC-SHA256 签
 AUTHZ_REWRITE_BUFFER_MB=64                        # 正文改写的 worker 级缓冲预算（MB）。单响应上限固定 1MB 并按此整块预留；预算耗尽的新响应跳过改写、原样流式透传（响应头 X-Authz-Rewrite: skipped=memory）。仅影响 body/rewrites，状态码与响应头改写不占预算。
 
 # ══════════════ 实例级预置 API Key（Agent 免登录，可选）══════════════
-AUTHZ_API_KEY=                                    # 留空即关闭。设置后用 `x-api-key: <值>` 免登录访问控制面 API、管理页面与代理入口；32-256 字符（如 openssl rand -hex 32）。不入库，随环境变量轮换；配置非法启动即失败。
+AUTHZ_API_KEY=                                    # 留空即关闭。设置后用 `x-api-key: <值>` 免登录访问控制面 API、管理页面与代理入口；32-256 字符（如 openssl rand -hex 32）。不入库，随环境变量轮换；配置非法启动即失败。内置默认值 eeeec9f034335f136f87ad84b625ffff（角色 admin、仅回环），仅本机/测试可直接用，生产必须更换。
 AUTHZ_API_KEY_ROLE=admin                          # 该 Key 的角色（admin/staff/user/guest/api），权限走同角色 Casbin 策略
 AUTHZ_API_KEY_ALLOWED_IPS=127.0.0.1               # 来源白名单：逗号分隔的 IP 或 CIDR（如 127.0.0.1,10.0.0.0/8），匹配 TCP remote_addr（XFF 不参与）。默认只信 127.0.0.1；跨机接入显式加对端 IP
 
