@@ -1,4 +1,4 @@
-# Dockerfile - openresty-base (alpine)
+# Dockerfile - authz (alpine)
 # Custom OpenResty build with extra modules:
 #   - lua-nginx-module        (latest master, replaces bundled version)
 #   - stream-lua-nginx-module (latest master, replaces bundled version)

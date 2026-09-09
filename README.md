@@ -1,4 +1,4 @@
-# openresty-base
+# authz
 
 定制 OpenResty Alpine Docker 镜像，在官方源码编译基础上额外集成：
 
@@ -357,7 +357,7 @@ docker pull yorkane/authz:latest
 ```bash
 # Docker CLI 需要 buildx；默认 builder 会复用本机 BuildKit 缓存
 docker buildx build --load --build-arg RESTY_J=${RESTY_J:-8} \
-  --tag openresty-base:local .
+  --tag authz:latest .
 
 # Compose 同样使用 BuildKit/buildx
 docker compose build

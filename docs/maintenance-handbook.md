@@ -424,15 +424,15 @@ i18n 默认完整支持 `zh-CN` 和 `en-US`：
 ```bash
 git diff --check
 
-OPENRESTY_TEST_IMAGE=openresty-base:nocobase-test \
+OPENRESTY_TEST_IMAGE=ghcr.io/yorkane/authz:latest \
   bash test/test_klib_router_ctxvar.sh
 
-OPENRESTY_TEST_IMAGE=openresty-base:nocobase-test \
+OPENRESTY_TEST_IMAGE=ghcr.io/yorkane/authz:latest \
   bash test/test_authz_gateway.sh
 
 bash test/test_shared_session.sh
 
-bash test/run_tests.sh openresty-base:nocobase-test
+bash test/run_tests.sh ghcr.io/yorkane/authz:latest
 ```
 
 三组测试职责：

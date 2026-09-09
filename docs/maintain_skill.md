@@ -114,10 +114,10 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
 
 ```bash
 git diff --check
-OPENRESTY_TEST_IMAGE=openresty-base:nocobase-test bash test/test_klib_router_ctxvar.sh
-OPENRESTY_TEST_IMAGE=openresty-base:nocobase-test bash test/test_authz_gateway.sh
-OPENRESTY_TEST_IMAGE=openresty-base:nocobase-test bash test/test_shared_session.sh
-bash test/run_tests.sh openresty-base:nocobase-test
+OPENRESTY_TEST_IMAGE=ghcr.io/yorkane/authz:latest bash test/test_klib_router_ctxvar.sh
+OPENRESTY_TEST_IMAGE=ghcr.io/yorkane/authz:latest bash test/test_authz_gateway.sh
+OPENRESTY_TEST_IMAGE=ghcr.io/yorkane/authz:latest bash test/test_shared_session.sh
+bash test/run_tests.sh ghcr.io/yorkane/authz:latest
 ```
 
 镜像发布和部署优先使用 GitHub Actions 构建并推送的 GHCR 镜像；本地构建只能在满足上面的构建条件后使用，不能作为普通代码测试的默认步骤。

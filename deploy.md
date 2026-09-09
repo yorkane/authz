@@ -79,7 +79,7 @@ DATA_DIR=./data
 services:
   gateway:
     image: ghcr.io/yorkane/authz:latest
-    container_name: openresty-gateway
+    container_name: authz
     restart: unless-stopped
     network_mode: host
     env_file:
@@ -96,7 +96,7 @@ services:
 - `env_file` 直接注入 `.env` 的全部变量；
 - 镜像内置模板位于 `/usr/local/openresty/nginx/conf/`，entrypoint 每次启动自动渲染最终配置；
 - 只需挂载 `/data`（SQLite 数据库 + 自动生成的 10 年期自签证书），其余全部来自镜像；
-- 若不使用 compose，等价 docker 命令：`docker run -d --name openresty-gateway --network host --restart unless-stopped --env-file .env -e OPENRESTY_TEMPLATE_DIR=/usr/local/openresty/nginx/conf -v ./data:/data ghcr.io/yorkane/authz:latest`。
+- 若不使用 compose，等价 docker 命令：`docker run -d --name authz --network host --restart unless-stopped --env-file .env -e OPENRESTY_TEMPLATE_DIR=/usr/local/openresty/nginx/conf -v ./data:/data ghcr.io/yorkane/authz:latest`。
 
 ### 3.3 启动
 
@@ -182,11 +182,11 @@ curl -skS -D - -o /dev/null -X POST "https://127.0.0.1:${HTTPS_PORT}/_authz/logi
 | 场景 | 命令 |
 |------|------|
 | 改了 `.env` / 挂载 / 网络 | `docker compose up -d --force-recreate`（必须**重建**容器，`restart` 不会读取新环境变量） |
-| 检查容器内配置 | `docker exec openresty-gateway openresty -t` |
-| 忘记 admin 密码 / 恢复初始密码 | `docker exec -e AUTHZ_ADMIN_PASSWORD="新密码" openresty-gateway admin_password_reset` |
+| 检查容器内配置 | `docker exec authz openresty -t` |
+| 忘记 admin 密码 / 恢复初始密码 | `docker exec -e AUTHZ_ADMIN_PASSWORD="新密码" authz admin_password_reset` |
 | 备份 | 复制 `${DATA_DIR}`（含 `authz/authz.db` 与 `certs/`） |
-| 查看日志 | `docker logs -f openresty-gateway`（access 走 stdout，error 走 stderr） |
-| 容器状态核对 | `docker inspect openresty-gateway --format "{{.State.Status}} {{.HostConfig.NetworkMode}}"` 应为 `running host` |
+| 查看日志 | `docker logs -f authz`（access 走 stdout，error 走 stderr） |
+| 容器状态核对 | `docker inspect authz --format "{{.State.Status}} {{.HostConfig.NetworkMode}}"` 应为 `running host` |
 
 ## 7. 多实例部署（可选）
 
@@ -228,7 +228,7 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 
 | 症状 | 排查 |
 |------|------|
-| 容器反复重启 | `docker logs openresty-gateway`，常见为端口被占用或 `.env` 取值非法（非法值会在启动时直接报错） |
+| 容器反复重启 | `docker logs authz`，常见为端口被占用或 `.env` 取值非法（非法值会在启动时直接报错） |
 | 登录页 200 但代理 403 | 正常：代理目标需要登录 + 授权；先登录，再在管理界面配置策略 |
 | 代理 404（绑定域名） | 绑定未启用或域名拼写不一致；管理界面 → 授权管理 → 域名绑定 |
 | 子域之间登录态丢失 | 未设置 `AUTHZ_COOKIE_DOMAIN`（注意以 `.` 开头的父域），或需要启用 7.1 共享会话 |
@@ -361,7 +361,7 @@ AUTHZ_OAUTH_STATE_TTL=600                         # 授权 state 有效期秒数
 services:
   gateway:
     image: ghcr.io/yorkane/authz:latest
-    container_name: openresty-gateway
+    container_name: authz
     restart: unless-stopped
     network_mode: host
     env_file:
@@ -385,11 +385,11 @@ services:
 HTTP_PORT=${AUTHZ_HTTP_PORT:-6080}
 HTTPS_PORT=${AUTHZ_HTTPS_PORT:-6443}
 
-docker inspect openresty-gateway --format "{{.State.Status}}"                    # running
-docker inspect openresty-gateway --format "{{.HostConfig.NetworkMode}}"          # host
+docker inspect authz --format "{{.State.Status}}"                    # running
+docker inspect authz --format "{{.HostConfig.NetworkMode}}"          # host
 curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${HTTP_PORT}/_authz/login"            # 308 (redirect 模式)
 curl -skS -o /dev/null -w "%{http_code}" "https://127.0.0.1:${HTTPS_PORT}/_authz/api/session"  # 401
 curl -skS -o /dev/null -w "%{http_code}" "https://127.0.0.1:${HTTPS_PORT}/_authz/apps/"               # 302
 curl -skS -o /dev/null -w "%{http_code}" "https://127.0.0.1:${HTTPS_PORT}/_authz/login"         # 200
-docker exec openresty-gateway test -s /data/authz/authz.db && echo db-ok                          # db-ok
+docker exec authz test -s /data/authz/authz.db && echo db-ok                          # db-ok
 ```

@@ -27,7 +27,7 @@ services:
         https_proxy: ""
         all_proxy: ""
     image: ghcr.io/yorkane/authz:latest
-    container_name: openresty-gateway
+    container_name: authz
     restart: unless-stopped
     network_mode: host
     environment:

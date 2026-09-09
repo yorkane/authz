@@ -10,7 +10,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 SERVICE_NAME="gateway"
-CONTAINER_NAME="openresty-gateway"
+CONTAINER_NAME="authz"
 IMAGE_NAME="ghcr.io/yorkane/authz:latest"
 BUILD_IMAGE=0
 

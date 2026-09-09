@@ -1,4 +1,4 @@
-# openresty-base 设计文档 (design.md)
+# authz 设计文档 (design.md)
 
 > 本文保留核心设计说明。当前维护入口、测试基线、部署流程和前端规则以
 > [docs/maintenance-handbook.md](docs/maintenance-handbook.md) 与 `AGENTS.MD` 为准。
@@ -284,7 +284,7 @@ resolver（gateway/resolver.lua）按序命中：
 - 推送 ghcr.io/yorkane/authz 与 docker.io/yorkane/authz
 - Tag: latest / `<openresty版本>` / `<版本>-<日期>`
 - 镜像发布和部署默认优先使用 GitHub Actions 产出的 GHCR 镜像；本地构建仅用于调试、验证或 CI 不可用时的回退。
-- 本地构建使用 Docker CLI `buildx`：`docker buildx build --load --build-arg RESTY_J=${RESTY_J:-8} -t openresty-base:local .`。
+- 本地构建使用 Docker CLI `buildx`：`docker buildx build --load --build-arg RESTY_J=${RESTY_J:-8} -t authz:latest .`。
   Dockerfile 将 Brotli 源码下载、OpenResty builder 和 runtime 分层；源码层、BuildKit 缓存和并行编译可复用。
   GitHub Actions 通过 `docker/setup-buildx-action` 与 `type=gha,mode=max` 保持同一构建路径。
 
@@ -292,16 +292,16 @@ resolver（gateway/resolver.lua）按序命中：
 
 ```bash
 # Router/ctxvar 真实 OpenResty 回归
-OPENRESTY_TEST_IMAGE=openresty-base:nocobase-test bash test/test_klib_router_ctxvar.sh
+OPENRESTY_TEST_IMAGE=authz:latest bash test/test_klib_router_ctxvar.sh
 
 # Authz Gateway/API/OAuth/代理隔离矩阵
-OPENRESTY_TEST_IMAGE=openresty-base:nocobase-test bash test/test_authz_gateway.sh
+OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh
 
 # 共享会话 (Redis) 独立回归
-OPENRESTY_TEST_IMAGE=openresty-base:nocobase-test bash test/test_shared_session.sh
+OPENRESTY_TEST_IMAGE=authz:latest bash test/test_shared_session.sh
 
 # 基础镜像功能
-bash test/run_tests.sh openresty-base:nocobase-test
+bash test/run_tests.sh authz:latest
 ```
 
 测试矩阵覆盖: Router、端口解析、未认证重定向、本地用户、NocoBase mock 登录与角色查询、
