@@ -79,7 +79,7 @@
           <div class="detail-body">
             <img v-if="kindOf(focused) === 'image'" :src="fileUrl(focused)" alt="" class="detail-media">
             <video v-else-if="kindOf(focused) === 'video'" :src="fileUrl(focused)" controls preload="none" class="detail-media"></video>
-            <audio v-else-if="kindOf(focused) === 'audio'" :src="fileUrl(focused)" controls class="detail-audio"></audio>
+            <audio v-else-if="kindOf(focused) === 'audio'" :src="fileUrl(focused)" controls preload="metadata" class="detail-audio"></audio>
             <iframe v-else-if="kindOf(focused) === 'html'" :src="fileUrl(focused)" class="detail-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
             <pre v-else-if="detailText !== null" class="detail-text">{{ detailText }}</pre>
             <div v-else class="detail-none"><q-icon name="mdi-file-outline" size="52px"></q-icon><div>{{ t.noPreview }}</div></div>
@@ -118,7 +118,7 @@
           <q-card-section class="files-preview-body">
             <img v-if="previewKind === 'image'" :src="fileUrl(previewItem)" alt="" class="preview-image">
             <video v-else-if="previewKind === 'video'" :src="fileUrl(previewItem)" controls autoplay preload="metadata" class="preview-media"></video>
-            <div v-else-if="previewKind === 'audio'" class="preview-audio-wrap"><q-icon name="mdi-music-circle-outline" size="84px"></q-icon><audio :src="fileUrl(previewItem)" controls autoplay class="preview-audio"></audio></div>
+            <div v-else-if="previewKind === 'audio'" class="preview-audio-wrap"><q-icon name="mdi-music-circle-outline" size="84px"></q-icon><audio :src="fileUrl(previewItem)" controls preload="metadata" class="preview-audio"></audio></div>
             <iframe v-else-if="previewKind === 'html'" :src="fileUrl(previewItem)" class="preview-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
             <div v-else-if="previewKind === 'text'" class="preview-text-wrap"><pre v-if="previewText !== null">{{ previewText }}</pre><q-spinner v-else size="34px"></q-spinner></div>
             <div v-else class="preview-none">
@@ -140,7 +140,7 @@
 
     const IMAGES = ['jpg','jpeg','png','gif','webp','svg','bmp','ico','avif']
     const VIDEOS = ['mp4','webm','mov','m4v','mkv','ogv','avi']
-    const AUDIOS = ['mp3','wav','ogg','oga','m4a','flac','aac','opus']
+    const AUDIOS = ['mp3','wav','ogg','oga','m4a','flac','aac','opus','weba','mka','aiff','aif','wma','amr','3gp']
     const TEXTS = ['txt','md','json','js','mjs','css','xml','log','csv','tsv','yml','yaml','ini','conf','lua','py','sh','sql']
     const MAX_TEXT_PREVIEW = 512 * 1024
 
