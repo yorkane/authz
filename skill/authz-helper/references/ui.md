@@ -37,7 +37,7 @@ Cookie 会话或 `x-api-key` 头（Playwright setExtraHTTPHeaders）均可认证
 |---|---|---|
 | 统计卡 | 绑定数 / allow 策略数 / deny 策略数 | `GET /api/authorization` |
 | 域名绑定表 | 前缀、端口、协议、目标 IP、菜单名、启停；域名只填最后一级前缀 | `GET/POST/PATCH/DELETE /api/applications` |
-| 新增/编辑绑定对话框 | 端口范围提示（PORT_MIN–MAX）、target_ip、upstream_scheme/ssl_verify、origin_mode、header_overrides、simulate_local | 同上 |
+| 新增/编辑绑定对话框 | 端口范围提示（PORT_MIN–MAX）、target_ip、upstream_scheme/ssl_verify、origin_mode、simulate_local | 同上 |
 | 请求改写子对话框 | request_rewrite 结构化编辑（headers/remove/body/rewrites） | `PATCH /api/applications/:id` |
 | 响应改写子对话框 | response_rewrite 编辑（status/headers/body/rewrites，安全头禁改） | 同上 |
 | 策略表（带搜索） | 主体/对象/方法/eft，deny 红色标记 | `GET /api/authorization` |

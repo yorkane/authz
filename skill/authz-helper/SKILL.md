@@ -42,7 +42,7 @@ scripts/azctl.sh ... keys-list | keys-add | keys-del
 scripts/azctl.sh ... menu
 ```
 
-复杂字段（`response_rewrite`、`header_overrides`、`origin_mode`）仍用 curl + JSON
+复杂字段（`request_rewrite`、`response_rewrite`、`origin_mode`）仍用 curl + JSON
 直发 API，示例见 references/api.md。
 
 管理端各页面（users/authorization/menu-editor/files/nginx_conf）的区块与功能
@@ -59,9 +59,11 @@ scripts/azctl.sh ... menu
 - 按本地服务名配域名：`POST /applications`，`domain` 只填最后一级前缀（如 `code`），
   网关按当前请求 Host 拼 `<前缀>-<节点>.<域名>`；用户说完整域名时先确认他指的是哪个
   入口域，再决定填前缀还是精确域名。
-- 改写请求头：绑定字段 `header_overrides`（多行 `Name: value`），Host/Cookie/Origin/
-  X-Authz-*/X-Forwarded-*/X-Real-IP/hop-by-hop 一律拒；另有 `upstream_host`、
-  `forwarded_*`、`origin_mode` 等结构字段。
+- 改写请求头/正文：绑定字段 `request_rewrite`（headers/remove_headers/body/rewrites）。
+  网关托管头（Host/Cookie/Origin/X-Forwarded-*/X-Real-IP/X-Authz-User|Source|Identity）
+  也可改写，改写值优先于网关默认值；只有分帧/hop-by-hop 头与网关凭据头
+  （X-Authz-Key/X-API-Key/X-Role-Key）保存即 422。另有 `upstream_host`、`forwarded_*`、
+  `origin_mode` 等结构字段做同类覆盖（二者并存时 request_rewrite 后生效）。
 - 改写响应体：绑定字段 `response_rewrite`（APISIX 语义子集：status/headers/
   remove_headers/body/body_base64/content_type/rewrites）。这是高危能力：
   只改用户明确要求的绑定，禁止改写安全响应头（CSP/HSTS/XFO 等）或注入脚本。

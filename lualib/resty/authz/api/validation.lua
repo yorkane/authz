@@ -99,29 +99,35 @@ local function valid_domain_prefix(prefix)
     return ngx.re.match(prefix, [[^[a-z0-9]([a-z0-9-]*[a-z0-9])?$]]) ~= nil
 end
 
--- 请求改写：这些请求头由 server.conf 的 proxy_set_header 或绑定专属字段
--- （upstream_host/forwarded_*/origin 等）统一管控，改写请求不允许触碰，
--- 否则会出现「保存成功但永不生效」的幽灵配置。hop-by-hop 与分帧头
--- （keep-alive/te/trailer）同样禁止，避免破坏代理语义。
+-- 请求改写：Host、Cookie、Origin、Forwarded、X-Forwarded-*、X-Real-IP 与
+-- X-Authz-User/Source/Identity 都可以改写。这些头由 server.conf 的
+-- proxy_set_header 引用 $authz_* 变量下发，网关在转发前把绑定改写值写进
+-- 同一变量（见 gateway/proxy.lua 的 MANAGED_REQUEST_VARS），改写值就是
+-- 上游看到的最终值，优先级等效高于 proxy_set_header。
+-- 仍然禁止的两类：分帧与 hop-by-hop 头（Content-Length/Transfer-Encoding/
+-- Connection/Upgrade/TE/Trailer/Keep-Alive，改它们会破坏代理与连接语义）；
+-- 网关自身凭据头（X-Authz-Key/X-API-Key/X-Role-Key，proxy_set_header 已置空，
+-- 开放改写等于把网关钥匙递给上游）。X-Authz-* 前缀只放行三个身份断言头，
+-- Proxy-* 前缀保留拦截（nginx 会把它映射进连接语义）。
 -- Accept-Encoding 特意不禁止：正文改写需要上游返回未压缩字节，而个别
 -- 上游只接受特定压缩协商时，允许用户显式覆盖。
 local REQUEST_HEADER_BLOCKED = {
-    host = true, cookie = true, origin = true, forwarded = true,
-    ["x-authz-user"] = true, ["x-authz-source"] = true, ["x-authz-identity"] = true,
-    ["x-authz-key"] = true, ["x-real-ip"] = true,
-    ["x-api-key"] = true, ["x-role-key"] = true,
-    ["x-forwarded-for"] = true, ["x-forwarded-host"] = true,
-    ["x-forwarded-proto"] = true, ["x-forwarded-port"] = true,
     ["content-length"] = true, ["transfer-encoding"] = true,
     connection = true, ["keep-alive"] = true, upgrade = true,
     te = true, trailer = true,
+    ["x-authz-key"] = true, ["x-api-key"] = true, ["x-role-key"] = true,
+}
+
+-- 网关身份断言头：X-Authz-* 前缀默认拦截，只有这三个显式放行。
+local REQUEST_IDENTITY_ALLOWED = {
+    ["x-authz-user"] = true, ["x-authz-source"] = true, ["x-authz-identity"] = true,
 }
 
 local function request_header_allowed(name)
     local lower = name:lower()
     if REQUEST_HEADER_BLOCKED[lower] then return false end
+    if REQUEST_IDENTITY_ALLOWED[lower] then return true end
     if lower:sub(1, 8) == "x-authz-" then return false end
-    if lower:sub(1, 12) == "x-forwarded-" then return false end
     if lower:sub(1, 6) == "proxy-" then return false end
     return true
 end

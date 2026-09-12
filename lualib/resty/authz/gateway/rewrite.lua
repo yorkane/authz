@@ -397,27 +397,29 @@ function _M.parse(raw)
     return rule
 end
 
--- 请求改写白名单：这些头由 server.conf 的 proxy_set_header 或绑定专属字段
--- 统一管控，运行期再兜底一层（校验层已拒一次，防手工改库）。
+-- 运行期兜底名单：与 validation 的 REQUEST_HEADER_BLOCKED 保持同一口径
+-- （校验层保存时已拒一次，这里防手工改库绕过）。托管头（Host/Cookie/
+-- Origin/Forwarded/X-Forwarded-*/X-Real-IP/X-Authz-User|Source|Identity）
+-- 已开放改写，由 proxy.lua 写入 $authz_* 变量后随 proxy_set_header 下发。
+-- 仍禁止：分帧与 hop-by-hop 头，以及网关自身凭据头（X-Authz-Key/X-API-Key/
+-- X-Role-Key，proxy_set_header 已置空，开放改写等于把网关钥匙递给上游）。
 local REQUEST_BLOCKED = {
-    host = true, cookie = true, origin = true, forwarded = true,
-    ["x-authz-user"] = true, ["x-authz-source"] = true,
-    ["x-authz-identity"] = true, ["x-authz-key"] = true, ["x-real-ip"] = true,
-    -- 网关自身凭据头：改写规则不得把它塞给上游（proxy_set_header 已置空，
-    -- 这里再挡一层，防手工改库绕过校验）。
-    ["x-api-key"] = true, ["x-role-key"] = true,
-    ["x-forwarded-for"] = true, ["x-forwarded-host"] = true,
-    ["x-forwarded-proto"] = true, ["x-forwarded-port"] = true,
     ["content-length"] = true, ["transfer-encoding"] = true,
     connection = true, ["keep-alive"] = true, upgrade = true,
     te = true, trailer = true,
+    ["x-authz-key"] = true, ["x-api-key"] = true, ["x-role-key"] = true,
+}
+
+-- 网关身份断言头：X-Authz-* 前缀默认拦截，只有这三个显式放行。
+local REQUEST_IDENTITY_OK = {
+    ["x-authz-user"] = true, ["x-authz-source"] = true, ["x-authz-identity"] = true,
 }
 
 local function request_header_ok(name)
     local lower = tostring(name or ""):lower()
     if REQUEST_BLOCKED[lower] then return false end
+    if REQUEST_IDENTITY_OK[lower] then return true end
     if lower:sub(1, 8) == "x-authz-" then return false end
-    if lower:sub(1, 12) == "x-forwarded-" then return false end
     if lower:sub(1, 6) == "proxy-" then return false end
     return true
 end

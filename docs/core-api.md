@@ -243,7 +243,7 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 | `custom_origin` | 否 | `origin_mode=custom` 时必填，只接受无 path/query 的 `http(s)://authority` |
 | `simulate_local` | 否 | 默认 `false`；启用本机 HTTP 请求头模拟 |
 | `local_ip` | 否 | 模拟来源 IP，默认 `127.0.0.1`，也可使用网关局域网 IPv4/IPv6 |
-| `header_overrides` | 否 | 多行文本，每行 `Header-Name: value`，按行覆盖发往上游的透传请求头；Host、Cookie、Origin、X-Authz-*、X-Forwarded-*、X-Real-IP 与 hop-by-hop 头不可覆盖；留空表示不覆盖 |
+| `request_rewrite` | 否 | 请求改写配置（对象或 JSON 字符串）：`enabled`、`headers`、`remove_headers`、`body`、`body_base64`、`content_type`、`rewrites`；可改写上表各代理字段默认算出的请求头（Host/Cookie/Origin/X-Forwarded-* 等同样可改写，改写值即上游看到的最终值）；留空或 `null` 表示不改写，保存后返回规范化 JSON |
 | `upstream_scheme` | 否 | 上游协议，`http`（默认）或 `https` |
 | `upstream_ssl_verify` | 否 | HTTPS 上游是否校验证书，默认 `true`；设为 `false` 忽略证书校验，仅建议用于受控内网或自签名证书 |
 | `upstream_path` | 否 | 上游路径改写，默认空值表示保留请求路径；例如 `/v1/index.html` 会把任意请求转发到 `/v1/index.html`，查询参数原样保留；不接受 query、fragment、连续斜杠或 `..` |
@@ -271,9 +271,15 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 指向 `http://<target_ip>:<port>`，把 `X-Real-IP` 与 `X-Forwarded-For` 改为 `local_ip`，并移除客户端
 `Forwarded`；显式填写的 Host/Forwarded/Origin 配置优先。它不会伪造 TCP peer，远端上游实际看到的
 TCP 来源仍是网关主机地址。
-`header_overrides` 每行一条 `Header-Name: value`，保存时做格式、控制字符、长度和白名单校验
-（名称不超过 128、值不超过 1024、总量不超过 8192、最多 32 条，重复名保留首条），
-只影响未在代理配置中显式控制的透传类请求头（如 `Authorization`、自定义业务头）。
+`request_rewrite` 改写发往上游的请求：`headers`（对象，值 `null` = 删除）与 `remove_headers`
+覆盖/删除请求头，`body`/`body_base64`/`content_type` 整体替换正文，`rewrites` 做正文过滤
+（格式同 `response_rewrite`，两者互斥；仅文本类、Content-Length 明确的非 GET/HEAD 请求生效）。
+Host、Cookie、Origin、Forwarded、X-Forwarded-*、X-Real-IP、X-Authz-User/Source/Identity 等
+网关托管头可以改写：网关把改写值写进 proxy_set_header 引用的同名变量，上游看到的就是
+改写后的最终值（改写优先于网关默认值；删除托管头则该头不发送）。仍不可改写（保存即 422）：
+分帧与 hop-by-hop 头（Content-Length、Transfer-Encoding、Connection、Upgrade、TE、Trailer、
+Keep-Alive）、网关凭据头（X-Authz-Key、X-API-Key、X-Role-Key）、其余 X-Authz-* 与 Proxy-* 前缀。
+名称/条数/长度限制与响应改写一致（名称 ≤128、值 ≤2048、≤32 条、整体 JSON ≤131072 字节）。
 
 `response_rewrite` 改写的是返回给客户端的上游响应，字段语义：
 

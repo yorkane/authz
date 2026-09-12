@@ -1878,30 +1878,46 @@ request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
 RR_STORED=$(jq -er '.data.bindings[] | select(.domain == "fixed.test.example") | .request_rewrite' "$TMP_DIR/body")
 assert_eq "removal list is normalized" \
     "$(jq -er '.remove_headers | join(",")' <<<"$RR_STORED")" "X-Client-Token"
-# 校验拒绝：网关身份头、控制字符、空对象字段。
+# 校验拒绝：网关凭据头、分帧头、控制字符、空对象字段。
+# 托管头（Host/Cookie/X-Authz-User 等）已开放改写（见下方正向用例）。
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
-    '{"request_rewrite":{"headers":{"X-Authz-User":"evil"}}}'
-assert_eq "request rewrite cannot touch gateway identity headers" "$STATUS" "422"
+    '{"request_rewrite":{"headers":{"X-API-Key":"stolen"}}}'
+assert_eq "request rewrite cannot touch gateway credential headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"X-Authz-Key":"stolen"}}}'
+assert_eq "request rewrite cannot touch the legacy key header" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"Content-Length":"9999"}}}'
+assert_eq "request rewrite cannot rewrite framing headers" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"Proxy-Connection":"keep-alive"}}}'
+assert_eq "request rewrite cannot rewrite Proxy- prefixed headers" "$STATUS" "422"
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"request_rewrite":{"headers":{"X-Bad":"bad\rvalue"}}}'
 assert_eq "request rewrite rejects control characters" "$STATUS" "422"
+# 托管头开放改写：改写值经 $authz_* 变量随 proxy_set_header 下发，
+# 上游看到的就是改写值（等效改写优先于 proxy_set_header）。
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
-    '{"request_rewrite":{"headers":{"Host":"evil.example"}}}'
-assert_eq "request rewrite cannot override Host" "$STATUS" "422"
-request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
-    '{"request_rewrite":{"headers":{"X-Forwarded-For":"1.1.1.1"}}}'
-assert_eq "request rewrite cannot override X-Forwarded-For" "$STATUS" "422"
+    '{"request_rewrite":{"headers":{"Host":"rewritten.example","X-Forwarded-For":"1.1.1.1","X-Authz-User":"shadow","Cookie":"session=kept"}}}'
+assert_eq "request rewrite accepts gateway-managed headers" "$STATUS" "200"
+request GET fixed.test.example /identity "$ADMIN_COOKIE"
+assert_json "request rewrite Host overrides proxy_set_header" '.host' "rewritten.example"
+assert_json "request rewrite X-Forwarded-For overrides gateway chain" '.forwarded_for' "1.1.1.1"
+assert_json "request rewrite overrides identity assertion header" '.user' "shadow"
+assert_json "request rewrite can set upstream Cookie" '.cookie' "session=kept"
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"request_rewrite":{"status":500}}'
 assert_eq "request rewrite rejects unknown fields" "$STATUS" "422"
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"request_rewrite":"[1,2]"}'
 assert_eq "request rewrite rejects a top-level array" "$STATUS" "422"
-# 清空：null 清除全部配置，探针恢复为 null。
+# 清空：null 清除全部配置，探针恢复为 null，托管头恢复网关默认值。
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"request_rewrite":null}'
 assert_eq "clear request rewrite" "$STATUS" "200"
 request GET fixed.test.example /identity "$ADMIN_COOKIE"
 assert_json "cleared request rewrite stops overriding" '.probe | tostring' "null"
+assert_json "cleared rewrite restores gateway Host" '.host | split(":")[0]' "fixed.test.example"
+assert_json "cleared rewrite restores identity header" '.user' "admin"
 
 fi
 section body-rewrite

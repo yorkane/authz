@@ -39,6 +39,35 @@ local function request_sets_header(binding, lower_name)
     return false
 end
 
+-- 网关托管头 → server.conf 里 proxy_set_header 引用的变量名。
+--
+-- nginx 语义里 proxy_set_header 在转发时覆盖了 Lua 在 access 阶段
+-- ngx.req.set_header 写的同名头，所以直接 set_header 改不动这些头。
+-- 它们的真实取值来自 $authz_* 变量，因此绑定改写这些头时改为改写变量：
+-- proxy_set_header 携带的仍是“同一个头”，但值已是改写后的最终值，
+-- 等效于「改写优先于 proxy_set_header」；同时也避免了 set_header 造成
+-- 同名头双份（原值与改写值一起发往上游）。
+-- 删除一个托管头 = 把变量置空串：proxy_set_header 对空值不发送该头。
+--
+-- Host/Cookie/Origin/Forwarded/X-Forwarded-*/X-Real-IP 与三个身份断言头
+-- （X-Authz-User/Source/Identity）全部开放改写：改写语义上就是“由绑定
+-- 决定上游看到什么”，与 origin_mode、upstream_host 等既有绑定字段同级，
+-- 权限仍受管理面（admin）约束。
+local MANAGED_REQUEST_VARS = {
+    ["host"] = "authz_upstream_host",
+    ["cookie"] = "authz_upstream_cookie",
+    ["origin"] = "authz_origin",
+    ["forwarded"] = "authz_forwarded",
+    ["x-forwarded-host"] = "authz_proxy_forwarded_host",
+    ["x-forwarded-proto"] = "authz_forwarded_proto",
+    ["x-forwarded-port"] = "authz_forwarded_port",
+    ["x-forwarded-for"] = "authz_forwarded_for",
+    ["x-real-ip"] = "authz_real_ip",
+    ["x-authz-user"] = "authz_user",
+    ["x-authz-source"] = "authz_source",
+    ["x-authz-identity"] = "authz_identity",
+}
+
 local function apply_headers(binding, target_ip, port)
     binding = binding or {}
     local target_authority = target.url_host(target_ip) .. ":" .. tostring(port)
@@ -91,18 +120,23 @@ local function apply_headers(binding, target_ip, port)
         ngx.var.authz_forwarded_for = forwarded_for()
         ngx.var.authz_forwarded = tostring(ngx.var.http_forwarded or "")
     end
-    -- 请求改写（request_rewrite）：删除与设置都在转发前生效。删除先于设置，
-    -- 同一头既删又设时以「保留设置」为准（set 显式表达了最终意图）；
-    -- 而 set 之后不再做删除检查，避免配置错误导致删不掉自己刚写进去的头。
-    -- Host/Cookie/X-Authz-*/X-Forwarded-* 等由 proxy_set_header 显式控制，
-    -- 校验层与缓存层双重禁止改写，这里直接应用缓存里已过滤的结构。
+    -- 请求改写（request_rewrite）：删除与设置都在转发前生效，且始终晚于
+    -- 上面的网关变量写入——网关先算出默认值，改写再覆盖，删除先于设置，
+    -- 同一头既删又设时以「保留设置」为准。托管头走变量覆盖（见
+    -- MANAGED_REQUEST_VARS），其余普通头仍走 ngx.req.set_header/clear_header。
     local rr = binding.request_rewrite
     if rr then
         for _, name in ipairs(rr.remove_headers or {}) do
-            ngx.req.clear_header(name)
+            local var = MANAGED_REQUEST_VARS[tostring(name):lower()]
+            if var then ngx.var[var] = "" else ngx.req.clear_header(name) end
         end
         for _, header in ipairs(rr.headers or {}) do
-            ngx.req.set_header(header.name, header.value)
+            local var = MANAGED_REQUEST_VARS[tostring(header.name):lower()]
+            if var then
+                ngx.var[var] = tostring(header.value)
+            else
+                ngx.req.set_header(header.name, header.value)
+            end
         end
     end
     -- 正文改写只能在未压缩的字节上进行：上游看到 Accept-Encoding 就会自行压缩，

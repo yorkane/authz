@@ -162,7 +162,7 @@ SQLite 默认位于 `/data/authz/authz.db`，`/data` 必须持久化。
 | `remote_users` | 主键 `(provider, subject)`；唯一 `(provider, username)`；创建/最近登录/修改时间 |
 | `sessions` | token、username、source、csrf、expires_at |
 | `policies` | `ptype/v0/v1/v2` 唯一；存 p/g 规则 |
-| `bindings` | domain 唯一；target_ip/port、enabled、websocket、note、menu_name；upstream/forwarded/origin 代理字段；simulate_local/local_ip；header_overrides（多行 Header 覆盖，逐条校验后存储）；response_rewrite（响应改写规范化 JSON，空串表示未配置） |
+| `bindings` | domain 唯一；target_ip/port、enabled、websocket、note、menu_name；upstream/forwarded/origin 代理字段；simulate_local/local_ip；request_rewrite（请求改写规范化 JSON，迁移 17 由 header_overrides 升级并入）；response_rewrite（响应改写规范化 JSON，空串表示未配置） |
 
 `remote_users.synced_at` 是保留的内部存储列名；管理 API 只输出语义明确的 `recorded_at`，避免把
 单向身份记录误解为双向同步协议。
@@ -244,8 +244,11 @@ API Key 安全约束：
   `/<port><path>` 授权，同端口的不同目标 IP 共享策略；
 - 绑定级 Host/Forwarded/Origin 字段必须经过 authority/origin 白名单校验并拒绝 CR/LF；模拟本机访问只重写
   `Host`、`Origin`、`X-Real-IP`、`X-Forwarded-For` 等 HTTP 头，不应被描述成 TCP 来源伪造；
-  header_overrides 只覆盖透传类请求头，格式、控制字符、长度和白名单（禁 Host/Cookie/Origin/X-Authz-*/X-Forwarded-*/hop-by-hop）
-  在 validation 层校验，cache 层防御性二次过滤，proxy 层用 ngx.req.set_header 注入；
+  request_rewrite 覆盖发往上游的请求头，格式、控制字符、长度和白名单（仅禁分帧/hop-by-hop 与
+  网关凭据头 X-Authz-Key/X-API-Key/X-Role-Key，其余 X-Authz-*/Proxy-* 前缀）在 validation 层校验，
+  cache 层防御性二次过滤；proxy 层普通头用 ngx.req.set_header 注入，网关托管头（Host/Cookie/
+  Origin/Forwarded/X-Forwarded-*/X-Real-IP/X-Authz-User|Source|Identity）写入 proxy_set_header 引用的
+  $authz_* 变量，使改写值成为上游看到的最终值（改写优先于 proxy_set_header，删除=变量置空不发送）；
 - 绑定级响应改写 `response_rewrite`（APISIX response-rewrite 子集：status/headers/remove_headers/
   body/body_base64/content_type/rewrites）：保存时校验字段白名单、头名与值、PCRE 编译、条数与长度上限；
   运行期在 `gateway/rewrite.lua` 再拦一道（Set-Cookie、分帧与 hop-by-hop、X-Authz-*/X-Forwarded-*/Proxy-*、

@@ -79,7 +79,7 @@ nginx.conf.template
 | sessions | token(PK, 32B随机hex), username, source, csrf, expires_at | 本机服务端会话, TTL 默认7天 |
 | policies | ptype('p'/'g'), v0, v1, v2, UNIQUE(ptype,v0,v1,v2) | casbin 策略行 |
 | bindings | domain(UNIQUE), port, enabled, note | 显式域名绑定 |
-| bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/menu_name/header_overrides/**request_rewrite**/**response_rewrite** | `request_rewrite`/`response_rewrite` 为改写请求/响应的规范化 JSON（结构同构：headers/remove_headers/body/body_base64/content_type/rewrites），空串表示未配置 |
+| bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/menu_name/**request_rewrite**/**response_rewrite** | `request_rewrite`/`response_rewrite` 为改写请求/响应的规范化 JSON（结构同构：headers/remove_headers/body/body_base64/content_type/rewrites），空串表示未配置；header_overrides 列已由迁移 17 并入 request_rewrite |
 | schema_migrations | version(PK), name, applied_at | 已应用迁移的有序版本账本 |
 
 **policies 编码约定**：
@@ -204,8 +204,18 @@ resolver（gateway/resolver.lua）按序命中：
   `origin_mode`（auto/preserve/rewrite/remove/custom）→ simulate_local（本机值）→
   请求 Host
 - 配了正文改写的绑定自动向上游声明 `Accept-Encoding: identity`（绑定显式覆盖
-  Accept-Encoding 时以用户为准，改写随之失效）；`request_rewrite` 结构化改写在
-  header_overrides 之后应用
+  Accept-Encoding 时以用户为准，改写随之失效）
+- **改写优先于 proxy_set_header**：nginx 语义里 proxy_set_header 会覆盖 access 阶段
+  `ngx.req.set_header` 的同名头，因此 Host/Cookie/Origin/Forwarded/X-Forwarded-*/
+  X-Real-IP/X-Authz-User|Source|Identity 这些由 `$authz_*` 变量下发的托管头，绑定级
+  改写写入的是**变量本身**（`MANAGED_REQUEST_VARS` 映射），proxy_set_header 携带
+  改写后的最终值发往上游；删除托管头 = 变量置空串（proxy_set_header 对空值不发送该头）。
+  普通业务头仍走 set_header/clear_header
+- 请求改写最终禁止名单（validation 与 rewrite.parse_request 同一口径）只剩两类：
+  分帧/hop-by-hop 头（Content-Length、Transfer-Encoding、Connection、Upgrade、TE、
+  Trailer、Keep-Alive）与网关凭据头（X-Authz-Key/X-API-Key/X-Role-Key，proxy_set_header
+  已置空，开放改写等于把网关钥匙递给上游）；X-Authz-* 前缀仅放行三个身份断言头，
+  Proxy-* 前缀保留拦截
 
 ## 6. 缓存一致性
 

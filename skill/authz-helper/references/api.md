@@ -92,8 +92,7 @@ label `local:<port>`）。
 | `upstream_path` | 固定上游路径改写，空=保留原路径；只接受纯 path |
 | `upstream_host` / `forwarded_host` / `forwarded_proto` / `forwarded_port` | 显式覆盖上游 Host 与转发头 |
 | `origin_mode` | `auto`(默认)/`preserve`/`rewrite`/`remove`/`custom`；custom 配 `custom_origin`（`http(s)://authority`） |
-| `header_overrides` | 多行文本，每行 `Header-Name: value`，覆盖透传请求头（见 §5） |
-| `request_rewrite` | 结构化请求改写，对象或 JSON 字符串（见 §5.1） |
+| `request_rewrite` | 请求改写（头 + 正文），对象或 JSON 字符串（见 §5） |
 | `response_rewrite` | 对象或 JSON 字符串（见 §6） |
 
 `PATCH /applications/:id` 可改全部字段（仅 admin）。`DELETE /applications/:id` 删绑定。
@@ -124,35 +123,40 @@ label `local:<port>`）。
 `PATCH /policies/:id` 用与新建相同的完整字段；`DELETE /policies/:id` 删除。
 默认拒绝：未显式 allow 的角色/用户访问任何代理目标都是 403（admin 默认 `/*` 全放行）。
 
-## 5. 改写请求头（`header_overrides`）
+## 5. 改写请求（`request_rewrite`）
 
-多行文本，每行 `Header-Name: value`，保存时逐行校验（名称 ≤128、值 ≤1024、
-总量 ≤8192、≤32 条、重名保留首条），按行覆盖发往上游的透传头。
-
-不可覆盖（保存即 422）：`Host`、`Cookie`、`Origin`、`X-Authz-*`、`X-Forwarded-*`、
-`X-Real-IP`、hop-by-hop 与分帧头、CR/LF。
-
-典型用途：给上游固定一个 `Authorization: Bearer ...` 或业务头：
-
-```json
-{"header_overrides": "Authorization: Bearer sk-xxx\nX-Biz-Env: prod"}
-```
-
-
-### 5.1 结构化请求改写（`request_rewrite`）
-
-与 `header_overrides` 相比能力更全，结构与 `response_rewrite` 同构：
+结构化配置，改写发往上游的请求头与正文：
 
 | 字段 | 说明 |
 |---|---|
-| `headers` / `remove_headers` | 同 §6 语义，改写/删除发往上游的请求头（同样的禁止名单） |
+| `enabled` | 默认 true；false 保留配置不生效 |
+| `headers` | 对象，覆盖发往上游的请求头；值 `null` = 删除该头 |
+| `remove_headers` | 数组，显式删除请求头 |
 | `body` / `body_base64` / `content_type` | 整体替换请求正文（与 `rewrites` 互斥） |
 | `rewrites` | 请求正文过滤规则，同 §6 格式 |
 
-规则：`body` 与 `rewrites` 不能同时给；四类全空视为未配置；配了正文改写时网关
-自动声明 `Accept-Encoding: identity`（用户显式覆盖优先）。简单改一两个头优先用
-`header_overrides`，需要改正文或删头用本字段。两者同时存在时 `request_rewrite`
-在 `header_overrides` 之后应用。
+**网关托管头可以改写**：`Host`、`Cookie`、`Origin`、`Forwarded`、`X-Forwarded-*`、
+`X-Real-IP`、`X-Authz-User/Source/Identity`。网关把这些头的值写进 proxy_set_header
+引用的同名变量，改写值就是上游看到的最终值（优先于网关默认值）；删除托管头
+则该头不发送给上游。
+
+不可改写（保存即 422）：分帧与 hop-by-hop 头（`Content-Length`、`Transfer-Encoding`、
+`Connection`、`Upgrade`、`TE`、`Trailer`、`Keep-Alive`）、网关凭据头（`X-Authz-Key`、
+`X-API-Key`、`X-Role-Key`）、其余 `X-Authz-*` 与 `Proxy-*` 前缀、CR/LF 控制字符。
+
+规则：`body` 与 `rewrites` 不能同时给；四类全空视为未配置（存空串）；配了正文改写时
+网关自动向上游声明 `Accept-Encoding: identity`（用户显式覆盖优先）。限额与响应改写
+一致：名称 ≤128、值 ≤2048、≤32 条、正则 ≤512、替换 ≤4096、正文 ≤65536、JSON ≤131072。
+正文改写只对文本类、Content-Length 明确的非 GET/HEAD 请求生效，分块/二进制原样透传。
+
+典型用途：给上游固定鉴权头，或伪装入口 Host：
+
+```json
+{"headers": {"Authorization": "Bearer sk-xxx", "X-Biz-Env": "prod", "Host": "app.internal"}}
+```
+
+`upstream_host` / `forwarded_*` / `origin_mode` / `simulate_local` 是同一批头的结构化字段；
+二者并存时 `request_rewrite` 后生效（以改写值为准）。
 
 ## 6. 改写响应体（`response_rewrite`，APISIX 语义子集）
 
