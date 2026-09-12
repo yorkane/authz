@@ -45,7 +45,7 @@
 - 域名绑定的 `note` 会在左侧菜单名称下方显示；鼠标悬浮菜单时显示该菜单实际打开的完整域名地址，自动探测的 `local:<port>` 也显示生成后的地址；普通点击在右侧 iframe 打开，Ctrl/Command + 点击在新窗口打开菜单地址；
 - WebSocket 默认对所有已解析目标开启；`bindings.websocket` 字段保留用于兼容历史数据，不再作为升级请求的阻断开关。
 - “高级代理配置”可选择上游协议、SSL 校验和上游路径改写，并覆盖上游 `Host`、`X-Forwarded-Host`、`X-Forwarded-Proto`、`X-Forwarded-Port`，以及保持、重写、移除或自定义 `Origin`；改写路径留空时保持原路径，填写后请求统一转发到该路径。
-- “改写请求”（绑定行工具栏）按绑定改写发往上游的请求：覆盖/删除请求头、整体替换或按规则过滤文本正文。Host、Cookie、Origin、X-Forwarded-*、X-Authz-User/Source/Identity 等网关托管头同样可改写，改写值优先于网关默认值（删除则不发送该头）；只有分帧与 hop-by-hop 头（Content-Length、Transfer-Encoding、Connection、Upgrade 等）和网关凭据头（X-Authz-Key、X-API-Key、X-Role-Key）不可改写。编辑器支持表单与 JSON 双视图。
+- “改写请求”（绑定行工具栏）按绑定改写发往上游的请求，参考 APISIX 支持三种操作：替换（覆盖当前值）、追加（托管头按分隔符并入现值，普通头多出一行）、删除；也可整体替换或按规则过滤文本正文。Host、Cookie、Origin、X-Forwarded-*、X-Authz-User/Source/Identity 等网关托管头同样可改写，改写值优先于网关默认值（删除则不发送该头）；只有分帧与 hop-by-hop 头（Content-Length、Transfer-Encoding、Connection、Upgrade 等）和网关凭据头（X-Authz-Key、X-API-Key、X-Role-Key）不可改写。编辑器支持表单与 JSON 双视图。
 - “域名与端口绑定”每行提供 **改写响应** 按钮，可按绑定改写返回给浏览器的上游响应（语义参考 APISIX `response-rewrite`）：覆盖状态码、覆盖/删除响应头、整体替换正文（文本 / JSON / Base64）或按规则过滤正文（字面量与 PCRE 替换）。编辑器支持表单与 JSON 双视图互转，也可一键清除。
   正文改写只作用于上游 200 的 GET 响应，Range 分片、二进制和超过 1MB 的响应自动跳过（响应头 `X-Authz-Rewrite: skipped=<原因>` 会标明原因）。为了让改写对压缩型上游也生效，配置了正文改写的绑定会自动向上游声明 `Accept-Encoding: identity`（该链路不再压缩）；在「改写请求」里显式写 `Accept-Encoding` 时以其为准，此时上游返回压缩正文，正文改写按设计跳过并标记 `skipped=encoded`。`Set-Cookie`、`Content-Length`/`Transfer-Encoding` 等分帧头、`X-Authz-*` 以及 `X-Frame-Options`、`CSP`、`HSTS` 等安全头在保存与运行期两层都会被拒绝改写。
 - “模拟本机访问”默认把 `Host`/`Origin` 改为目标 HTTP 地址，并将 `X-Real-IP`、`X-Forwarded-For` 设置为 `127.0.0.1`；也可填写网关的局域网 IP。该选项只模拟 HTTP 请求头，不能改变真实 TCP 来源地址。

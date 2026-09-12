@@ -226,8 +226,8 @@
                 <div v-if="!requestRewriteForm.headers.length" class="rewrite-empty">{{ t.rrNoHeaders }}</div>
                 <div v-for="(header, index) in requestRewriteForm.headers" :key="index" class="rewrite-row">
                   <q-input v-model.trim="header.name" dark dense outlined hide-bottom-space maxlength="128" :label="t.rrHeaderName" placeholder="Authorization" :rules="[rewriteHeaderNameRule]" class="rewrite-row-name"></q-input>
-                  <q-input v-model="header.value" dark dense outlined hide-bottom-space :disable="header.remove" :label="t.rrHeaderValue" placeholder="Bearer token" class="rewrite-row-value"></q-input>
-                  <q-toggle v-model="header.remove" dense color="orange-4" class="rewrite-row-remove"><q-tooltip>{{ t.rrHeaderDelete }}</q-tooltip></q-toggle>
+                  <q-input v-model="header.value" dark dense outlined hide-bottom-space :disable="header.op === 'remove'" :label="t.rrHeaderValue" :placeholder="header.op === 'append' ? t.rrAppendPlaceholder : 'Bearer token'" class="rewrite-row-value"></q-input>
+                  <q-select v-model="header.op" dark dense outlined hide-bottom-space emit-value map-options :options="requestHeaderOpOptions" class="rewrite-row-op"><q-tooltip>{{ t.rrOpHint }}</q-tooltip></q-select>
                   <q-btn flat round dense icon="mdi-close" color="grey-6" class="rewrite-row-del" @click="removeRequestRewriteHeader(index)"><q-tooltip>{{ t.deleteAction }}</q-tooltip></q-btn>
                 </div>
               </div>
@@ -676,8 +676,14 @@
 
       // ── 改写请求（原「Header 覆盖」）：改写到上游的请求头 ──────────────────
       function addRequestRewriteHeader () {
-        requestRewriteForm.headers.push({ name: '', value: '', remove: false })
+        requestRewriteForm.headers.push({ name: '', value: '', op: 'set' })
       }
+
+      const requestHeaderOpOptions = computed(() => [
+        { label: t.value.rrOpSet, value: 'set' },
+        { label: t.value.rrOpAppend, value: 'append' },
+        { label: t.value.rrOpRemove, value: 'remove' },
+      ])
 
       function removeRequestRewriteHeader (index) {
         requestRewriteForm.headers.splice(index, 1)
@@ -703,8 +709,9 @@
         Object.assign(requestRewriteForm, requestRewriteDefaults())
         if (!config) return
         requestRewriteForm.enabled = config.enabled !== false
-        requestRewriteForm.headers = (config.headers || []).map(header => ({ name: header.name, value: header.value, remove: false }))
-          .concat((config.remove_headers || []).map(name => ({ name, value: '', remove: true })))
+        requestRewriteForm.headers = (config.headers || []).map(header => ({ name: header.name, value: header.value, op: 'set' }))
+          .concat((config.append_headers || []).map(header => ({ name: header.name, value: header.value, op: 'append' })))
+          .concat((config.remove_headers || []).map(name => ({ name, value: '', op: 'remove' })))
         requestRewriteForm.bodyBase64 = config.body_base64 === true
         requestRewriteForm.contentType = config.content_type || ''
         if (config.body) {
@@ -733,11 +740,15 @@
       function requestRewritePayloadFromForm () {
         const payload = { enabled: requestRewriteForm.enabled }
         const headers = {}
+        const appendHeaders = {}
         for (const header of requestRewriteForm.headers) {
           if (!header.name) continue
-          headers[header.name] = header.remove ? null : header.value
+          if (header.op === 'remove') headers[header.name] = null
+          else if (header.op === 'append') appendHeaders[header.name] = header.value
+          else headers[header.name] = header.value
         }
         if (Object.keys(headers).length) payload.headers = headers
+        if (Object.keys(appendHeaders).length) payload.append_headers = appendHeaders
         if (requestRewriteForm.bodyMode === 'replace' && requestRewriteForm.body !== '') {
           payload.body = requestRewriteForm.body
           if (requestRewriteForm.bodyBase64) payload.body_base64 = true
@@ -1033,7 +1044,7 @@
 
       onBeforeUnmount(() => unsubscribeLocale?.())
     
-      return { actionList, addRequestRewriteFilter, addRequestRewriteHeader, addRewriteFilter, addRewriteHeader, allowCount, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, clearRequestRewrite, clearRewrite, denyCount, entryDomain, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, openRequestRewrite, openRewrite, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, removeRequestRewriteFilter, removeRequestRewriteHeader, removeRewriteFilter, removeRewriteHeader, required, resetPolicyFields, requestRewriteBinding, requestRewriteForm, requestRewriteHasStored, requestRewriteJsonError, requestRewriteJsonText, requestRewriteOpen, requestRewriteView, rewriteActive, rewriteBodyOptions, rewriteBinding, rewriteContentTypeRule, rewriteDetails, rewriteFilterSourceRule, rewriteForm, rewriteHasStored, rewriteHeaderNameRule, rewriteJsonError, rewriteJsonText, rewriteOpen, rewriteStatusRule, rewriteStored, rewriteView, saveBindingForm, savePolicyForm, saveRequestRewriteForm, saveRewriteForm, saving, selectedPolicyObject, setPolicyMethods, sourceLabel, switchRequestRewriteView, switchRewriteView, t, toggleBinding, upstreamSchemeOptions }
+      return { actionList, addRequestRewriteFilter, addRequestRewriteHeader, addRewriteFilter, addRewriteHeader, allowCount, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, clearRequestRewrite, clearRewrite, denyCount, entryDomain, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, openRequestRewrite, openRewrite, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, removeRequestRewriteFilter, removeRequestRewriteHeader, removeRewriteFilter, removeRewriteHeader, required, requestHeaderOpOptions, resetPolicyFields, requestRewriteBinding, requestRewriteForm, requestRewriteHasStored, requestRewriteJsonError, requestRewriteJsonText, requestRewriteOpen, requestRewriteView, rewriteActive, rewriteBodyOptions, rewriteBinding, rewriteContentTypeRule, rewriteDetails, rewriteFilterSourceRule, rewriteForm, rewriteHasStored, rewriteHeaderNameRule, rewriteJsonError, rewriteJsonText, rewriteOpen, rewriteStatusRule, rewriteStored, rewriteView, saveBindingForm, savePolicyForm, saveRequestRewriteForm, saveRewriteForm, saving, selectedPolicyObject, setPolicyMethods, sourceLabel, switchRequestRewriteView, switchRewriteView, t, toggleBinding, upstreamSchemeOptions }
       }
     })
     

@@ -431,12 +431,19 @@ function _M.parse_request(raw)
     if text == "" then return nil end
     local decoded = cjson.decode(text)
     if type(decoded) ~= "table" or decoded.enabled == false then return nil end
-    local rule = { headers = {}, remove_headers = {}, rewrites = {} }
+    local rule = { headers = {}, append_headers = {}, remove_headers = {}, rewrites = {} }
     for _, item in ipairs(type(decoded.headers) == "table" and decoded.headers or {}) do
         local name = tostring(type(item) == "table" and item.name or "")
         local value = type(item) == "table" and tostring(item.value or "") or ""
         if name ~= "" and value ~= "" and request_header_ok(name) and not value:find("%c") then
             rule.headers[#rule.headers + 1] = { name = name, value = value }
+        end
+    end
+    for _, item in ipairs(type(decoded.append_headers) == "table" and decoded.append_headers or {}) do
+        local name = tostring(type(item) == "table" and item.name or "")
+        local value = type(item) == "table" and tostring(item.value or "") or ""
+        if name ~= "" and value ~= "" and request_header_ok(name) and not value:find("%c") then
+            rule.append_headers[#rule.append_headers + 1] = { name = name, value = value }
         end
     end
     for _, name in ipairs(type(decoded.remove_headers) == "table" and decoded.remove_headers or {}) do
@@ -467,7 +474,8 @@ function _M.parse_request(raw)
     if type(decoded.content_type) == "string" and decoded.content_type ~= "" then
         rule.content_type = decoded.content_type
     end
-    if #rule.headers == 0 and #rule.remove_headers == 0 and not rule.body
+    if #rule.headers == 0 and #rule.append_headers == 0
+        and #rule.remove_headers == 0 and not rule.body
         and #rule.rewrites == 0 then
         return nil
     end

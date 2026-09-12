@@ -1905,6 +1905,35 @@ assert_json "request rewrite Host overrides proxy_set_header" '.host' "rewritten
 assert_json "request rewrite X-Forwarded-For overrides gateway chain" '.forwarded_for' "1.1.1.1"
 assert_json "request rewrite overrides identity assertion header" '.user' "shadow"
 assert_json "request rewrite can set upstream Cookie" '.cookie' "session=kept"
+# 追加（append_headers，APISIX $Header 语义）：托管头并入网关现值，
+# 普通头在客户端同名行之后多出一行（多行请求头）。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"append_headers":{"Cookie":"app=1","X-Forwarded-For":"2.2.2.2","X-Dup":"added"}}}'
+assert_eq "save append headers" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+RR_STORED=$(jq -er '.data.bindings[] | select(.domain == "fixed.test.example") | .request_rewrite' "$TMP_DIR/body")
+assert_eq "append headers normalized to pairs" \
+    "$(jq -er '[.append_headers[] | .name] | join(",")' <<<"$RR_STORED")" "Cookie,X-Dup,X-Forwarded-For"
+request GET fixed.test.example /identity "$ADMIN_COOKIE" "" "" "" "X-Dup: client"
+assert_json "append cookie yields standalone upstream cookie" '.cookie' "app=1"
+assert_json "append XFF extends gateway chain" '.forwarded_for' "127.0.0.1, 2.2.2.2"
+assert_json "append plain header keeps client line" '.dup | join(",")' "client,added"
+# 删除+追加同名：先删后加，客户端原值被清除，只剩追加值。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"remove_headers":["X-Dup"],"append_headers":{"X-Dup":"only-appended"}}}'
+assert_eq "remove and append may share a name" "$STATUS" "200"
+request GET fixed.test.example /identity "$ADMIN_COOKIE" "" "" "" "X-Dup: client"
+assert_json "append after remove replaces client value" '.dup | join(",")' "only-appended"
+# 校验拒绝：同名替换+追加互斥、空值、禁止名单同样作用于追加。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"headers":{"X-Dup":"a"},"append_headers":{"X-Dup":"b"}}}'
+assert_eq "request rewrite set and append are exclusive per header" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"append_headers":{"X-Dup":null}}}'
+assert_eq "append requires a value" "$STATUS" "422"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
+    '{"request_rewrite":{"append_headers":{"Content-Length":"9"}}}'
+assert_eq "append cannot rewrite framing headers" "$STATUS" "422"
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" \
     '{"request_rewrite":{"status":500}}'
 assert_eq "request rewrite rejects unknown fields" "$STATUS" "422"
@@ -1914,8 +1943,9 @@ assert_eq "request rewrite rejects a top-level array" "$STATUS" "422"
 # 清空：null 清除全部配置，探针恢复为 null，托管头恢复网关默认值。
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"request_rewrite":null}'
 assert_eq "clear request rewrite" "$STATUS" "200"
-request GET fixed.test.example /identity "$ADMIN_COOKIE"
+request GET fixed.test.example /identity "$ADMIN_COOKIE" "" "" "" "X-Dup: client"
 assert_json "cleared request rewrite stops overriding" '.probe | tostring' "null"
+assert_json "cleared rewrite stops appending" '.dup | join(",")' "client"
 assert_json "cleared rewrite restores gateway Host" '.host | split(":")[0]' "fixed.test.example"
 assert_json "cleared rewrite restores identity header" '.user' "admin"
 

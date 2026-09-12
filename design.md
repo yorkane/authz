@@ -79,7 +79,7 @@ nginx.conf.template
 | sessions | token(PK, 32B随机hex), username, source, csrf, expires_at | 本机服务端会话, TTL 默认7天 |
 | policies | ptype('p'/'g'), v0, v1, v2, UNIQUE(ptype,v0,v1,v2) | casbin 策略行 |
 | bindings | domain(UNIQUE), port, enabled, note | 显式域名绑定 |
-| bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/menu_name/**request_rewrite**/**response_rewrite** | `request_rewrite`/`response_rewrite` 为改写请求/响应的规范化 JSON（结构同构：headers/remove_headers/body/body_base64/content_type/rewrites），空串表示未配置；header_overrides 列已由迁移 17 并入 request_rewrite |
+| bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/menu_name/**request_rewrite**/**response_rewrite** | `request_rewrite`/`response_rewrite` 为改写请求/响应的规范化 JSON（结构同构：headers/append_headers/remove_headers/body/body_base64/content_type/rewrites；append 仅请求侧），空串表示未配置；header_overrides 列已由迁移 17 并入 request_rewrite |
 | schema_migrations | version(PK), name, applied_at | 已应用迁移的有序版本账本 |
 
 **policies 编码约定**：
@@ -211,6 +211,11 @@ resolver（gateway/resolver.lua）按序命中：
   改写写入的是**变量本身**（`MANAGED_REQUEST_VARS` 映射），proxy_set_header 携带
   改写后的最终值发往上游；删除托管头 = 变量置空串（proxy_set_header 对空值不发送该头）。
   普通业务头仍走 set_header/clear_header
+- 请求改写支持三种操作（对齐 APISIX request-rewrite）：`headers` 替换（值 null=删除）、
+  `append_headers` 追加、`remove_headers` 删除。执行顺序 remove → append → set；
+  同名替换与追加互斥（422），删除可与任一叠加（先删后加/先删后设）。追加语义：
+  托管头并入变量现值（Cookie 用 "; " 拼 cookie 对，其余用 ", " 拼列表），普通头经
+  `ngx.req.set_header` 传数组生成多行请求头（目标镜像实测上游收到独立两行）
 - 请求改写最终禁止名单（validation 与 rewrite.parse_request 同一口径）只剩两类：
   分帧/hop-by-hop 头（Content-Length、Transfer-Encoding、Connection、Upgrade、TE、
   Trailer、Keep-Alive）与网关凭据头（X-Authz-Key/X-API-Key/X-Role-Key，proxy_set_header

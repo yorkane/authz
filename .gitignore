@@ -11,3 +11,4 @@ admin/videos/
 
 # Agent 本地会话数据
 .opencode/
+__pycache__/

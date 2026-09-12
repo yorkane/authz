@@ -200,6 +200,7 @@ body { overflow-x: hidden; }
 .rewrite-empty { padding: 9px 11px; border: 1px dashed var(--line-strong); border-radius: 9px; color: var(--muted); font-size: 12px; }
 .rewrite-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
 .rewrite-row { display: grid; grid-template-columns: minmax(160px, .7fr) minmax(0, 1.6fr) auto auto; align-items: center; gap: 8px; }
+.rewrite-row-op { min-width: 108px; }
 .rewrite-row-regex,
 .rewrite-row-remove { min-width: 44px; justify-content: center; }
 .rewrite-body-options { gap: 4px 16px; }
@@ -250,6 +251,7 @@ body { overflow-x: hidden; }
   .rewrite-row-value,
   .rewrite-row-source,
   .rewrite-row-target { grid-column: 1 / -1; }
+  .rewrite-row-op { grid-column: 1 / -1; }
   .rewrite-row-remove,
   .rewrite-row-regex { grid-column: 2; }
   .rewrite-row-del { grid-column: 3; }

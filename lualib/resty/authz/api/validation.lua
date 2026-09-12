@@ -164,7 +164,8 @@ end
 -- 请求改写配置字段：改写到上游的请求头，JSON 结构与 response_rewrite 的
 -- headers 子集对齐。
 --   enabled         是否启用改写
---   headers         请求头改写（对象，值为 null 表示删除）
+--   headers         请求头替换（对象，值为 null 表示删除）
+--   append_headers  请求头追加（对象；托管头按分隔符并入现值，普通头产生多行）
 --   remove_headers 显式删除列表（数组）
 --   body            整体替换请求正文（仅对文本类请求生效，见网关实现）
 --   body_base64     body 以 base64 提供
@@ -172,7 +173,7 @@ end
 --   rewrites        正文过滤规则（与 response_rewrite 的 rewrites 同构）
 -- 没有 status 改写：请求侧不存在状态码语义。
 local REQUEST_REWRITE_FIELDS = {
-    enabled = true, headers = true, remove_headers = true,
+    enabled = true, headers = true, append_headers = true, remove_headers = true,
     body = true, body_base64 = true, content_type = true, rewrites = true,
 }
 
@@ -195,7 +196,10 @@ function _M.normalize_request_rewrite(value)
     local enabled = config.enabled
     enabled = not (enabled == false or enabled == 0 or enabled == "false")
 
-    local set, remove, seen = {}, {}, {}
+    -- 三种操作：set（替换）、append（追加）、remove（删除）。
+    -- 替换与追加同名互斥；删除可与任一叠加（先删后设 / 先删后加）。
+    -- ops 记录每个名字的已用操作，用于互斥判定与条数限额。
+    local set, append, remove, ops = {}, {}, {}, {}
     local function reject_name(name)
         if #name < 1 or #name > 128 or
             not ngx.re.match(name, [[^[A-Za-z0-9][A-Za-z0-9_-]*$]]) then
@@ -206,6 +210,30 @@ function _M.normalize_request_rewrite(value)
         end
         return nil
     end
+    local function reject_value(name, value)
+        if #value > 2048 then
+            return "请求改写 Header 「" .. name .. "」的值不能超过 2048 字符"
+        end
+        if value:find("%c") then
+            return "请求改写 Header 「" .. name .. "」的值不能包含控制字符"
+        end
+        return nil
+    end
+    local function claim(name, op)
+        local lower = name:lower()
+        local used = ops[lower]
+        if not used then
+            used = {}
+            ops[lower] = used
+        end
+        -- 删除可与替换/追加叠加（先删后设、先删后加）；替换与追加互斥。
+        if op ~= "remove" and (used.set or used.append) then
+            return "请求改写 Header 「" .. name .. "」不能同时替换和追加"
+        end
+        used[op] = true
+        return nil
+    end
+
     if config.headers ~= nil and config.headers ~= cjson.null then
         if type(config.headers) ~= "table" then
             return nil, "请求改写 headers 必须是对象", 422
@@ -215,19 +243,17 @@ function _M.normalize_request_rewrite(value)
             if name ~= "" then
                 local err = reject_name(name)
                 if err then return nil, err, 422 end
-                local lower = name:lower()
                 if raw_value == nil or raw_value == cjson.null then
                     -- 显式删除语义（等价于 remove_headers 里列出该头）。
-                    if not seen[lower] then seen[lower] = { name = name, value = nil } end
+                    remove[#remove + 1] = name
+                    claim(name, "remove")
                 else
                     local header_value = tostring(raw_value)
-                    if #header_value > 2048 then
-                        return nil, "请求改写 Header 「" .. name .. "」的值不能超过 2048 字符", 422
-                    end
-                    if header_value:find("%c") then
-                        return nil, "请求改写 Header 「" .. name .. "」的值不能包含控制字符", 422
-                    end
-                    seen[lower] = { name = name, value = header_value }
+                    err = reject_value(name, header_value)
+                    if err then return nil, err, 422 end
+                    local err2 = claim(name, "set")
+                    if err2 then return nil, err2, 422 end
+                    set[#set + 1] = { name = name, value = header_value }
                 end
             end
         end
@@ -241,19 +267,42 @@ function _M.normalize_request_rewrite(value)
             if name ~= "" then
                 local err = reject_name(name)
                 if err then return nil, err, 422 end
-                seen[name:lower()] = { name = name, value = nil }
+                remove[#remove + 1] = name
+                claim(name, "remove")
             end
         end
     end
-    local total = 0
-    for _, item in pairs(seen) do
-        total = total + 1
-        if item.value == nil then
-            remove[#remove + 1] = item.name
-        else
-            set[#set + 1] = { name = item.name, value = item.value }
+    -- 追加（参考 APISIX request-rewrite 的 `$Header: value` 语义）：托管头
+    -- 按分隔符合并进网关当前值（Cookie 用 "; "，其余用 ", "），普通头以多行
+    -- 形式追加。与替换同名互斥；与删除并存时先删后加。
+    if config.append_headers ~= nil and config.append_headers ~= cjson.null then
+        if type(config.append_headers) ~= "table" then
+            return nil, "请求改写 append_headers 必须是对象", 422
+        end
+        for raw_name, raw_value in pairs(config.append_headers) do
+            local name = tostring(raw_name):gsub("^%s+", ""):gsub("%s+$", "")
+            if name ~= "" then
+                local err = reject_name(name)
+                if err then return nil, err, 422 end
+                if raw_value == nil or raw_value == cjson.null then
+                    return nil, "请求改写 append Header 「" .. name .. "」的值不能为空", 422
+                end
+                local header_value = tostring(raw_value)
+                if header_value == "" then
+                    return nil, "请求改写 append Header 「" .. name .. "」的值不能为空", 422
+                end
+                err = reject_value(name, header_value)
+                if err then return nil, err, 422 end
+                err = claim(name, "append")
+                if err then return nil, err, 422 end
+                append[#append + 1] = { name = name, value = header_value }
+            end
         end
     end
+
+    -- 限额按「涉及的不同 Header 名」计数：同名多条操作只算一条。
+    local total = 0
+    for _ in pairs(ops) do total = total + 1 end
     if total > 32 then return nil, "请求改写 Header 不能超过 32 条", 422 end
 
     -- 正文改写：与 response_rewrite 的 body/rewrites 子集同构（复用同一套
@@ -309,14 +358,17 @@ function _M.normalize_request_rewrite(value)
         return nil, "请求改写 body 与 rewrites 不能同时使用", 422
     end
 
-    if #set == 0 and #remove == 0 and body_text == nil and #rewrites == 0 then
+    if #set == 0 and #remove == 0 and #append == 0
+        and body_text == nil and #rewrites == 0 then
         return ""
     end
     table.sort(set, function(a, b) return a.name:lower() < b.name:lower() end)
+    table.sort(append, function(a, b) return a.name:lower() < b.name:lower() end)
     table.sort(remove)
     local out = {
         enabled = enabled,
         headers = set,
+        append_headers = #append > 0 and append or cjson.empty_array,
         remove_headers = #remove > 0 and remove or cjson.empty_array,
     }
     if body_text ~= nil then

@@ -130,8 +130,9 @@ label `local:<port>`）。
 | 字段 | 说明 |
 |---|---|
 | `enabled` | 默认 true；false 保留配置不生效 |
-| `headers` | 对象，覆盖发往上游的请求头；值 `null` = 删除该头 |
-| `remove_headers` | 数组，显式删除请求头 |
+| `headers` | 对象，**替换**发往上游的请求头；值 `null` = 删除该头 |
+| `append_headers` | 对象，**追加**：托管头并入当前值（Cookie 用 "; "，其余用 ", "），普通头多出一行；与 `headers` 同名互斥 |
+| `remove_headers` | 数组，**删除**请求头；可与追加同名并存（先删后加） |
 | `body` / `body_base64` / `content_type` | 整体替换请求正文（与 `rewrites` 互斥） |
 | `rewrites` | 请求正文过滤规则，同 §6 格式 |
 
@@ -149,10 +150,11 @@ label `local:<port>`）。
 一致：名称 ≤128、值 ≤2048、≤32 条、正则 ≤512、替换 ≤4096、正文 ≤65536、JSON ≤131072。
 正文改写只对文本类、Content-Length 明确的非 GET/HEAD 请求生效，分块/二进制原样透传。
 
-典型用途：给上游固定鉴权头，或伪装入口 Host：
+典型用途：给上游固定鉴权头、伪装入口 Host，或在既有 Cookie/转发链上追加：
 
 ```json
-{"headers": {"Authorization": "Bearer sk-xxx", "X-Biz-Env": "prod", "Host": "app.internal"}}
+{"headers": {"Authorization": "Bearer sk-xxx", "Host": "app.internal"},
+ "append_headers": {"Cookie": "tenant=a", "X-Forwarded-For": "10.0.0.9"}}
 ```
 
 `upstream_host` / `forwarded_*` / `origin_mode` / `simulate_local` 是同一批头的结构化字段；

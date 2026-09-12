@@ -36,7 +36,39 @@ local function request_sets_header(binding, lower_name)
     for _, header in ipairs(rr and rr.headers or {}) do
         if tostring(header.name or ""):lower() == lower_name then return true end
     end
+    for _, header in ipairs(rr and rr.append_headers or {}) do
+        if tostring(header.name or ""):lower() == lower_name then return true end
+    end
     return false
+end
+
+-- 追加（append_headers，参考 APISIX 的 $Header 前缀语义）：
+--   * 托管头：当前值是单个字符串（变量），按分隔符并入——Cookie 用 "; "
+--     拼 cookie 对，其余（X-Forwarded-For、Forwarded 等）用 ", " 拼列表；
+--   * 普通头：ngx.req.set_header 传数组会生成多行请求头（已在目标镜像
+--     上实测），把客户端已有的同名值收进数组末尾一起写回。
+-- 执行顺序 remove -> append -> set：删除先落地，追加基于删除后的现值，
+-- 替换最后写（与 validation 的互斥规则一致：set 与 append 不同名）。
+local APPEND_SEPARATORS = { ["authz_upstream_cookie"] = "; " }
+
+local function append_value(current, extra, separator)
+    current = tostring(current or "")
+    if current == "" then return extra end
+    return current .. separator .. extra
+end
+
+local function append_plain_header(name, value)
+    local existing = ngx.req.get_headers()[name:lower()]
+    if existing == nil then
+        ngx.req.set_header(name, value)
+    elseif type(existing) == "table" then
+        local values = {}
+        for index, item in ipairs(existing) do values[index] = tostring(item) end
+        values[#values + 1] = value
+        ngx.req.set_header(name, values)
+    else
+        ngx.req.set_header(name, { tostring(existing), value })
+    end
 end
 
 -- 网关托管头 → server.conf 里 proxy_set_header 引用的变量名。
@@ -129,6 +161,16 @@ local function apply_headers(binding, target_ip, port)
         for _, name in ipairs(rr.remove_headers or {}) do
             local var = MANAGED_REQUEST_VARS[tostring(name):lower()]
             if var then ngx.var[var] = "" else ngx.req.clear_header(name) end
+        end
+        for _, header in ipairs(rr.append_headers or {}) do
+            local name = tostring(header.name)
+            local var = MANAGED_REQUEST_VARS[name:lower()]
+            if var then
+                ngx.var[var] = append_value(ngx.var[var], tostring(header.value),
+                    APPEND_SEPARATORS[var] or ", ")
+            else
+                append_plain_header(name, tostring(header.value))
+            end
         end
         for _, header in ipairs(rr.headers or {}) do
             local var = MANAGED_REQUEST_VARS[tostring(header.name):lower()]
