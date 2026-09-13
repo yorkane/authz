@@ -479,10 +479,28 @@
         if (typeof raw === 'object') return raw
         try {
           const parsed = JSON.parse(String(raw))
-          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+          return normalizeRewriteHeaderMaps(parsed)
         } catch (parseError) {
           return null
         }
+      }
+
+      // JSON 视图允许手写成 {name: value} 映射（value=null 表示删除）；后端解析
+      // 对两种写法都容错，前端展示与回填同样归一化成数组，否则 forEach/.map
+      // 会把对象当数组用而抛异常——曾经表现为「改写请求」按钮点击无响应。
+      function normalizeRewriteHeaderMaps (config) {
+        if (!config || typeof config !== 'object') return config
+        for (const key of ['headers', 'append_headers']) {
+          const value = config[key]
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            config[key] = Object.entries(value).map(([name, v]) => ({ name, value: String(v == null ? '' : v) }))
+          }
+        }
+        if (config.remove_headers && typeof config.remove_headers === 'object' && !Array.isArray(config.remove_headers)) {
+          config.remove_headers = Object.keys(config.remove_headers)
+        }
+        return config
       }
 
       function rewriteActive (binding) {
