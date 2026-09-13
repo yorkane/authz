@@ -10,7 +10,17 @@
 -- is copied into a temporary prefix and only the edited include is replaced,
 -- so a broken candidate can never be picked up by a concurrent reload.
 
-local lfs = require "lfs"
+-- Resolved lazily and primed from init_by_lua via files.preload(); see
+-- resty.authz.files for why lfs must never be first required in a request.
+local lfs
+
+local function lfs_mod()
+    if not lfs then
+        local ok, mod = pcall(require, "lfs")
+        if ok then lfs = mod end
+    end
+    return lfs
+end
 
 local _M = {
     MAX_BYTES = 256 * 1024,
@@ -102,7 +112,7 @@ function _M.read_all()
     for _, entry in ipairs(_M.FILES) do
         local path = dir .. "/" .. entry.name
         local content = read_file(path)
-        local attr = lfs.attributes(path)
+        local attr = lfs_mod() and lfs.attributes(path)
         local truncated = content ~= nil and #content > _M.MAX_BYTES
         if truncated then content = content:sub(1, _M.MAX_BYTES) end
         files[#files + 1] = {
@@ -209,7 +219,7 @@ function _M.save(name, content)
         return nil, result.output, 422
     end
     local path = conf_dir() .. "/" .. name
-    local existed = lfs.attributes(path) ~= nil
+    local existed = lfs_mod() and lfs.attributes(path) ~= nil
     if existed then
         os.remove(path .. ".bak")
         os.rename(path, path .. ".bak")

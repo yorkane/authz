@@ -3,10 +3,14 @@
 local config_loader = require "resty.authz.config"
 local db = require "resty.authz.db"
 local gateway = require "resty.authz.gateway.access"
+local files = require "resty.authz.files"
 
 local _M = { config = {} }
 
 function _M.init()
+    -- lfs.so writes a global on load; do it here (master, pre-fork) so no
+    -- worker trips lua-nginx-module's _G write guard inside a request.
+    files.preload()
     _M.config = config_loader.load()
     db.init(_M.config)
     -- init_by_lua runs in master; workers must lazily open independent handles.

@@ -6,14 +6,41 @@
 -- root directory and only exposes metadata; file bytes are served by the
 -- nginx /files/ static location.
 
-local ok_lfs, lfs = pcall(require, "lfs")
+-- lfs is resolved lazily: _M.preload() runs in init_by_lua and primes
+-- package.loaded, so the request path only ever hits the cached module.
+local lfs
+local lfs_resolved = false
+local available = true
+
+local function lfs_mod()
+    if not lfs_resolved then
+        lfs_resolved = true
+        local ok, mod = pcall(require, "lfs")
+        if ok then lfs = mod end
+        available = ok and mod ~= nil
+    end
+    return lfs
+end
 
 local _M = {
-    available = ok_lfs and lfs ~= nil,
+    available = true,
     MAX_ENTRIES = 2000,
     -- Kept in sync with the nginx /_authz/files/ alias.
     default_root = "/files",
 }
+
+--- Load lfs.so before any worker starts serving requests.
+-- lfs.so is a plain Lua 5.1 C module: luaopen_lfs() stores the library in a
+-- global, which trips lua-nginx-module's _G write guard (a per-worker warn
+-- with a long stack trace) whenever the first require happens inside a
+-- request. Requiring it from init_by_lua keeps the global write in the
+-- master process where the guard is not installed.
+function _M.preload()
+    lfs_resolved = false
+    local mod = lfs_mod()
+    _M.available = available
+    return available and mod ~= nil
+end
 
 -- Collapse a user-supplied relative path; reject traversal and control chars.
 -- Returns the cleaned path ("" for root) or nil when invalid.
@@ -36,7 +63,9 @@ end
 
 -- List one directory. Returns { path, items, dirs, files, bytes, truncated }.
 function _M.list(root, rel)
-    if not _M.available then
+    local lfs = lfs_mod()
+    _M.available = available
+    if not lfs then
         return nil, "lfs 模块不可用", 503
     end
     local clean = _M.normalize(rel)

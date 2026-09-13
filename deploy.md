@@ -246,12 +246,30 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 | 子域之间登录态丢失 | 未设置 `AUTHZ_COOKIE_DOMAIN`（注意以 `.` 开头的父域），或需要启用 7.1 共享会话 |
 | Cookie 不生效 / 反复跳登录 | 外层是 HTTPS 但 `AUTHZ_COOKIE_SECURE=false`，或反代未透传 `X-Forwarded-Proto` |
 | 上游是 HTTPS 自签证书 | 在对应域名绑定的高级代理中关闭"验证 SSL 证书" |
+| 绑定的"改写请求"没生效 | 三种操作按 remove → append → set 顺序生效。Host、Cookie、Origin、X-Forwarded-\*、X-Authz-User/Source/Identity 等托管头可以改写（网关把改写值写进 proxy_set_header 引用的变量，上游看到的就是最终值）；替换与追加同名互斥（保存 422），删除+追加=先删后加。追加 Cookie 用 "; " 并入透传值（网关自身的 authz_session 永远先被剥离），追加普通头产生第二行请求头。分帧/hop-by-hop 头与网关凭据头（X-Authz-Key/X-API-Key/X-Role-Key）保存即 422 |
 | 绑定的"改写响应"没生效 | 看响应头 `X-Authz-Rewrite: skipped=<原因>`：`encoded` 上游返回了压缩正文、`range` 分片下载、`type` 非文本、`status` 上游非 200、`websocket`/`head` 不支持；正文改写还有 1MB 缓冲上限，超限自动原样透传。正文改写会由网关自动向上游声明 `Accept-Encoding: identity`（该链路不再压缩）；若绑定里显式写了 `Accept-Encoding` 覆盖则以其为准，上游压缩时改写按设计跳过 |
 | 改绑定保存时报 `响应改写 status 必须是…` | 旧版本把规范化后的 `status:0`（= 不改状态码）当非法值拒绝，导致保存过改写规则的绑定再也 PATCH 不动；现已接受 0 |
 | 忘记 admin 密码 | 见第 6 节 `admin_password_reset` |
 | 容器内访问不到宿主服务 | 确认 `network_mode: host` 且宿主是 Linux；Docker Desktop 下容器 `127.0.0.1` 不是宿主 |
 | 用 IP 访问时登录成功却反复跳回登录页 | 老版本缺陷（已在当前镜像修复）：升级到最新镜像即可；根因是登录响应错误下发了 `Domain=.<ip>` 清理头 |
 | 管理界面报 `map is not a function` | 老版本缺陷（已在当前镜像修复）：空数据表被编码成 JSON 对象 `{}`；升级到最新镜像即可 |
+
+## 8.1 从源码构建镜像（维护者）
+
+生产部署不需要构建（镜像自包含）；改了 `lualib/`、`admin/`、`conf/` 想出本地镜像时：
+
+```bash
+cd <仓库>
+# 用 daemon 内置 builder（走 docker daemon 的代理配置）；
+# buildx 的 docker-container builder（如 local-builder）是不继承 daemon 代理的独立容器，
+# 解析 docker.io 基础镜像会被墙掉且日志无进度，卡住时先检查它。
+docker build --progress=plain -t authz:latest .
+```
+
+- OpenResty 全家桶编译层都有缓存，日常只改代码时构建只需几秒；
+- 代码变更打进镜像后需 `docker compose up -d --force-recreate`（或 restart）生效；
+  若用开发挂载（附录 B）则改代码只需 restart，无需重建镜像；
+- 验证镜像内容：`docker exec <c> grep -c <新代码标记> /usr/local/openresty/site/lualib/...`。
 
 ## 附录 A：`.env` 全量示例（含注释）
 
