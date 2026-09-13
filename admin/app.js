@@ -15,6 +15,19 @@ function isNavigable (app) {
   return /^(https?:\/\/|\/)/.test(app) && !/^\/\//.test(app)
 }
 
+// URL 锚点：菜单点击把目标写进 #<encoded url>，刷新或带锚点打开时据此在
+// iframe 中恢复当前页面。内置页面允许省略 ?v= 版本位的简写（#users.html
+// 命中 users.html?v=N），按「去掉 ? 后的 base」匹配树节点。
+function hashTarget () {
+  const raw = String(window.location.hash || '').replace(/^#/, '')
+  if (!raw) return ''
+  try { return decodeURIComponent(raw) } catch (err) { return raw }
+}
+
+function urlBase (url) {
+  return String(url || '').split('?')[0]
+}
+
 // 把树节点解析成可导航的 URL。
 function nodeUrl (node) {
   if (node.builtin && builtInApps[node.builtin]) return builtInApps[node.builtin]
@@ -76,6 +89,43 @@ const app = createApp({
       }
       activeApp.value = url
       activeTitle.value = node.label || ''
+      syncHash(url)
+    }
+
+    // 锚点写入：内置页只存去版本位的简写（users.html），外链存完整 URL。
+    // 用 pushState 而非给 location.hash 赋值：不触发 hashchange，避免
+    // 与下方监听器互相回环；浏览器前进/后退仍经 hashchange 恢复。
+    function hashFor (url) {
+      return Object.values(builtInApps).includes(url) ? urlBase(url) : url
+    }
+
+    function syncHash (url, replace) {
+      const next = '#' + encodeURIComponent(hashFor(url))
+      if (window.location.hash === next) return
+      const state = { url }
+      if (replace) window.history.replaceState(state, '', next)
+      else window.history.pushState(state, '', next)
+    }
+
+    // 把任意锚点/简写解析成树节点使用的完整 URL（含 ?v= 版本位）。
+    function resolveTarget (target) {
+      if (!target) return ''
+      for (const group of groups.value) {
+        for (const child of (group.children || [])) {
+          const url = nodeUrl(child)
+          if (!url) continue
+          if (url === target || urlBase(url) === urlBase(target)) return url
+        }
+      }
+      return target
+    }
+
+    function applyHashTarget (replace) {
+      const target = resolveTarget(hashTarget())
+      if (target && isNavigable(target)) {
+        activeApp.value = target
+        syncHash(target, replace)
+      }
     }
 
     function toggleGroup (groupId) {
@@ -141,14 +191,28 @@ const app = createApp({
 
     onMounted(() => {
       window.addEventListener('resize', syncDrawerState)
+      // 前进/后退或直接带 #锚点 打开：按锚点恢复 iframe 页面。
+      window.addEventListener('popstate', restoreFromHistory)
+      window.addEventListener('hashchange', restoreFromHistory)
       unsubscribeLocale = window.adminI18n.subscribe(nextLocale => {
         locale.value = nextLocale
         Quasar.Lang.set(nextLocale === 'zh-CN' ? Quasar.Lang.zhCN : Quasar.Lang.enUS)
       })
       loadSession().then(() => {
+        // 树就绪后再解析锚点（内置页简写需要对照树节点补齐 ?v= 版本位）。
+        applyHashTarget(true)
         refreshTimer = window.setInterval(loadTree, 30000)
       })
     })
+
+    function restoreFromHistory (event) {
+      const url = event?.state?.url
+      if (url && isNavigable(url)) {
+        activeApp.value = url
+        return
+      }
+      applyHashTarget(true)
+    }
 
     watch(drawerMini, mini => {
       const current = activeGroupId.value
