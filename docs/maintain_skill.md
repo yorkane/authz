@@ -7,8 +7,10 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
 
 维护当前仓库时，先读取：
 
-1. `AGENTS.MD`：klib Router、ctxvar 和真实 OpenResty 约束；
-2. `docs/maintenance-handbook.md`：系统架构、身份模型、UI、测试和部署知识；
+1. `AGENTS.MD`：开发红线与发布/测试步骤；
+2. `docs/maintenance-handbook.md`：系统架构、身份模型、UI、测试、部署知识，以及 klib
+   Router/ctxvar/ngx.re 开发规范（附录 A）、Agent 接入与实现细节（附录 B）、
+   APP Code Review Checklist（附录 C）；
 3. 涉及 NocoBase/OAuth 时读取 `docs/sso-jwt-auth.md`；
 4. 涉及 Admin UI 时检查 `admin/vendor/manifest.json`、SSI 入口和现有 i18n 实现。
 
