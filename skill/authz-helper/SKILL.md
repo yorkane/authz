@@ -29,6 +29,25 @@ azctl() { curl -sS -H "x-api-key: $AUTHZ_API_KEY" "http://127.0.0.1:6080/_authz/
 - 兜底：`.env` 缺失或未含该行时，本机/测试实例可直接用内置默认值
   `eeeec9f034335f136f87ad84b625ffff`（仍受 ALLOWED_IPS 限制）；401 时按硬性规则停止。
 
+### 浏览器页面测试免认证（playwright-cli）
+
+`x-api-key` 只认请求头（无 query 参数回退），因此浏览器免登录的唯一正道是给页面
+上下文注入请求头。playwright-cli 没有全局 `--header` 参数，用 `run-code` 调
+Playwright API；注入一次后，后续 `goto`/`click` 及全部子资源请求自动带 Key：
+
+```bash
+KEY=$(grep '^AUTHZ_API_KEY=' /data/app/.env | cut -d= -f2)
+playwright-cli run-code "async page => {
+  await page.setExtraHTTPHeaders({ 'x-api-key': '$KEY' });
+  await page.goto('http://127.0.0.1:6080/_authz/apps/');
+}"
+# 之后照常 playwright-cli find / click / eval / screenshot
+```
+
+要点：run-code 沙箱里没有 `process.env`，Key 用 shell 插值进代码；自签 HTTPS(6443)
+在已开会话里无法开 ignoreHTTPSErrors，直接测 http 6080；`goto` 到 `/_authz/api/session`
+出现 `"auth_type":"api_key"` 即注入成功。不要用本地反代注入头，也不要重置 admin 密码。
+
 ## 助手脚本
 
 `scripts/azctl.sh` 封装了最常用的读写（login smoke、绑定增删查、策略增删查、

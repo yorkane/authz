@@ -406,7 +406,22 @@ viewer 角色已退役（迁移 18 把存量 viewer 就地改写为 guest；现�
 新增或修改 Router/ctxvar 行为时，必须更新测试夹具和断言，并在真实 OpenResty 中复跑。
 
 ## 测试实例（241.t）
-页面测试使用 playwright-cli 
+页面测试使用 playwright-cli（无认证写法见下）
+`x-api-key` 是页面级免认证的唯一正道：playwright-cli 没有全局 `--header` 参数，
+用 `run-code` 调 Playwright API 给整个页面上下文注入请求头，之后所有导航和
+子资源请求都自动带 Key，无需登录取 Cookie，也无需任何本地注入代理：
+
+```bash
+KEY=$(grep '^AUTHZ_API_KEY=' /data/app/.env | cut -d= -f2)
+playwright-cli run-code "async page => {
+  await page.setExtraHTTPHeaders({ 'x-api-key': '$KEY' });
+  await page.goto('http://127.0.0.1:6080/_authz/apps/');
+}"
+```
+
+注意：Key 只认请求头（无 query 参数回退），来源受 AUTHZ_API_KEY_ALLOWED_IPS 限制；
+自签 HTTPS（6443）用 `chromium.launch({ ignoreHTTPSErrors })` 不适用于已开会话，
+直接测 http 端口 6080 即可。
 `241.t`（10.252.25.241）是本项目专用测试/回归实例，生产实例跑在本机（writer）。
 
  **所有回归测试一律在 241.t 上运行；除非用户明确要求，不要向本机生产实例部署新代码或镜像**
