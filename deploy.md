@@ -253,6 +253,7 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 | 容器内访问不到宿主服务 | 确认 `network_mode: host` 且宿主是 Linux；Docker Desktop 下容器 `127.0.0.1` 不是宿主 |
 | 用 IP 访问时登录成功却反复跳回登录页 | 老版本缺陷（已在当前镜像修复）：升级到最新镜像即可；根因是登录响应错误下发了 `Domain=.<ip>` 清理头 |
 | 管理界面报 `map is not a function` | 老版本缺陷（已在当前镜像修复）：空数据表被编码成 JSON 对象 `{}`；升级到最新镜像即可 |
+| `docker cp` 覆盖 HTML/JS 后浏览器仍是旧页面 | 镜像里每个文本资产有预压缩 `.br` 旁文件，`brotli_static on` 时它优先于明文文件被下发（`docker cp` 不会同步它）。同名 `.br`（及 `.gz`）一并删除或覆盖即可；正式修复始终走镜像重建 |
 
 ## 8.1 从源码构建镜像（维护者）
 
