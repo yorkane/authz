@@ -287,7 +287,10 @@
           let acc = ''
           parts.forEach((part, i) => {
             acc = acc === '' ? part : acc + '/' + part
-            list.push({ path: acc, label: part, root: false, current: i === parts.length - 1, go: () => navigate(acc) })
+            // 必须为每级固定 target：acc 在循环结束后是当前完整路径，
+            // 直接闭包捕获 acc 会让所有层级都跳到当前目录（看起来点了没反应）。
+            const target = acc
+            list.push({ path: target, label: part, root: false, current: i === parts.length - 1, go: () => navigate(target) })
           })
           return list
         })
