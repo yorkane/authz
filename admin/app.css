@@ -136,21 +136,16 @@ body {
 
 /* 菜单条目多时列表自身滚动：flex 子项必须 min-height:0 才能收缩出滚动区，
    否则整棵菜单被撑高后被 drawer 的 overflow:hidden 裁掉，下部条目不可见。 */
+/* 滚动能力保留但滚动条不可见（滚轮/触控板照常工作）。 */
 #admin-menu .menu-list {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(139, 145, 184, .35) transparent;
+  scrollbar-width: none;
 }
-#admin-menu .menu-list::-webkit-scrollbar { width: 8px; }
-#admin-menu .menu-list::-webkit-scrollbar-thumb {
-  background: rgba(139, 145, 184, .35);
-  border-radius: 4px;
-}
-#admin-menu .menu-list::-webkit-scrollbar-track { background: transparent; }
+#admin-menu .menu-list::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
 #admin-menu .menu-item {
   min-height: 44px;
