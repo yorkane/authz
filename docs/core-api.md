@@ -107,7 +107,7 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 
 | 接口能力 | `guest` | 普通用户/Key | `admin` 用户/Key | `api` Key |
 |---|---:|---:|---:|---:|
-| 打开 `/_authz/guest` 诊断页 | 是 | 否 | 是 | 否 |
+| 打开 `/_authz/guest` 诊断页（匿名即可） | 是 | 否 | 是 | 否 |
 | 读取自身身份和应用入口 | 否 | 是 | 是 | 是 |
 | 浏览器注销/修改自己的密码 | 仅用户会话 | 仅用户会话 | 否 |
 | 新建域名与端口绑定 | 否 | 是 | 是 |
@@ -115,17 +115,21 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session
 | 管理用户、远程身份和密码 | 否 | 是 | 否 |
 | 读取/修改 Casbin 策略 | 否 | 是 | 否 |
 | 创建、修改、删除 API Key | 否 | 是 | 否 |
-| 请求受保护的代理目标 | 按绑定角色策略 | 按 `admin` 策略 | 按 `api` 策略 |
+| 请求受保护的代理目标 | 匿名同样按 `role:guest` 策略 | 按 `admin` 策略 | 按 `api` 策略 |
 
 用户会话的修改请求必须发送 CSRF；API Key 请求不使用 CSRF。`api` 是服务主体专用角色，不能分配给
 本地或远程用户；`guest` 反过来只能分配给用户与 Key，且被 guard 统一拒绝全部控制面 API。角色目录
-固定，不提供动态新建角色 API。
+固定，不提供动态新建角色 API。`guest` 就是**匿名**主体：代理层中无任何凭证的请求以
+`role:guest` 参与授权（默认仍拒绝，管理员显式放行即对匿名开放；呈现无效 Key 一律 401，
+绝不回退匿名）。
 
 ## 3.1 Guest 诊断页（`/_authz/guest`）
 
 回显**当次请求**在服务端看到的完整信息，用来自检接入链路（例如确认反向代理是否透传了真实客户端
-地址、上游收到了哪些头）。`guest` 角色的 Key 或登录会话即可访问，`admin` 也可用于核对。
-`guest` 的能力面只有两条：本页面，以及只回显调用者自身的 `GET /api/session`；其余控制面 API、管理页面与文件浏览一律拒绝。
+地址、上游收到了哪些头）。**guest 就是匿名用户**：无需登录、无需 Key，任何访客直接打开；
+`guest` 角色的 Key / 登录会话与 `admin` 同样可用（用于核对）。
+`guest` 的能力面只有两条：本页面，以及只回显调用者自身的 `GET /api/session`（后者的 Key 变体
+仍需 guest Key）；其余控制面 API、管理页面与文件浏览一律拒绝。
 
 ```bash
 curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/guest"
@@ -135,11 +139,13 @@ curl -sS -H "x-api-key: $GUEST_KEY" "https://gateway.example/_authz/guest?json=1
 - 页面为服务端渲染；`?json=1` 返回同一数据的 JSON 形态（`{data: {ip, proxy, request, headers}}`）。
 - 展示内容：TCP `remote_addr`、网关解析出的真实客户端、`X-Forwarded-For` 代理链（首项 = 客户端原始
   IP，末项 = 上一跳代理）、`Forwarded`/`X-Forwarded-*`/`Via`、请求行，以及全部请求头。
- - 调试需求：所有请求头（含 `Cookie`/`Authorization`/`x-api-key` 等凭据类头）**明文完整回显**，
-   因此该入口必须始终保持 guest/admin 角色门禁，不得放开给匿名访问。
+- 调试需求：所有请求头（含 `Cookie`/`Authorization`/`x-api-key` 等凭据类头）**明文完整回显**。
+  这面向的是"请求者看自己的凭证"：跨站 iframe 里渲染的也是访客自己的头，第三方脚本受同源
+  策略限制读不到帧内容，因此匿名开放不构成跨用户泄露面。
 - 回显内容是天然反射面：所有字段逐条 HTML 转义，响应 `Cache-Control: no-store`（诊断内容与当次
   请求绑定，缓存等于跨请求泄露）。这些行为在回归里是固定断言，改动前先看测试。
-- 浏览器直接访问且未登录时会跳 `/_authz/login`；呈现了无效 `x-api-key` 则直接 401，不回退 Cookie。
+- 未登录/无凭证访客直接放行；已登录的非 guest/admin 会话会收到 403（退出后匿名使用）；
+  呈现了无效 `x-api-key` 则直接 401，绝不回退 Cookie 或匿名身份。
 - guest 拿不到除上述两条以外的任何控制面 API、管理页面与文件浏览：访问 /_authz/apps/* 会被引导到登录页（机器 Key）或本页（浏览器会话）。例外端点由路由上的 self_service 标记显式声明，新增端点默认不在 guest 的能力面内。
 
 ## 4. API Key 管理（`admin` 角色）

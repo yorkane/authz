@@ -57,7 +57,8 @@ register("GET",  "/oauth/callback", ui.oauth_callback)
 -- admin 也可访问，便于核对某次请求在网关侧看到的真实信息。
 -- 除探针外，guest 的可访问代理范围与其他角色一样由策略（role:guest 主体）配置。
 -- 服务端渲染、逐字段 HTML 转义；?json=1 返回同一数据的 JSON 形态。
--- 认证与角色门禁内聚在 guest.handle：浏览器未登录跳登录页，无效 Key 直接 401。
+-- 认证与角色门禁内聚在 guest.handle：匿名访客直接放行（guest=匿名），
+-- 非 guest/admin 的已登录会话拒绝，无效 Key 直接 401。
 register("GET", "/guest", guest.handle)
 
 -- ── Session ─────────────────────────────────────────────────────────────────

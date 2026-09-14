@@ -1103,7 +1103,40 @@ unset VIEWER_API_KEY_TOKEN
 section guest
 if [[ "$SECTION_RUN" == "1" ]]; then
 ensure ADMIN_COOKIE CSRF
-# -- guest 角色：最小权限 API Key，唯一入口是只读诊断页 --------------------------
+# -- guest 角色：匿名用户；诊断页对无凭证访客开放，代理范围按策略放开 ----------
+# guest 就是匿名：无任何凭证（不登录、无 Key）即可打开诊断页。
+request GET "$ADMIN_HOST" /_authz/guest
+assert_eq "anonymous visitors open the diagnostic page without credentials" "$STATUS" "200"
+assert_contains "anonymous diagnostic page reports the TCP source" "$BODY" "remote_addr"
+request GET "$ADMIN_HOST" "/_authz/guest?json=1"
+assert_eq "anonymous diagnostic JSON works without credentials" "$STATUS" "200"
+assert_json "anonymous diagnostic JSON reports the request host" '.data.request.host' "$ADMIN_HOST"
+# 匿名代理：默认拒绝不变——没有 role:guest 策略时仍跳登录；显式放行后才可达，
+# 上游看到 X-Authz-User=guest / X-Authz-Source=anonymous / 主体 role:guest。
+request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$CSRF" \
+    "{\"domain\":\"anonymous-open.test.example\",\"port\":$UPSTREAM_PORT}"
+assert_eq "admin creates the binding for the anonymous probe" "$STATUS" "201"
+request GET anonymous-open.test.example /identity
+assert_eq "proxy stays login-gated for anonymous without a guest policy" "$STATUS" "302"
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$CSRF" \
+    "{\"ptype\":\"p\",\"v0\":\"role:guest\",\"v1\":\"/$UPSTREAM_PORT/identity\",\"v2\":\"GET\",\"eft\":\"allow\"}"
+assert_eq "admin allows the identity target for role:guest" "$STATUS" "201"
+request GET anonymous-open.test.example /identity
+assert_eq "anonymous visitors reach a guest-allowed proxy target" "$STATUS" "200"
+assert_json "upstream sees the anonymous guest user" '.user' "guest"
+assert_json "upstream sees the anonymous source" '.source' "anonymous"
+assert_json "upstream sees the role:guest principal" '.identity' "role:guest"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+ANON_POLICY_ID=$(jq -er --arg object "/$UPSTREAM_PORT/identity" \
+    '.data.policies[] | select(.v0 == "role:guest" and .v1 == $object) | .id' "$TMP_DIR/body")
+ANON_BINDING_ID=$(jq -er '.data.bindings[] | select(.domain == "anonymous-open.test.example") | .id' "$TMP_DIR/body")
+request DELETE "$ADMIN_HOST" "/_authz/api/policies/$ANON_POLICY_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "delete the anonymous guest policy" "$STATUS" "200"
+request GET anonymous-open.test.example /identity
+assert_eq "anonymous access closes again with the policy removed" "$STATUS" "302"
+request DELETE "$ADMIN_HOST" "/_authz/api/applications/$ANON_BINDING_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "delete the binding for the anonymous probe" "$STATUS" "200"
+
 request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name":"guest-agent"}'
 assert_eq "admin creates a guest API key" "$STATUS" "201"
 GUEST_API_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")

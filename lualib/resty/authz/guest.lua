@@ -7,14 +7,16 @@
 -- GET /api/session）；管理员可以像配置其他角色一样，在策略里为
 -- role:guest 追加可访问的代理目标范围。
 --
--- 准入：携带 guest（或 admin）角色的 API Key（x-api-key），或以 guest/admin
--- 角色登录的浏览器会话；浏览器未登录时跳转 /_authz/login。
+-- 准入：任何匿名访客（无需登录、无需 Key）即可打开；guest/admin 角色的
+-- 会话与 API Key 同样可用。呈现了无效 Key 一律 401，绝不回退匿名。
 --
 -- 安全约束：
 --   * HTML 全部服务端渲染并逐字段 HTML 转义，不回显任何可执行内容；
 --   * 响应禁止缓存（诊断内容与当次请求绑定，缓存等于跨请求泄露）。
 --   * 调试需求：所有请求头（含 Cookie / Authorization / API Key）均明文
---     完整回显，因此该入口必须始终保持 guest/admin 角色门禁。
+--     完整回显。回显内容永远只来自当次请求者自身：跨站 iframe 场景下渲染
+--     给谁看就是谁的凭证，第三方脚本受同源策略限制读不到帧内容，
+--     且全部字段 HTML 转义，不构成跨用户泄露面。
 
 local cjson = require "cjson.safe"
 local util = require "resty.authz.util"
@@ -103,8 +105,10 @@ end
 -- 入口：/_authz/guest。认证在此内聚：
 --   * 呈现 x-api-key：必须是合法 Key（数据库 Key 或环境变量 Key），无效直接
 --     401，绝不回退 Cookie；
---   * 未呈现 Key：按浏览器会话处理，未登录跳登录页；
---   * 角色门禁：仅 guest / admin（会话角色实时查库，改角色立即生效）。
+--   * 未呈现 Key 的浏览器访客：guest 就是匿名用户，直接放行（本页即匿名
+--     访客的默认着陆页，无需登录）；
+--   * 已登录会话：沿用角色门禁，仅 guest / admin 可用（角色实时查库；
+--     其他角色的登录用户请退出后以匿名身份使用，或直接看无痕窗口）。
 function _M.handle()
     db.open(authz.config.db_path)
     local presented, current = api_key.authenticate_request()
@@ -118,15 +122,11 @@ function _M.handle()
     else
         local token = session.get_request_token()
         current = token and session.get(token) or nil
-        if not current then
-            return ngx.redirect("/_authz/login?next=" ..
-                ngx.escape_uri(ngx.var.request_uri or "/_authz/guest"),
-                ngx.HTTP_MOVED_TEMPORARILY)
-        end
     end
 
     -- 会话角色实时查库（common.roles_for），改角色立即生效。
-    if not common.has_any_role(current, { "guest", "admin" }) then
+    -- 匿名（current 为 nil）视为 guest。
+    if current and not common.has_any_role(current, { "guest", "admin" }) then
         ngx.status = ngx.HTTP_FORBIDDEN
         local machine = presented or
             tostring(ngx.req.get_headers()["Accept"] or ""):find("application/json", 1, true) ~= nil

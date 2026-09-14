@@ -72,6 +72,8 @@ scripts/azctl.sh ... menu
 
 - 增加角色/用户：本地角色目录固定 `admin/staff/user/guest`，**没有动态新建角色的 API**；
   给用户配角色走 `POST/PATCH /users`，给 Key 配角色走 `POST/PATCH /api-keys`。
+  `guest` 即匿名主体：无凭证请求以 `role:guest` 参与授权，给 guest 加 allow 策略
+  即可对公网匿名开放对应代理路径；`/_authz/guest` 探针页默认就对匿名开放。
 - 给某角色/用户放行某服务：`POST /policies`（ptype=p，主体 `role:staff` 或
   `user:local:alice`，对象 `/<port>/*`，方法 `*` 或具体方法）。deny 优先于 allow，
   收紧用 `eft=deny`。

@@ -84,16 +84,28 @@ function _M.handle(config)
     if prevent_loop(target_ip, port) then return end
 
     local machine_request, current = authenticate()
-    if not current then return reject_unauthenticated(machine_request) end
     local authorization = cache.ensure(config)
     local object = "/" .. port .. (ngx.var.uri or "")
-    local principal = machine_request and current.identity or identity.key(current.source, current.username)
-    if not principal or not authorization.enforcer:enforce(principal, object, ngx.req.get_method()) then
+    local principal, anonymous
+    if current then
+        principal = machine_request and current.identity or identity.key(current.source, current.username)
+    elseif machine_request then
+        -- 呈现了 Key 但无效：绝不回退匿名身份（保持 401，不泄露"匿名也能进"的边界）。
+        return reject_unauthenticated(true)
+    else
+        -- guest 就是匿名用户：无凭证请求以 role:guest 主体参与授权。
+        -- 默认拒绝不变——只有管理员显式给 role:guest 放行过的目标才对匿名开放；
+        -- 未命中策略时仍引导登录（也许换个身份就有权限）。
+        principal = "role:guest"
+        anonymous = true
+    end
+    if not authorization.enforcer:enforce(principal, object, ngx.req.get_method()) then
+        if anonymous then return reject_unauthenticated(false) end
         return reject_forbidden(machine_request, principal, object)
     end
 
-    ngx.var.authz_user = current.username
-    ngx.var.authz_source = current.source
+    ngx.var.authz_user = current and current.username or "guest"
+    ngx.var.authz_source = current and current.source or "anonymous"
     ngx.var.authz_identity = principal
     local scheme = proxy.prepare(binding, target_ip, port)
     if scheme == "https" and binding and binding.upstream_ssl_verify == false then

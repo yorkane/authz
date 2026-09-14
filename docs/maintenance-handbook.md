@@ -190,7 +190,9 @@ user:dingtalk:kate
 - `api` 不能修改/删除绑定，不能管理用户、角色、策略、API Key 或核心认证；
 - 非 admin 只能读取自身 session/profile；
 - 默认仅 `role:admin` 拥有 `/*`，其他角色默认拒绝；
-- guest 只能访问只读诊断页与只回显自身的 `GET /api/session`，看不到任何控制面数据；
+- guest 就是匿名主体：无凭证的代理请求以 `role:guest` 参与授权（默认拒绝，显式放行即对
+  匿名开放，上游收到 X-Authz-User=guest / Source=anonymous）；`/_authz/guest` 诊断页对
+  匿名访客直接开放；guest 看不到任何控制面数据；
 - 远程用户不能在本机修改密码。
 
 本地用户在管理端“修改我的密码”时必须输入两次新密码，页面会在提交前检查一致性，密码修改成功后该用户的所有本地 session（包括当前 session）都会失效，必须重新登录。API
@@ -876,7 +878,7 @@ lualib/tracker/
   （`response_rewrite` 字段配置绑定级响应改写，字段与限制见 `docs/core-api.md`）
 - 策略：`GET /_authz/api/authorization`、`POST /_authz/api/policies`、`PATCH|DELETE /_authz/api/policies/:id`
 - API Key：`GET|POST /_authz/api/api-keys`、`PATCH|DELETE /_authz/api/api-keys/:id`
-- Guest 诊断页：`GET /_authz/guest`（guest/admin 角色；加 `?json=1` 返回 JSON）
+- Guest 诊断页：`GET /_authz/guest`（匿名即可访问；guest/admin 的 Key 与会话同样可用；加 `?json=1` 返回 JSON）
   ——**明文完整**回显当次请求的全部请求头（含 Cookie/Authorization/API Key）、来源 IP
   与代理转发头，用于 debug；guest 的代理访问范围可像其他角色一样用策略配置。
 - 菜单树：`GET /_authz/api/menu-tree`（渲染用）；`GET|POST /_authz/api/menu-entries`、

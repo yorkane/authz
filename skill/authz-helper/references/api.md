@@ -42,9 +42,11 @@
    - 代理入口：域名/端口绑定与 `<port>-域名` 动态入口，如
      `https://code-235.ai-t.wtvdev.com:6443/api/...`。
 3. **权限边界 = 角色 + Casbin 策略**：
-   - `guest`：只有 `GET /_authz/guest` 诊断页和只回显自身的
+   - `guest`（= 匿名主体）：只有 `GET /_authz/guest` 诊断页和只回显自身的
      `GET /_authz/api/session`；其余控制面 API、管理页、文件浏览一律拒绝。
      给第三方做链路自检（确认来源 IP、代理头、上游收到的头）用 guest 即可。
+     无凭证请求同样按 `role:guest` 授权：给 guest 配 allow 策略即可把某个
+     绑定/路径开放给**完全匿名**访客（上游收到 X-Authz-User=guest）。
    - `user`/`staff`/`admin`：按角色的 Casbin 策略决定控制面与代理目标权限；
      需要调控制面 API 但只做业务读取时用 `staff`，完全控制面管理用 `admin`。
    - `api`：服务主体角色，默认可访问所有已解析代理目标（admin 可用 deny 收紧），
@@ -244,8 +246,8 @@ core-api.md 与代码为准）。
 
 ## 11. 其他端点与语义速查
 
- - `GET /_authz/guest?json=1` — guest 角色探针（明文完整回显请求头/来源/代理链，
-   服务端转义）；guest Key 默认只能访问它和 `GET /session`，admin 也可看。
+ - `GET /_authz/guest?json=1` — 请求探针（明文完整回显请求头/来源/代理链，
+   服务端转义）；**匿名即可访问**，guest/admin Key 与会话同样可用。
 - `GET /api/files?path=` — 只读列 `AUTHZ_FILES_ROOT` 目录（登录或非 guest Key）。
 - `PUT /api/me/password` — 改自己密码（session_only；改完其他会话全部下线）。
 - `PUT /api/users/:id/password` — admin 重置他人密码。
