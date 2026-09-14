@@ -9,7 +9,7 @@
   <title>Files</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
   <link rel="stylesheet" href="./app-page.css?v=5">
-  <link rel="stylesheet" href="./files.css?v=1">
+  <link rel="stylesheet" href="./files.css?v=2">
 </head>
 <body>
   <div id="q-app">
@@ -24,7 +24,6 @@
             <template v-slot:append><q-icon name="mdi-magnify"></q-icon></template>
           </q-input>
           <q-btn-toggle v-model="viewMode" dense unelevated no-caps :options="viewOptions" toggle-class="files-toggle-active"></q-btn-toggle>
-          <q-select v-model="sortKey" dense outlined :options="sortOptions" emit-value map-options class="files-sort" :label="t.sortBy"></q-select>
           <q-btn dense unelevated round :icon="sortDesc ? 'mdi-sort-descending' : 'mdi-sort-ascending'" :title="t.sortOrder" @click="toggleSortOrder"></q-btn>
           <q-btn dense unelevated round icon="mdi-refresh" :title="t.refresh" @click="load"></q-btn>
         </div>
@@ -53,7 +52,7 @@
         <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-card" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
              @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)" @contextmenu.prevent="download(item)">
           <div class="files-thumb">
-            <img v-if="kindOf(item) === 'image' && idx &lt; thumbLimit" :src="fileUrl(item)" loading="lazy" alt="" @error="broken[idx] = true" v-show="!broken[idx]">
+            <img v-if="kindOf(item) === 'image'" :src="fileUrl(item)" loading="lazy" decoding="async" alt="" @error="broken[idx] = true" v-show="!broken[idx]">
             <q-icon v-else :name="iconOf(item)" :color="colorOf(item)" :size="item.type === 'dir' ? '44px' : '38px'"></q-icon>
           </div>
           <div class="files-name" :title="item.name">{{ item.name }}</div>
@@ -61,11 +60,11 @@
         </div>
       </div>
 
-      <!-- 列表 / 详情视图共用行；详情模式右侧附预览面板 -->
-      <div v-else class="files-rows-wrap">
+      <!-- 列表视图：行列表与预览面板各占一半，面板可折叠 -->
+      <div v-else class="files-list" :class="{ 'preview-collapsed': !previewPanelOpen }">
         <div class="files-rows">
           <div class="files-row files-row-head">
-            <span class="col-name">{{ t.name }}</span><span class="col-size">{{ t.size }}</span><span class="col-date">{{ t.modified }}</span>
+            <span class="col-name files-sortable" @click="sortBy('name')" :title="t.sortName">{{ t.name }}<q-icon v-if="sortKey === 'name'" :name="sortDesc ? 'mdi-arrow-down': 'mdi-arrow-up'" size="14px" class="sort-caret"></q-icon></span><span class="col-size files-sortable" @click="sortBy('size')" :title="t.sortSize">{{ t.size }}<q-icon v-if="sortKey === 'size'" :name="sortDesc ? 'mdi-arrow-down': 'mdi-arrow-up'" size="14px" class="sort-caret"></q-icon></span><span class="col-date files-sortable" @click="sortBy('time')" :title="t.sortTime">{{ t.modified }}<q-icon v-if="sortKey === 'time'" :name="sortDesc ? 'mdi-arrow-down': 'mdi-arrow-up'" size="14px" class="sort-caret"></q-icon></span>
           </div>
           <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-row" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
                @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)">
@@ -74,8 +73,8 @@
             <span class="col-date">{{ dateText(item.mtime) }}</span>
           </div>
         </div>
-        <aside v-if="viewMode === 'detail' && focused" class="files-detail">
-          <div class="detail-title"><q-icon :name="iconOf(focused)" :color="colorOf(focused)" class="q-mr-sm"></q-icon>{{ focused.name }}</div>
+        <aside v-if="previewPanelOpen && focused" class="files-detail">
+          <div class="detail-title"><span class="detail-title-text"><q-icon :name="iconOf(focused)" :color="colorOf(focused)" class="q-mr-sm"></q-icon>{{ focused.name }}</span><q-btn flat dense round icon="mdi-arrow-collapse-right" :title="t.collapsePreview" @click="previewPanelOpen = false"></q-btn></div>
           <div class="detail-body">
             <img v-if="kindOf(focused) === 'image'" :src="fileUrl(focused)" alt="" class="detail-media">
             <video v-else-if="kindOf(focused) === 'video'" :src="fileUrl(focused)" controls preload="none" class="detail-media"></video>
@@ -91,6 +90,7 @@
             <q-btn v-if="focused.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(focused)"></q-btn>
           </div>
         </aside>
+        <q-btn v-else class="preview-expand-btn" flat dense round icon="mdi-page-layout-sidebar-right" :title="t.expandPreview" @click="previewPanelOpen = true"></q-btn>
       </div>
 
       <div v-if="!loading && shown.length === 0" class="files-empty">
@@ -110,7 +110,10 @@
         <q-card class="files-preview-card">
           <q-card-section class="row items-center q-pb-none">
             <div class="text-h6"><q-icon :name="iconOf(previewItem)" :color="colorOf(previewItem)" class="q-mr-sm"></q-icon>{{ previewItem ? previewItem.name : '' }}</div>
+            <span v-if="previewCount > 1" class="text-caption q-ml-sm preview-counter">{{ previewPosition }} / {{ previewCount }}</span>
             <q-space></q-space>
+            <q-btn v-if="previewPosition > 1" flat dense round icon="mdi-chevron-left" :aria-label="t.prevFile" @click="stepPreview(-1)"></q-btn>
+            <q-btn v-if="previewPosition < previewCount" flat dense round icon="mdi-chevron-right" :aria-label="t.nextFile" @click="stepPreview(1)"></q-btn>
             <q-btn v-if="previewItem" flat dense no-caps icon="mdi-open-in-new" :label="t.openInTab" @click="openInTab(previewItem)"></q-btn>
             <q-btn v-if="previewItem && previewItem.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(previewItem)"></q-btn>
             <q-btn flat dense round icon="mdi-close" :aria-label="t.close" @click="previewOpen = false"></q-btn>
@@ -133,7 +136,7 @@
   </div>
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./i18n.js?v=37"></script>
+  <script src="./i18n.js?v=39"></script>
   <script src="./api.js?v=18"></script>
   <script>
     const { createApp, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } = Vue
@@ -171,18 +174,14 @@
         const pageSize = ref(Number(localStorage.getItem('files_page_size')) || 100)
         const pageSizeOptions = [50, 100, 200, 500]
 
-        const viewMode = ref(localStorage.getItem('files_view') || 'grid')
+        // 旧版有第三档 detail，合并进 list 后做一次性迁移。
+        const savedView = localStorage.getItem('files_view')
+        const viewMode = ref(savedView === 'detail' ? 'list' : (savedView || 'grid'))
         const sortKey = ref(localStorage.getItem('files_sort') || 'name')
         const sortDesc = ref(localStorage.getItem('files_sort_desc') === '1')
         const viewOptions = computed(() => [
           { value: 'grid', icon: 'mdi-view-grid-outline', label: '' },
-          { value: 'list', icon: 'mdi-view-list-outline', label: '' },
-          { value: 'detail', icon: 'mdi-page-layout-sidebar-right', label: '' }
-        ])
-        const sortOptions = computed(() => [
-          { value: 'name', label: t.value.sortName },
-          { value: 'size', label: t.value.sortSize },
-          { value: 'time', label: t.value.sortTime }
+          { value: 'list', icon: 'mdi-view-list-outline', label: '' }
         ])
 
         const previewOpen = ref(false)
@@ -190,9 +189,8 @@
         const previewText = ref(null)
         const detailText = ref(null)
         const grid = ref(null)
-        // 缩略图限量：大目录切目录时只加载前 N 张图片原图，其余用图标占位，
-        // 避免浏览器一次性拉取大量原图拖慢切换。
-        const thumbLimit = 24
+        // 列表视图预览面板的展开/收起；缩略图模式的图片预览由 img loading=lazy 按视口加载。
+        const previewPanelOpen = ref(localStorage.getItem('files_preview_open') !== '0')
 
         function kindOf (item) {
           if (!item) return 'other'
@@ -234,6 +232,34 @@
         }
 
         const previewKind = computed(() => previewItem.value ? kindOf(previewItem.value) : '')
+
+        // 全屏预览的上一/下一个：沿用 filtered 的顺序（排序 + 过滤后的完整序列，
+        // 跨分页连续），只跳过目录条目。
+        const previewable = computed(() => filtered.value.filter(item => item.type !== 'dir'))
+        const previewIndex = computed(() => previewItem.value
+          ? previewable.value.findIndex(item => item.name === previewItem.value.name)
+          : -1)
+        const previewCount = computed(() => previewable.value.length)
+        const previewPosition = computed(() => previewIndex.value + 1)
+
+        function stepPreview (delta) {
+          const list = previewable.value
+          const next = previewIndex.value + delta
+          if (next < 0 || next >= list.length) return
+          const item = list[next]
+          previewItem.value = item
+          previewText.value = null
+          if (kindOf(item) === 'text') {
+            loadText(item).then(text => { previewText.value = text }).catch(() => { previewText.value = t.value.textTooLarge })
+          }
+          // 焦点与分页跟随预览项：关闭预览后列表停在同一文件上。
+          // 页/焦点必须按 filtered（含目录）的位置换算，previewable 已剔除目录。
+          const listIndex = filtered.value.findIndex(each => each.name === item.name)
+          const targetPage = Math.floor(listIndex / pageSize.value) + 1
+          if (targetPage !== page.value) page.value = targetPage
+          focusIndex.value = listIndex - (targetPage - 1) * pageSize.value
+          scrollFocusIntoView()
+        }
         const focused = computed(() => shown.value[focusIndex.value] || null)
 
         function sizeText (bytes) {
@@ -334,7 +360,7 @@
 
         function select (idx) {
           focusIndex.value = idx
-          if (viewMode.value === 'detail') loadDetailText(focused.value)
+          refreshDetailText()
         }
 
         function focusFirst () {
@@ -353,7 +379,7 @@
             nextTick(() => {
               focusIndex.value = Math.max(0, shown.value.length - 1)
               scrollFocusIntoView()
-              if (viewMode.value === 'detail') loadDetailText(focused.value)
+              refreshDetailText()
             })
             return
           }
@@ -363,13 +389,13 @@
             nextTick(() => {
               focusIndex.value = 0
               scrollFocusIntoView()
-              if (viewMode.value === 'detail') loadDetailText(focused.value)
+              refreshDetailText()
             })
             return
           }
           focusIndex.value = next
           scrollFocusIntoView()
-          if (viewMode.value === 'detail') loadDetailText(focused.value)
+          refreshDetailText()
         }
 
         function gridColumns () {
@@ -413,6 +439,12 @@
           loadText(item).then(text => { detailText.value = text }).catch(() => { detailText.value = t.value.textTooLarge })
         }
 
+        // 面板收起或不在列表视图时不加载文本预览，避免白白拉正文。
+        function refreshDetailText () {
+          if (viewMode.value === 'list' && previewPanelOpen.value) loadDetailText(focused.value)
+          else detailText.value = null
+        }
+
         function openInTab (item) {
           if (!item) return
           window.open(fileUrl(item), '_blank', 'noopener')
@@ -430,6 +462,12 @@
           sortDesc.value = !sortDesc.value
         }
 
+        // 表头点击排序：同列切换升/降序，换列沿用当前方向。
+        function sortBy (key) {
+          if (sortKey.value === key) sortDesc.value = !sortDesc.value
+          else sortKey.value = key
+        }
+
         function handleKeydown (event) {
           const target = event.target
           if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
@@ -443,7 +481,15 @@
           }
           if (event.ctrlKey || event.metaKey || event.altKey) return
           if (previewOpen.value) {
+            // 全屏预览中：左右键切换上一/下一个文件（按当前排序与过滤顺序）。
+            // 焦点在媒体控件上时左右键留给快进/回退，不切文件。
             if (event.key === 'Escape') previewOpen.value = false
+            else if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft')
+              && previewable.value.length > 1
+              && !(target && (target.tagName === 'VIDEO' || target.tagName === 'AUDIO'))) {
+              stepPreview(event.key === 'ArrowRight' ? 1 : -1)
+              event.preventDefault()
+            }
             return
           }
           const cols = viewMode.value === 'grid' ? gridColumns() : 1
@@ -462,7 +508,7 @@
               break
             case 'g': viewMode.value = 'grid'; break
             case 'l': viewMode.value = 'list'; break
-            case 'd': viewMode.value = 'detail'; break
+            case 'p': if (viewMode.value === 'list') previewPanelOpen.value = !previewPanelOpen.value; break
             case 'f': {
               const input = document.querySelector('.files-search input')
               if (input) input.focus()
@@ -473,7 +519,8 @@
           event.preventDefault()
         }
 
-        watch(viewMode, value => { localStorage.setItem('files_view', value); scrollFocusIntoView() })
+        watch(viewMode, value => { localStorage.setItem('files_view', value); refreshDetailText(); scrollFocusIntoView() })
+        watch(previewPanelOpen, value => { localStorage.setItem('files_preview_open', value ? '1' : '0'); refreshDetailText() })
         watch(sortKey, value => localStorage.setItem('files_sort', value))
         watch(sortDesc, value => localStorage.setItem('files_sort_desc', value ? '1' : '0'))
         watch(pageSize, value => { localStorage.setItem('files_page_size', String(value)); page.value = 1 })
@@ -481,13 +528,13 @@
           if (value === 0) { page.value = 1; return }
           focusIndex.value = 0
           scrollFocusIntoView()
-          if (viewMode.value === 'detail') loadDetailText(focused.value)
+          refreshDetailText()
         })
         // 过滤/排序变化后页码与焦点可能失效，收敛后刷新详情预览。
         watch(filtered, () => {
           if (page.value > pageCount.value) page.value = pageCount.value
           if (focusIndex.value >= shown.value.length) focusIndex.value = Math.max(0, shown.value.length - 1)
-          if (viewMode.value === 'detail') loadDetailText(focused.value)
+          refreshDetailText()
           scrollFocusIntoView()
         })
 
@@ -510,7 +557,7 @@
           window.removeEventListener('keydown', handleKeydown)
         })
 
-        return { broken, colorOf, crumbs, detailText, download, dateText, error, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, kindOf, loading, load, moveFocus, navigate, onItemDouble, onItemClick, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, previewItem, previewKind, previewOpen, previewText, select, shown, sizeText, sortDesc, sortKey, sortOptions, statText, t, toggleSortOrder, truncated, viewMode, viewOptions }
+        return { broken, colorOf, crumbs, detailText, download, dateText, error, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, kindOf, loading, load, moveFocus, navigate, onItemDouble, onItemClick, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, select, shown, sizeText, sortBy, sortDesc, sortKey, statText, stepPreview, t, toggleSortOrder, truncated, viewMode, viewOptions }
       }
     })
 

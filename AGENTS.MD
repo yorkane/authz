@@ -2,6 +2,7 @@
 
 本文件只保留 Agent 必须遵守的核心规则与发布/测试步骤。
 开发示例、框架细节与历史经验一律看 [docs/maintenance-handbook.md](docs/maintenance-handbook.md)（附录 A：klib Router/ctxvar/ngx.re；附录 B：Agent 接入与实现细节；附录 C：APP Code Review Checklist）。
+除非用户要求，否则不得修改admin 密码
 
 按场景选择 Skill：
 

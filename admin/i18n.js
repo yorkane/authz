@@ -22,8 +22,10 @@
         empty: '目录为空', emptyFilter: '没有匹配的文件', noPreview: '不支持在线预览，可下载查看',
         openInTab: '新窗口打开', download: '下载', close: '关闭', retry: '重试',
         textTooLarge: '文件过大，不适合在线预览',
+        collapsePreview: '收起预览', expandPreview: '展开预览',
+        prevFile: '上一个文件', nextFile: '下一个文件',
         truncated: '目录条目过多，仅显示前 2000 条',
-        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · g/l/d 切换视图 · f 搜索 · Esc 关闭预览'
+        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览'
       },
       nginxConf: {
         title: 'Nginx 配置（危险）',
@@ -192,8 +194,10 @@
         empty: 'Empty directory', emptyFilter: 'No matching files', noPreview: 'No inline preview; download to view',
         openInTab: 'Open in tab', download: 'Download', close: 'Close', retry: 'Retry',
         textTooLarge: 'File too large for inline preview',
+        collapsePreview: 'Collapse preview', expandPreview: 'Expand preview',
+        prevFile: 'Previous file', nextFile: 'Next file',
         truncated: 'Too many entries; only the first 2000 are listed',
-        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · g/l/d switch view · f search · Esc closes preview'
+        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview'
       },
       nginxConf: {
         title: 'Nginx Configuration (danger)',

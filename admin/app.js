@@ -5,7 +5,7 @@ const builtInApps = {
   users: 'users.html?v=7',
   authorization: 'authorization.html?v=15',
   menuEditor: 'menu-editor.html?v=11',
-  files: 'files.html?v=4',
+  files: 'files.html?v=5',
   nginxConf: 'nginx_conf.html?v=2'
 }
 
