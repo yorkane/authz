@@ -81,6 +81,13 @@ http {
         ""      $http_host;
     }
 
+    # 动态流式响应（SSE 等）默认禁用下游代理缓冲：向上游边缘代理声明
+    # X-Accel-Buffering: no；其它 Content-Type 不加该头。
+    map $sent_http_content_type $sse_no_buffer {
+        ~*text/event-stream  no;
+        default              "";
+    }
+
     # Some outer proxies preserve the hostname but replace the public port.
     # Restore the Origin authority only when its hostname matches the request
     # hostname; a genuinely cross-origin hostname keeps the request Host.
