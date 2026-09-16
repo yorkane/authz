@@ -71,6 +71,7 @@ function _M.create(data)
             domain = domain, target_ip = target_ip, port = port,
             enabled = data.enabled == false and 0 or 1,
             websocket = data.websocket == true and 1 or 0,
+            open_in_new = data.open_in_new == true and 1 or 0,
             note = note, menu_name = menu_name, created_at = os.time(),
         }
         for key, value in pairs(proxy) do values[key] = value end
@@ -125,6 +126,10 @@ function _M.update(id, data)
     if data.websocket ~= nil then
         fields[#fields + 1], values[#values + 1] = "websocket = ?",
             (data.websocket == true or data.websocket == 1) and 1 or 0
+    end
+    if data.open_in_new ~= nil then
+        fields[#fields + 1], values[#values + 1] = "open_in_new = ?",
+            (data.open_in_new == true or data.open_in_new == 1) and 1 or 0
     end
     if validation.proxy_fields_present(data) then
         local merged = {}

@@ -9,7 +9,7 @@ end
 function _M.enabled_applications()
     return db.query([[SELECT id, domain, target_ip, port, note, menu_name, websocket,
         upstream_host, forwarded_host, forwarded_proto, forwarded_port, origin_mode,
-        custom_origin, simulate_local, local_ip, upstream_scheme, upstream_ssl_verify,
+        custom_origin, simulate_local, local_ip, open_in_new, upstream_scheme, upstream_ssl_verify,
         upstream_path FROM bindings WHERE enabled = 1 ORDER BY domain]]) or {}
 end
 
@@ -44,14 +44,14 @@ function _M.insert(values)
     return db.exec([[INSERT INTO bindings(
         domain, target_ip, port, enabled, websocket, note, menu_name,
         upstream_host, forwarded_host, forwarded_proto, forwarded_port,
-        origin_mode, custom_origin, simulate_local, local_ip,
+        origin_mode, custom_origin, simulate_local, local_ip, open_in_new,
         upstream_scheme, upstream_ssl_verify, upstream_path, request_rewrite,
         response_rewrite, created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)]],
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)]],
         values.domain, values.target_ip, values.port, values.enabled, values.websocket,
         values.note, values.menu_name, values.upstream_host, values.forwarded_host,
         values.forwarded_proto, values.forwarded_port, values.origin_mode,
-        values.custom_origin, values.simulate_local, values.local_ip,
+        values.custom_origin, values.simulate_local, values.local_ip, values.open_in_new,
         values.upstream_scheme, values.upstream_ssl_verify, values.upstream_path,
         values.request_rewrite,
         values.response_rewrite,

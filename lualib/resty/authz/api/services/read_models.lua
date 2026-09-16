@@ -62,6 +62,9 @@ function _M.service_entries()
             note = bound and (application.note ~= "" and application.note or cjson.null) or cjson.null,
             icon = (override and override.icon ~= "" and override.icon)
                 or (bound and "mdi-web-box" or "mdi-lan-connect"),
+            -- 绑定勾选「新窗口打开」后，管理端菜单点击直接开新标签，
+            -- 规避部分应用对自身被 iframe 嵌入的检测。
+            open_in_new = bound and tonumber(application.open_in_new) == 1 or nil,
             -- 未被用户排序过的条目（sort_order 为默认 0 时视为未排序）排在
             -- 手动排序区（1..n）之后，并保持应用列表自身顺序。
             sort_order = (override and (tonumber(override.sort_order) or 0) > 0

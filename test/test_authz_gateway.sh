@@ -177,6 +177,7 @@ assert_json() {
 
 # 段名（默认全跑，TEST_ONLY 用逗号挑选）：
 #   guest domain-prefix request-rewrite body-rewrite gzip-negotiation
+#   conditional-rewrite
 #   complex-rewrite response-rewrite-xss menu-tree files files-legacy
 #   nginx-conf agent-key login-lock http-redirect cookie-domain
 #   rewrite-budget envkey
@@ -614,7 +615,7 @@ assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "retired viewer role folded into guest everywhere" "$(report_get viewer_retired)" "yes"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new"
 
 cookie_header() {
     awk '
@@ -802,9 +803,9 @@ assert_contains_all "app.js renders the stored menu tree" "$BODY" \
     "isAdmin.value = Boolean(session.admin)" \
     "window.adminApi.menuTree()" \
     "setInterval(loadTree, 30000)" \
-    'event?.ctrlKey || event?.metaKey' \
+    'event?.ctrlKey || event?.metaKey || Number(node.open_in_new) === 1' \
     "window.open(url, '_blank', 'noopener,noreferrer')" \
-    "authorization.html?v=15" \
+    "authorization.html?v=16" \
     "menuEditor: 'menu-editor.html" \
     "function nodeUrl (node)" \
     "groupOpen[group.id]"
@@ -2182,6 +2183,247 @@ assert_eq "status 0 means keep the upstream status" "$STATUS" "200"
 request GET rewrite.test.example /rewrite "$ADMIN_COOKIE"
 assert_eq "status 0 never rewrites the status code" "$STATUS" "200"
 assert_contains "status 0 keeps the body filter working" "$BODY" "[REDACTED]"
+# ── 公共代理响应：默认压缩 + 上游缓存头透传（终端可启用浏览器缓存）──
+# gzip_proxied 默认 off 的判据是请求是否带 Via（不是 X-Forwarded-For）：
+# 经 SLB/边缘 nginx 带 Via 转发进来时 gzip 整体失效，而 Brotli 照常生效。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":null}'
+assert_eq "clear response rewrite before proxy compression checks" "$STATUS" "200"
+
+# 直连代理端点取响应头：$1=Accept-Encoding，$2=路径，$3=可选额外请求头。
+# 与 request() 一样要带会话 Cookie：代理授权对匿名访客默认拒绝（302 去登录），
+# 少了 Cookie 只会拿到登录跳转，压缩与缓存头根本还没进入响应阶段。
+proxy_probe() {
+    local ae=$1 path=$2 extra=${3:-}
+    local args=(--silent --show-error --max-time 5
+        --resolve "rewrite.test.example:$HTTP_PORT:127.0.0.1"
+        -H "Accept-Encoding: $ae"
+        -H "Cookie: $(cookie_header "$ADMIN_COOKIE")"
+        -D "$TMP_DIR/probe-headers" -o "$TMP_DIR/probe-body")
+    [[ -n "$extra" ]] && args+=(-H "$extra")
+    curl "${args[@]}" "http://rewrite.test.example:$HTTP_PORT$path" >/dev/null
+}
+probe_header() {
+    awk -v name="$1" 'BEGIN { IGNORECASE=1; prefix = tolower(name) ":" }
+        index(tolower($0), prefix) == 1 {
+            sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit
+        }' "$TMP_DIR/probe-headers"
+}
+
+proxy_probe gzip /compressible 'Via: 1.1-edge'
+assert_eq "proxied response with Via still gzips" "$(probe_header Content-Encoding)" "gzip"
+assert_contains "proxy compression advertises Vary" "$(cat "$TMP_DIR/probe-headers")" "Vary: Accept-Encoding"
+assert_eq "upstream Cache-Control passes through untouched" "$(probe_header Cache-Control)" "public, max-age=60"
+assert_not_contains "proxy response carries no no-store" "$(cat "$TMP_DIR/probe-headers")" "no-store"
+assert_eq "unrewritten proxy response keeps the upstream ETag" "$(probe_header ETag)" 'W/"upstream-etag-v1"'
+assert_eq "unrewritten proxy response keeps Last-Modified" "$(probe_header Last-Modified)" "Wed, 21 Oct 2015 07:28:00 GMT"
+
+proxy_probe br /compressible 'Via: 1.1-edge'
+assert_eq "proxied response with Via brotlis" "$(probe_header Content-Encoding)" "br"
+
+# 正文改写必须撤掉上游校验器：正文已变，保留旧 ETag/Last-Modified 会让浏览器
+# 条件请求命中 304，把未改写的上游正文当成最新内容。
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":{"rewrites":[{"source":"SECRET-compressible","target":"[REDACTED]"}]}}'
+assert_eq "store a filter on the compressible endpoint" "$STATUS" "200"
+proxy_probe identity /compressible ''
+assert_contains "filter still applies to the proxy body" "$(cat "$TMP_DIR/probe-body")" "[REDACTED]"
+assert_eq "rewritten proxy response drops the stale ETag" "$(probe_header ETag)" ""
+assert_eq "rewritten proxy response drops the stale Last-Modified" "$(probe_header Last-Modified)" ""
+# 改写与网关压缩同时生效：body filter 先于 gzip 执行，客户端拿到的是压缩后的
+# 改写正文。顺序若反了（先压后改写），[REDACTED] 就替换不进压缩字节里。
+proxy_probe gzip /compressible ''
+assert_eq "rewritten body is still compressed for the client" "$(probe_header Content-Encoding)" "gzip"
+# curl 不会自动解压，落盘的是 gzip 字节：先解码再比正文。
+gunzip -c "$TMP_DIR/probe-body" > "$TMP_DIR/probe-decoded" 2>/dev/null \
+    || cp "$TMP_DIR/probe-body" "$TMP_DIR/probe-decoded"
+assert_contains "rewritten proxy body survives compression" "$(cat "$TMP_DIR/probe-decoded")" "[REDACTED]"
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":null}'
+assert_eq "clear the filter after the validator checks" "$STATUS" "200"
+
+# text/event-stream 不在压缩类型列表里：压缩器会攒住事件、流式语义失效。
+proxy_probe 'gzip, deflate, br' /sse ''
+assert_eq "SSE stays uncompressed" "$(probe_header Content-Encoding)" ""
+assert_contains "SSE declares no downstream buffering" "$(cat "$TMP_DIR/probe-headers")" "X-Accel-Buffering: no"
+assert_contains "SSE events reach the client intact" "$(cat "$TMP_DIR/probe-body")" "data: event-3"
+
+fi
+section conditional-rewrite
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF REWRITE_APP_ID
+# ── 条件匹配（对齐 APISIX route vars）：整条响应改写按 URI / Header /
+#    Content-Type / 状态码做正则或字面判断；不命中则整条规则完全不生效 ──
+cond_probe() {
+    local path=$1 extra=${2:-}
+    local args=(--silent --show-error --max-time 5 --resolve "rewrite.test.example:$HTTP_PORT:127.0.0.1" -H "Accept-Encoding: identity" -H "Cookie: $(cookie_header "$ADMIN_COOKIE")" -D "$TMP_DIR/cond-headers" -o "$TMP_DIR/cond-body")
+    [[ -n "$extra" ]] && args+=(-H "$extra")
+    curl "${args[@]}" "http://rewrite.test.example:$HTTP_PORT$path" >/dev/null
+}
+cond_header() {
+    tr -d "\r" < "$TMP_DIR/cond-headers" | grep -i -m1 "^$1:" | sed "s/^[^:]*:[[:space:]]*//"
+}
+cond_gzip_probe() {
+    curl --silent --show-error --max-time 5 --resolve "rewrite.test.example:$HTTP_PORT:127.0.0.1" -H "Accept-Encoding: gzip" -H "Cookie: $(cookie_header "$ADMIN_COOKIE")" -D "$TMP_DIR/cond-headers" -o "$TMP_DIR/cond-body" "http://rewrite.test.example:$HTTP_PORT/rewrite-negotiated" >/dev/null
+}
+store_conditions() {
+    request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" "$1"
+}
+
+# 无 conditions 的历史配置恒命中（向后兼容基线）。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"conditional"},"conditions":null}}'
+assert_eq "clearing conditions stores a plain header rule" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "a rule without conditions always applies" "$(cond_header X-Probe-Cache)" "conditional"
+
+# URI 正则命中：条件求值用 $request_uri（含路径与查询串）。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"conditional"},"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"compressible"}]}}}'
+assert_eq "store a uri regex condition" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "uri regex hit applies the header rewrite" "$(cond_header X-Probe-Cache)" "conditional"
+
+# URI 正则不命中：响应头保持上游原值，网关一个字节都不改。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"conditional"},"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"[.]mp4$"}]}}}'
+assert_eq "store a uri condition that will not match" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "uri regex miss skips the header rewrite" "$(cond_header X-Probe-Cache)" ""
+assert_eq "uri regex miss keeps the upstream Cache-Control" "$(cond_header Cache-Control)" "public, max-age=60"
+
+# /rewrite-css 提供第二个路径与 Content-Type，用来做命中/未命中对照。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"by-type"},"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"rewrite-css$"}]}}}'
+assert_eq "store a uri condition for the css endpoint" "$STATUS" "200"
+cond_probe /rewrite-css
+assert_eq "uri regex matches the css endpoint" "$(cond_header X-Probe-Cache)" "by-type"
+cond_probe /compressible
+assert_eq "uri regex still misses the plain endpoint" "$(cond_header X-Probe-Cache)" ""
+
+# content_type 只看媒体类型本体：上游 text/plain; charset=utf-8 能被 text/plain 命中。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"by-type"},"conditions":{"logic":"all","match":[{"field":"content_type","op":"equals","value":"text/plain"}]}}}'
+assert_eq "store a content_type equals condition" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "content_type equals ignores the charset parameter" "$(cond_header X-Probe-Cache)" "by-type"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"by-type"},"conditions":{"logic":"all","match":[{"field":"content_type","op":"equals","value":"text/html"}]}}}'
+assert_eq "store a content_type condition that will not match" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "content_type equals misses another media type" "$(cond_header X-Probe-Cache)" ""
+
+# request_header 条件：按客户端请求头决定是否改写。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"by-header"},"conditions":{"logic":"all","match":[{"field":"request_header","name":"X-Probe-Flag","op":"equals","value":"yes"}]}}}'
+assert_eq "store a request_header condition" "$STATUS" "200"
+cond_probe /compressible "X-Probe-Flag: yes"
+assert_eq "request_header condition applies when the header matches" "$(cond_header X-Probe-Cache)" "by-header"
+cond_probe /compressible
+assert_eq "request_header condition skips when the header is absent" "$(cond_header X-Probe-Cache)" ""
+
+# negate 取反：同一条件反过来用。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"by-header"},"conditions":{"logic":"all","match":[{"field":"request_header","name":"X-Probe-Flag","op":"equals","value":"yes","negate":true}]}}}'
+assert_eq "store a negated request_header condition" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "a negated condition applies when the header is absent" "$(cond_header X-Probe-Cache)" "by-header"
+cond_probe /compressible "X-Probe-Flag: yes"
+assert_eq "a negated condition skips when the header matches" "$(cond_header X-Probe-Cache)" ""
+
+# exists / missing 判断请求头存在性。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"by-presence"},"conditions":{"logic":"all","match":[{"field":"request_header","name":"X-Probe-Flag","op":"exists"}]}}}'
+assert_eq "store an exists condition" "$STATUS" "200"
+cond_probe /compressible "X-Probe-Flag: anything"
+assert_eq "exists matches a present request header" "$(cond_header X-Probe-Cache)" "by-presence"
+cond_probe /compressible
+assert_eq "exists skips when the request header is missing" "$(cond_header X-Probe-Cache)" ""
+
+# response_header 条件：读上游响应头（此处即上游自己发的 Cache-Control）。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"by-response"},"conditions":{"logic":"all","match":[{"field":"response_header","name":"Cache-Control","op":"contains","value":"max-age=60"}]}}}'
+assert_eq "store a response_header condition" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "response_header condition reads the upstream header" "$(cond_header X-Probe-Cache)" "by-response"
+cond_probe /rewrite-css
+assert_eq "response_header condition misses an endpoint without that header" "$(cond_header X-Probe-Cache)" ""
+
+# status 条件：非 200 响应的响应头同样能被改写（正文改写另有 200 限制）。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"by-status"},"conditions":{"logic":"all","match":[{"field":"status","op":"regex","value":"^5"}]}}}'
+assert_eq "store a status condition" "$STATUS" "200"
+cond_probe /rewrite-error
+assert_eq "status condition matches the upstream error code" "$(cond_header X-Probe-Cache)" "by-status"
+cond_probe /compressible
+assert_eq "status condition skips a 200 response" "$(cond_header X-Probe-Cache)" ""
+
+# 多条件联动：all 需全部命中，any 任一命中即可。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"multi"},"conditions":{"logic":"all","match":[{"field":"uri","op":"contains","value":"compressible"},{"field":"content_type","op":"equals","value":"text/plain"}]}}}'
+assert_eq "store an all condition pair that both match" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "all applies when every condition matches" "$(cond_header X-Probe-Cache)" "multi"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"multi"},"conditions":{"logic":"all","match":[{"field":"uri","op":"contains","value":"compressible"},{"field":"content_type","op":"equals","value":"text/html"}]}}}'
+assert_eq "store an all condition pair with one miss" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "all skips when any condition misses" "$(cond_header X-Probe-Cache)" ""
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"multi"},"conditions":{"logic":"any","match":[{"field":"uri","op":"contains","value":"nowhere"},{"field":"content_type","op":"equals","value":"text/plain"}]}}}'
+assert_eq "store an any condition pair with one hit" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "any applies when a single condition matches" "$(cond_header X-Probe-Cache)" "multi"
+
+# 裸数组写法等价 logic=all；/re/ 包裹写法在保存时剥掉斜杠（对齐 APISIX vars 习惯）。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"bare"},"conditions":[{"field":"uri","op":"regex","value":"/compressible"}]}}'
+assert_eq "store conditions as a bare array" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "a bare condition array behaves as logic all" "$(cond_header X-Probe-Cache)" "bare"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"wrapped"},"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"/compressible/"}]}}}'
+assert_eq "store a slash-wrapped regex condition" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "a slash-wrapped regex still matches" "$(cond_header X-Probe-Cache)" "wrapped"
+
+# 条件同样约束正文改写：不命中时正文原样、上游校验器保留，也不打跳过标记。
+store_conditions '{"response_rewrite":{"rewrites":[{"source":"SECRET-compressible","target":"[REDACTED]"}],"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"[.]mp4$"}]}}}'
+assert_eq "store a body filter behind a non-matching condition" "$STATUS" "200"
+cond_probe /compressible
+assert_contains "a skipped conditional filter leaves the body untouched" "$(cat "$TMP_DIR/cond-body")" "SECRET-compressible"
+assert_eq "a skipped conditional filter keeps the upstream ETag" "$(cond_header ETag)" '"upstream-etag-v1"'
+assert_not_contains "a condition miss is not reported as a skip marker" "$(cat "$TMP_DIR/cond-headers")" "X-Authz-Rewrite"
+store_conditions '{"response_rewrite":{"rewrites":[{"source":"SECRET-compressible","target":"[REDACTED]"}],"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"compressible"}]}}}'
+assert_eq "store a body filter behind a matching condition" "$STATUS" "200"
+cond_probe /compressible
+assert_contains "a matching conditional filter rewrites the body" "$(cat "$TMP_DIR/cond-body")" "[REDACTED]"
+assert_eq "a matching conditional filter drops the stale ETag" "$(cond_header ETag)" ""
+
+# 条件在请求期就能判定不命中时，网关不再强制上游返回未压缩正文：压缩协商
+# 原样透传，不为不可能生效的改写让上游整体退化成明文交付。
+store_conditions '{"response_rewrite":{"rewrites":[{"source":"negotiated-secret-token","target":"[REDACTED]"}],"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"[.]mp4$"}]}}}'
+assert_eq "store a negotiated-body filter behind a miss" "$STATUS" "200"
+cond_gzip_probe
+assert_eq "a definitely-missing body condition keeps client compression" "$(cond_header Content-Encoding)" "gzip"
+# 条件含响应侧字段时请求期无法判定，仍保守地要求上游返回未压缩正文。
+store_conditions '{"response_rewrite":{"rewrites":[{"source":"negotiated-secret-token","target":"[REDACTED]"}],"conditions":{"logic":"all","match":[{"field":"response_header","name":"Content-Type","op":"exists"}]}}}'
+assert_eq "store a body filter behind a response-side condition" "$STATUS" "200"
+cond_gzip_probe
+assert_not_contains "an undecidable condition still asks the upstream for identity" "$(cond_header Content-Encoding)" "gzip"
+assert_contains "an undecidable condition that matches rewrites the body" "$(cat "$TMP_DIR/cond-body")" "[REDACTED]"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":null}'
+assert_eq "clear the conditional rewrite" "$STATUS" "200"
+
+# 保存侧校验：非法正则、越界字段、语义矛盾一律 422，且错误信息可定位。
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"([unclosed"}]}}}'
+assert_eq "an invalid condition regex is rejected" "$STATUS" "422"
+assert_contains "the invalid regex error names the cause" "$(cat "$TMP_DIR/body")" "正则不合法"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[{"field":"host","op":"equals","value":"a"}]}}}'
+assert_eq "an unknown condition field is rejected" "$STATUS" "422"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[{"field":"uri","op":"starts_with","value":"a"}]}}}'
+assert_eq "an unknown condition operator is rejected" "$STATUS" "422"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"xor","match":[{"field":"uri","op":"contains","value":"a"}]}}}'
+assert_eq "an unknown condition logic is rejected" "$STATUS" "422"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[{"field":"request_header","op":"equals","value":"a"}]}}}'
+assert_eq "a header condition without a name is rejected" "$STATUS" "422"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[{"field":"uri","name":"X-A","op":"contains","value":"a"}]}}}'
+assert_eq "a uri condition carrying a name is rejected" "$STATUS" "422"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[{"field":"uri","op":"exists","value":"a"}]}}}'
+assert_eq "an exists condition with a value is rejected" "$STATUS" "422"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[{"field":"uri","op":"equals"}]}}}'
+assert_eq "an equals condition without a value is rejected" "$STATUS" "422"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[{"field":"uri","op":"regex","value":"a\tb"}]}}}'
+assert_eq "a condition value with control characters is rejected" "$STATUS" "422"
+store_conditions '{"response_rewrite":{"headers":{"X-Probe-Cache":"x"},"conditions":{"logic":"all","match":[]}}}'
+assert_eq "an empty condition list stores the plain rule" "$STATUS" "200"
+cond_probe /compressible
+assert_eq "an empty condition list behaves as always matching" "$(cond_header X-Probe-Cache)" "x"
+
+request PATCH "$ADMIN_HOST" "/_authz/api/applications/$REWRITE_APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"response_rewrite":null}'
+assert_eq "clear the rewrite after condition checks" "$STATUS" "200"
 
 fi
 section complex-rewrite

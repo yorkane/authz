@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS bindings(
   custom_origin TEXT NOT NULL DEFAULT '',
   simulate_local INTEGER NOT NULL DEFAULT 0,
   local_ip TEXT NOT NULL DEFAULT '127.0.0.1',
+  open_in_new INTEGER NOT NULL DEFAULT 0,
   upstream_scheme TEXT NOT NULL DEFAULT 'http',
   upstream_ssl_verify INTEGER NOT NULL DEFAULT 1,
   upstream_path TEXT NOT NULL DEFAULT '',

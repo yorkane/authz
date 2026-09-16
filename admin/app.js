@@ -3,7 +3,7 @@ const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref, watch } 
 // 内置页面：菜单条目里的 builtin 键映射到这些内嵌应用。
 const builtInApps = {
   users: 'users.html?v=7',
-  authorization: 'authorization.html?v=15',
+  authorization: 'authorization.html?v=16',
   menuEditor: 'menu-editor.html?v=11',
   files: 'files.html?v=5',
   nginxConf: 'nginx_conf.html?v=2'
@@ -83,7 +83,7 @@ const app = createApp({
     function navigate (node, event) {
       const url = nodeUrl(node)
       if (!isNavigable(url)) return
-      if (event?.ctrlKey || event?.metaKey) {
+      if (event?.ctrlKey || event?.metaKey || Number(node.open_in_new) === 1) {
         window.open(url, '_blank', 'noopener,noreferrer')
         return
       }

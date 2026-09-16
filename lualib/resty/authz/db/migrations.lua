@@ -466,6 +466,18 @@ _M.list = {
                 "token_prefix TEXT NOT NULL DEFAULT ''")
         end,
     },
+    {
+        version = 20,
+        name = "bindings_open_in_new",
+        up = function(db)
+            -- 菜单打开方式：0 = 管理页 iframe 内嵌（默认），1 = 新窗口/新标签。
+            -- 部分上游应用会检测自身被 iframe 嵌入（window.top !== window.self
+            -- 即报错或白屏），勾选后左侧菜单点击直接开新标签绕过检测。
+            -- 仅影响管理端菜单跳转，不参与代理与授权判定。
+            ensure_column(db, "bindings", "open_in_new",
+                "open_in_new INTEGER NOT NULL DEFAULT 0")
+        end,
+    },
 }
 
 function _M.run(db)

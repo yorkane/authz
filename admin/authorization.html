@@ -8,7 +8,7 @@
   <meta http-equiv="Expires" content="0">
   <title>Admin</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
-  <link rel="stylesheet" href="./app-page.css?v=14">
+  <link rel="stylesheet" href="./app-page.css?v=15">
 </head>
 <body>
   <div id="q-app">
@@ -101,6 +101,7 @@
               </q-expansion-item>
 
               <q-toggle v-model="bindingForm.enabled" dense color="teal-4" :label="t.enabledNow"></q-toggle>
+              <div><q-toggle v-model="bindingForm.open_in_new" dense color="teal-4" :label="t.openInNew"></q-toggle><div class="simulate-copy">{{ t.openInNewHint }}</div></div>
             </q-card-section>
             <q-separator dark></q-separator>
             <q-card-actions align="right"><q-btn flat dense no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated dense no-caps type="submit" :label="bindingEditingId ? t.saveBinding : t.createBinding" class="primary-button" :loading="saving"></q-btn></q-card-actions>
@@ -137,6 +138,24 @@
               <div class="rewrite-grid">
                 <q-input v-model="rewriteForm.status" dark dense outlined type="number" min="200" max="999" hide-bottom-space :label="t.rwStatus" :placeholder="t.autoValue" :hint="t.rwStatusHint" :rules="[rewriteStatusRule]"></q-input>
                 <q-input v-model="rewriteForm.contentType" dark dense outlined hide-bottom-space maxlength="128" :disable="rewriteForm.bodyMode !== 'replace'" :label="t.rwContentType" placeholder="text/html; charset=utf-8" :hint="t.rwContentTypeHint" :rules="[rewriteContentTypeRule]"></q-input>
+              </div>
+
+              <div class="rewrite-section">
+                <div class="rewrite-section-head"><div class="rewrite-field-label">{{ t.rwConditions }}</div><q-btn flat dense no-caps size="sm" icon="mdi-filter-variant" :label="t.rwAddCondition" color="purple-4" @click="addRewriteCondition"></q-btn></div>
+                <div class="rewrite-field-copy q-mb-xs">{{ t.rwConditionsHint }}</div>
+                <div v-if="!rewriteForm.conditions.length" class="rewrite-empty">{{ t.rwCondNone }}</div>
+                <div v-else class="rewrite-cond-logic">
+                  <span class="rewrite-field-copy">{{ t.rwCondLogic }}</span>
+                  <q-option-group v-model="rewriteForm.conditionLogic" inline dense type="radio" color="purple-4" :options="rewriteCondLogicOptions"></q-option-group>
+                </div>
+                <div v-for="(cond, index) in rewriteForm.conditions" :key="index" class="rewrite-row rewrite-cond-row">
+                  <q-select v-model="cond.field" dark dense outlined hide-bottom-space emit-value map-options :options="rewriteCondFieldOptions" :label="t.rwCondField" class="rewrite-row-op"><q-tooltip>{{ t.rwCondUriHint }}</q-tooltip></q-select>
+                  <q-input v-if="condRequiresHeaderName(cond)" v-model.trim="cond.name" dark dense outlined hide-bottom-space maxlength="128" :label="t.rwCondName" :placeholder="'X-Client-Type'" :hint="t.rwCondHeaderHint" class="rewrite-row-name"></q-input>
+                  <q-select v-model="cond.op" dark dense outlined hide-bottom-space emit-value map-options :options="rewriteCondOpOptions(cond)" :label="t.rwCondOp" class="rewrite-row-op"></q-select>
+                  <q-input v-if="condRequiresValue(cond)" v-model="cond.value" dark dense outlined hide-bottom-space :label="t.rwCondValue" :placeholder="cond.op === 'regex' ? '\\.js$ 或 /\\.js$/' : 'public, max-age=60'" :hint="t.rwCondValueHint" :rules="[rewriteCondValueRule]" class="rewrite-row-value"></q-input>
+                  <q-toggle v-model="cond.negate" dense color="orange-4" class="rewrite-row-remove"><q-tooltip>{{ t.rwCondNegate }}</q-tooltip></q-toggle>
+                  <q-btn flat round dense icon="mdi-close" color="grey-6" class="rewrite-row-del" @click="removeRewriteCondition(index)"><q-tooltip>{{ t.deleteAction }}</q-tooltip></q-btn>
+                </div>
               </div>
 
               <div class="rewrite-section">
@@ -308,7 +327,7 @@
   </div>
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
   <script src="./api.js?v=18"></script>
-  <script src="./i18n.js?v=39"></script>
+  <script src="./i18n.js?v=41"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
     
@@ -335,7 +354,7 @@
         const policyEditingId = ref(null)
         const portMin = ref(2000)
         const portMax = ref(20000)
-        const bindingDefaults = () => ({ domain: '', target_ip: '127.0.0.1', port: 3000, menu_name: '', note: '', enabled: true, upstream_scheme: 'http', upstream_ssl_verify: true, upstream_path: '', upstream_host: '', forwarded_host: '', forwarded_proto: '', forwarded_port: '', origin_mode: 'auto', custom_origin: '', simulate_local: false, local_ip: '127.0.0.1' })
+        const bindingDefaults = () => ({ domain: '', target_ip: '127.0.0.1', port: 3000, menu_name: '', note: '', enabled: true, upstream_scheme: 'http', upstream_ssl_verify: true, upstream_path: '', upstream_host: '', forwarded_host: '', forwarded_proto: '', forwarded_port: '', origin_mode: 'auto', custom_origin: '', simulate_local: false, local_ip: '127.0.0.1', open_in_new: false })
         const bindingForm = reactive(bindingDefaults())
         const rewriteOpen = ref(false)
         const rewriteView = ref('form')
@@ -351,8 +370,48 @@
         const requestRewriteJsonError = ref('')
         const requestRewriteDefaults = () => ({ enabled: true, headers: [], bodyMode: 'none', body: '', bodyBase64: false, contentType: '', filters: [] })
         const requestRewriteForm = reactive(requestRewriteDefaults())
-        const rewriteDefaults = () => ({ enabled: true, status: '', contentType: '', headers: [], bodyMode: 'none', body: '', bodyBase64: false, filters: [] })
+        const rewriteDefaults = () => ({ enabled: true, status: '', contentType: '', headers: [], bodyMode: 'none', body: '', bodyBase64: false, filters: [], conditionLogic: 'all', conditions: [] })
         const rewriteForm = reactive(rewriteDefaults())
+        const rewriteCondLogicOptions = computed(() => [
+          { label: t.value.rwCondLogicAll, value: 'all' },
+          { label: t.value.rwCondLogicAny, value: 'any' }
+        ])
+        const rewriteCondFieldOptions = computed(() => [
+          { label: t.value.rwCondFieldUri, value: 'uri' },
+          { label: t.value.rwCondFieldRequestHeader, value: 'request_header' },
+          { label: t.value.rwCondFieldResponseHeader, value: 'response_header' },
+          { label: t.value.rwCondFieldContentType, value: 'content_type' },
+          { label: t.value.rwCondFieldStatus, value: 'status' }
+        ])
+        function condRequiresHeaderName (cond) {
+          return cond && (cond.field === 'request_header' || cond.field === 'response_header')
+        }
+        function condRequiresValue (cond) {
+          return cond && cond.op !== 'exists' && cond.op !== 'missing'
+        }
+        function rewriteCondOpOptions (cond) {
+          const base = [
+            { label: t.value.rwCondOpRegex, value: 'regex' },
+            { label: t.value.rwCondOpEquals, value: 'equals' },
+            { label: t.value.rwCondOpContains, value: 'contains' }
+          ]
+          // exists / missing 只对 Header 有意义（URI、类型、状态码总是存在）。
+          if (condRequiresHeaderName(cond)) {
+            base.push({ label: t.value.rwCondOpExists, value: 'exists' }, { label: t.value.rwCondOpMissing, value: 'missing' })
+          }
+          return base
+        }
+        function rewriteCondValueRule (value) {
+          if (String(value || '').trim()) return true
+          return t.value.required
+        }
+        function addRewriteCondition () {
+          if (rewriteForm.conditions.length >= 16) return
+          rewriteForm.conditions.push({ field: 'uri', name: '', op: 'regex', value: '', negate: false })
+        }
+        function removeRewriteCondition (index) {
+          rewriteForm.conditions.splice(index, 1)
+        }
         const rewriteBodyOptions = computed(() => [
           { label: t.value.rwBodyNone, value: 'none' },
           { label: t.value.rwBodyReplace, value: 'replace' },
@@ -513,6 +572,13 @@
         const details = []
         if (!config.enabled) details.push(`${t.value.rwEnabled}: ${t.value.noBindings}`)
         if (Number(config.status)) details.push(`${t.value.rwStatus}: ${config.status}`)
+        const storedConditions = Array.isArray(config.conditions)
+          ? config.conditions
+          : ((config.conditions && config.conditions.match) || [])
+        for (const cond of storedConditions) {
+          const target = cond.name ? `${cond.field}:${cond.name}` : cond.field
+          details.push(`${cond.negate ? '!' : ''}${target} ${cond.op} ${cond.value || ''}`.trimEnd())
+        }
         for (const header of config.headers || []) details.push(`${header.name}: ${header.value}`)
         for (const name of config.remove_headers || []) details.push(`- ${name}`)
         if (config.body) details.push(`${t.value.rwBody}: ${String(config.body).slice(0, 60)}`)
@@ -531,6 +597,19 @@
         rewriteForm.headers = (config.headers || []).map(header => ({ name: header.name, value: header.value, remove: false }))
           .concat((config.remove_headers || []).map(name => ({ name, value: '', remove: true })))
         rewriteForm.bodyBase64 = config.body_base64 === true
+        // 条件既接受 { logic, match } 对象，也接受裸数组（等价 logic=all）。
+        const conditions = config.conditions
+        if (conditions && typeof conditions === 'object') {
+          const list = Array.isArray(conditions) ? conditions : (conditions.match || [])
+          rewriteForm.conditionLogic = (!Array.isArray(conditions) && conditions.logic === 'any') ? 'any' : 'all'
+          rewriteForm.conditions = list.map(cond => ({
+            field: cond.field || 'uri',
+            name: cond.name || '',
+            op: cond.op || 'regex',
+            value: cond.value == null ? '' : String(cond.value),
+            negate: cond.negate === true
+          }))
+        }
         if (config.body) {
           rewriteForm.bodyMode = 'replace'
           rewriteForm.body = config.body
@@ -547,6 +626,16 @@
       function rewritePayloadFromForm () {
         const payload = { enabled: rewriteForm.enabled }
         if (rewriteForm.status !== '' && rewriteForm.status !== null) payload.status = Number(rewriteForm.status)
+        const conditions = rewriteForm.conditions
+          .filter(cond => cond.field && cond.op && (!condRequiresValue(cond) || String(cond.value || '').trim()))
+          .map(cond => {
+            const item = { field: cond.field, op: cond.op }
+            if (condRequiresHeaderName(cond)) item.name = cond.name
+            if (condRequiresValue(cond)) item.value = String(cond.value).trim()
+            if (cond.negate) item.negate = true
+            return item
+          })
+        if (conditions.length) payload.conditions = { logic: rewriteForm.conditionLogic === 'any' ? 'any' : 'all', match: conditions }
         const headers = {}
         for (const header of rewriteForm.headers) {
           if (!header.name) continue
@@ -971,7 +1060,7 @@
         function openEditBinding (binding) {
           bindingEditingId.value = binding.id
           bindingOriginalDomain = String(binding.domain || '').toLowerCase()
-          Object.assign(bindingForm, bindingDefaults(), { domain: binding.domain, target_ip: binding.target_ip || '127.0.0.1', port: binding.port, menu_name: binding.menu_name || '', note: binding.note || '', enabled: binding.enabled === 1, upstream_scheme: binding.upstream_scheme || 'http', upstream_ssl_verify: binding.upstream_ssl_verify !== 0, upstream_path: binding.upstream_path || '', upstream_host: binding.upstream_host || '', forwarded_host: binding.forwarded_host || '', forwarded_proto: binding.forwarded_proto || '', forwarded_port: Number(binding.forwarded_port) || '', origin_mode: binding.origin_mode || 'auto', custom_origin: binding.custom_origin || '', simulate_local: binding.simulate_local === 1, local_ip: binding.local_ip || '127.0.0.1' })
+          Object.assign(bindingForm, bindingDefaults(), { domain: binding.domain, target_ip: binding.target_ip || '127.0.0.1', port: binding.port, menu_name: binding.menu_name || '', note: binding.note || '', enabled: binding.enabled === 1, upstream_scheme: binding.upstream_scheme || 'http', upstream_ssl_verify: binding.upstream_ssl_verify !== 0, upstream_path: binding.upstream_path || '', upstream_host: binding.upstream_host || '', forwarded_host: binding.forwarded_host || '', forwarded_proto: binding.forwarded_proto || '', forwarded_port: Number(binding.forwarded_port) || '', origin_mode: binding.origin_mode || 'auto', custom_origin: binding.custom_origin || '', simulate_local: binding.simulate_local === 1, local_ip: binding.local_ip || '127.0.0.1', open_in_new: binding.open_in_new === 1 })
           bindingAdvancedOpen.value = binding.simulate_local === 1 || hasCustomProxy(binding)
           bindingOpen.value = true
         }
@@ -1062,7 +1151,7 @@
 
       onBeforeUnmount(() => unsubscribeLocale?.())
     
-      return { actionList, addRequestRewriteFilter, addRequestRewriteHeader, addRewriteFilter, addRewriteHeader, allowCount, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, clearRequestRewrite, clearRewrite, denyCount, entryDomain, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, openRequestRewrite, openRewrite, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, removeRequestRewriteFilter, removeRequestRewriteHeader, removeRewriteFilter, removeRewriteHeader, required, requestHeaderOpOptions, resetPolicyFields, requestRewriteBinding, requestRewriteForm, requestRewriteHasStored, requestRewriteJsonError, requestRewriteJsonText, requestRewriteOpen, requestRewriteView, rewriteActive, rewriteBodyOptions, rewriteBinding, rewriteContentTypeRule, rewriteDetails, rewriteFilterSourceRule, rewriteForm, rewriteHasStored, rewriteHeaderNameRule, rewriteJsonError, rewriteJsonText, rewriteOpen, rewriteStatusRule, rewriteStored, rewriteView, saveBindingForm, savePolicyForm, saveRequestRewriteForm, saveRewriteForm, saving, selectedPolicyObject, setPolicyMethods, sourceLabel, switchRequestRewriteView, switchRewriteView, t, toggleBinding, upstreamSchemeOptions }
+      return { actionList, addRequestRewriteFilter, addRequestRewriteHeader, addRewriteCondition, addRewriteFilter, addRewriteHeader, allowCount, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, clearRequestRewrite, clearRewrite, denyCount, entryDomain, error, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, openRequestRewrite, openRewrite, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectOptions, policyObjectPathRule, policyObjectTargetRule, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, removeRequestRewriteFilter, removeRequestRewriteHeader, removeRewriteFilter, removeRewriteHeader, required, requestHeaderOpOptions, resetPolicyFields, requestRewriteBinding, requestRewriteForm, requestRewriteHasStored, requestRewriteJsonError, requestRewriteJsonText, requestRewriteOpen, requestRewriteView, rewriteActive, rewriteBodyOptions, rewriteBinding, rewriteCondFieldOptions, rewriteCondLogicOptions, rewriteCondOpOptions, rewriteCondValueRule, rewriteContentTypeRule, rewriteDetails, rewriteFilterSourceRule, rewriteForm, rewriteHasStored, rewriteHeaderNameRule, rewriteJsonError, rewriteJsonText, rewriteOpen, rewriteStatusRule, rewriteStored, rewriteView, saveBindingForm, savePolicyForm, saveRequestRewriteForm, saveRewriteForm, saving, condRequiresHeaderName, condRequiresValue, selectedPolicyObject, setPolicyMethods, sourceLabel, switchRequestRewriteView, switchRewriteView, t, toggleBinding, upstreamSchemeOptions }
       }
     })
     

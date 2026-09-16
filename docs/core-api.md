@@ -249,6 +249,7 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 | `custom_origin` | 否 | `origin_mode=custom` 时必填，只接受无 path/query 的 `http(s)://authority` |
 | `simulate_local` | 否 | 默认 `false`；启用本机 HTTP 请求头模拟 |
 | `local_ip` | 否 | 模拟来源 IP，默认 `127.0.0.1`，也可使用网关局域网 IPv4/IPv6 |
+| `open_in_new` | 否 | 默认 `false`；仅影响管理端左侧菜单：点击该绑定直接新标签页打开（应用自检 iframe 嵌入时规避检测），不参与代理与授权 |
 | `request_rewrite` | 否 | 请求改写配置（对象或 JSON 字符串）：`enabled`、`headers`、`remove_headers`、`body`、`body_base64`、`content_type`、`rewrites`；可改写上表各代理字段默认算出的请求头（Host/Cookie/Origin/X-Forwarded-* 等同样可改写，改写值即上游看到的最终值）；留空或 `null` 表示不改写，保存后返回规范化 JSON |
 | `upstream_scheme` | 否 | 上游协议，`http`（默认）或 `https` |
 | `upstream_ssl_verify` | 否 | HTTPS 上游是否校验证书，默认 `true`；设为 `false` 忽略证书校验，仅建议用于受控内网或自签名证书 |
@@ -299,8 +300,9 @@ Keep-Alive）、网关凭据头（X-Authz-Key、X-API-Key、X-Role-Key）、其�
 | `body_base64` | `true` 时 `body` 按 Base64 解码后返回（二进制内容） |
 | `content_type` | 替换正文时写回的 Content-Type，留空保持上游类型 |
 | `rewrites` | 正文过滤规则数组：`{source, target, regex}`；`source` 以 `~` 开头或 `regex=true` 时按 PCRE 处理，替换支持 `$1` 捕获组 |
+| `conditions` | 条件匹配（对齐 APISIX route vars）：`{logic: "all"|"any", match: [{field, name?, op, value?, negate?}]}`，也可直接给裸数组（等价 `logic: "all"`，`op` 留空默认 `regex`）。整条改写（status/headers/body/rewrites）只在条件命中时生效，不命中则完全不介入，也不会出现 `X-Authz-Rewrite`。`field` 取 `uri`（对含查询串的 `$request_uri`）、`request_header`、`response_header`、`content_type`（仅媒体类型本体，忽略 `; charset=...`）、`status`（上游状态码字符串，可用 contains/regex 做区段匹配）；`op` 取 `equals`/`contains`/`regex`/`exists`/`missing`（后两个仅 Header 可用）；`negate: true` 反转该条；`regex` 值支持 `/re/` 包裹（保存时剥掉斜杠），多条件用 `logic` 做 AND/OR 联动，≤16 条 |
 
-约束：`body` 与 `rewrites` 互斥；未知字段、非法正则（保存时做 PCRE 编译校验）、`status` 越界、
+约束：`body` 与 `rewrites` 互斥；未知字段、非法正则（保存时做 PCRE 编译校验，条件里的正则同样校验）、`status` 越界、
 条数/长度超限（≤16 条规则、正则 ≤512、替换 ≤4096、正文 ≤65536、整体 JSON ≤131072 字节）均返回 `422`。
 `Set-Cookie`、`Content-Length`/`Transfer-Encoding` 等分帧与 hop-by-hop 头、`X-Authz-*`、`X-Forwarded-*`、
 `Proxy-*` 以及 `X-Frame-Options`、`Content-Security-Policy`、`Strict-Transport-Security`、
