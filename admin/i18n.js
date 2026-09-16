@@ -25,6 +25,15 @@
         collapsePreview: '收起预览', expandPreview: '展开预览',
         prevFile: '上一个文件', nextFile: '下一个文件',
         truncated: '目录条目过多，仅显示前 2000 条',
+        upload: '上传', dropHint: '松手上传到当前目录', uploading: '正在上传 {n} 个文件…',
+        uploaded: '已上传 {ok} 个文件' , uploadedSkipped: '，{skip} 个被跳过',
+        actions: '操作', rename: '重命名', delete: '删除', cancel: '取消', confirm: '确认',
+        renameTitle: '重命名', newName: '新名称', newNameHint: '只能是单级名称，不能包含 / 或 ..',
+        renameUnchanged: '名称没有变化', renamed: '已重命名',
+        deleteTitle: '删除确认', deleteFileCopy: '删除后不可恢复，确定删除这个文件吗？',
+        deleteDirCopy: '删除后不可恢复。目录非空时需要勾选递归删除。',
+        deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
+        overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
         kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览'
       },
       nginxConf: {
@@ -206,6 +215,15 @@
         collapsePreview: 'Collapse preview', expandPreview: 'Expand preview',
         prevFile: 'Previous file', nextFile: 'Next file',
         truncated: 'Too many entries; only the first 2000 are listed',
+        upload: 'Upload', dropHint: 'Drop to upload into this folder', uploading: 'Uploading {n} file(s)…',
+        uploaded: 'Uploaded {ok} file(s)', uploadedSkipped: ', {skip} skipped',
+        actions: 'Actions', rename: 'Rename', delete: 'Delete', cancel: 'Cancel', confirm: 'Confirm',
+        renameTitle: 'Rename', newName: 'New name', newNameHint: 'A single-level name; / and .. are not allowed',
+        renameUnchanged: 'The name did not change', renamed: 'Renamed',
+        deleteTitle: 'Delete confirmation', deleteFileCopy: 'This is not recoverable. Delete this file?',
+        deleteDirCopy: 'This is not recoverable. Removing a non-empty folder needs the recursive switch.',
+        deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
+        overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
         kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview'
       },
       nginxConf: {

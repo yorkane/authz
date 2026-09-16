@@ -9,11 +9,13 @@
   <title>Files</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
   <link rel="stylesheet" href="./app-page.css?v=15">
-  <link rel="stylesheet" href="./files.css?v=2">
+  <link rel="stylesheet" href="./files.css?v=3">
 </head>
 <body>
   <div id="q-app">
-    <main class="workspace-page files-page">
+    <main class="workspace-page files-page"
+          @dragover.prevent="dragHover"
+          @drop.prevent="onDrop">
       <header class="page-heading">
         <div>
           <h1>{{ t.title }}</h1>
@@ -26,6 +28,8 @@
           <q-btn-toggle v-model="viewMode" dense unelevated no-caps :options="viewOptions" toggle-class="files-toggle-active"></q-btn-toggle>
           <q-btn dense unelevated round :icon="sortDesc ? 'mdi-sort-descending' : 'mdi-sort-ascending'" :title="t.sortOrder" @click="toggleSortOrder"></q-btn>
           <q-btn dense unelevated round icon="mdi-refresh" :title="t.refresh" @click="load"></q-btn>
+          <q-btn dense unelevated no-caps icon="mdi-upload" color="primary" :label="t.upload" :loading="uploading" @click="pickFiles"></q-btn>
+          <input ref="fileInput" type="file" multiple class="files-upload-input" @change="onPickFiles">
         </div>
       </header>
 
@@ -47,6 +51,10 @@
 
       <div v-if="loading" class="files-loading"><q-linear-progress indeterminate></q-linear-progress></div>
 
+      <!-- 拖拽悬停提示与上传进度 -->
+      <div v-if="dragging" class="files-drop-overlay"><div><q-icon name="mdi-cloud-upload-outline" size="46px"></q-icon><div>{{ t.dropHint }}</div></div></div>
+      <div v-if="uploading" class="files-uploading"><q-linear-progress indeterminate color="primary"></q-linear-progress><span>{{ uploadingText }}</span></div>
+
       <!-- 网格视图 -->
       <div v-if="viewMode === 'grid'" ref="grid" class="files-grid">
         <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-card" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
@@ -65,12 +73,25 @@
         <div class="files-rows">
           <div class="files-row files-row-head">
             <span class="col-name files-sortable" @click="sortBy('name')" :title="t.sortName">{{ t.name }}<q-icon v-if="sortKey === 'name'" :name="sortDesc ? 'mdi-arrow-down': 'mdi-arrow-up'" size="14px" class="sort-caret"></q-icon></span><span class="col-size files-sortable" @click="sortBy('size')" :title="t.sortSize">{{ t.size }}<q-icon v-if="sortKey === 'size'" :name="sortDesc ? 'mdi-arrow-down': 'mdi-arrow-up'" size="14px" class="sort-caret"></q-icon></span><span class="col-date files-sortable" @click="sortBy('time')" :title="t.sortTime">{{ t.modified }}<q-icon v-if="sortKey === 'time'" :name="sortDesc ? 'mdi-arrow-down': 'mdi-arrow-up'" size="14px" class="sort-caret"></q-icon></span>
+            <span class="col-action"></span>
           </div>
           <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-row" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
                @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)">
             <span class="col-name"><q-icon :name="iconOf(item)" :color="colorOf(item)" size="18px" class="q-mr-sm"></q-icon>{{ item.name }}</span>
             <span class="col-size">{{ item.type === 'dir' ? '-' : sizeText(item.size) }}</span>
             <span class="col-date">{{ dateText(item.mtime) }}</span>
+            <span class="col-action">
+              <q-btn flat dense round size="sm" icon="mdi-dots-vertical" :aria-label="t.actions" @click.stop>
+                <q-menu auto-close>
+                  <q-list dense class="files-item-menu">
+                    <q-item v-if="item.type !== 'dir'" clickable v-close-popup @click="download(item)"><q-item-section side><q-icon name="mdi-download" size="18px"></q-icon></q-item-section><q-item-section>{{ t.download }}</q-item-section></q-item>
+                    <q-item clickable v-close-popup @click="startRename(item)"><q-item-section side><q-icon name="mdi-rename-box" size="18px"></q-icon></q-item-section><q-item-section>{{ t.rename }}</q-item-section></q-item>
+                    <q-separator></q-separator>
+                    <q-item clickable v-close-popup class="menu-danger" @click="askRemove(item)"><q-item-section side><q-icon name="mdi-trash-can-outline" size="18px"></q-icon></q-item-section><q-item-section>{{ t.delete }}</q-item-section></q-item>
+                  </q-list>
+                </q-menu>
+              </q-btn>
+            </span>
           </div>
         </div>
         <aside v-if="previewPanelOpen && focused" class="files-detail">
@@ -88,6 +109,8 @@
             <span>{{ dateText(focused.mtime) }}</span>
             <q-btn flat dense no-caps icon="mdi-open-in-new" :label="t.openInTab" @click="openInTab(focused)"></q-btn>
             <q-btn v-if="focused.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(focused)"></q-btn>
+            <q-btn flat dense no-caps icon="mdi-rename-box" :label="t.rename" @click="startRename(focused)"></q-btn>
+            <q-btn flat dense no-caps icon="mdi-trash-can-outline" color="negative" :label="t.delete" @click="askRemove(focused)"></q-btn>
           </div>
         </aside>
         <q-btn v-else class="preview-expand-btn" flat dense round icon="mdi-page-layout-sidebar-right" :title="t.expandPreview" @click="previewPanelOpen = true"></q-btn>
@@ -104,6 +127,30 @@
       </div>
 
       <div class="files-kbd-hint">{{ t.kbdHint }}</div>
+
+      <!-- 重命名 / 删除确认 -->
+      <q-dialog v-model="renameOpen" persistent>
+        <q-card class="files-dialog-card">
+          <q-card-section class="text-h6">{{ t.renameTitle }}</q-card-section>
+          <q-card-section>
+            <div class="files-dialog-path">{{ renameForm.path ? renameForm.path + '/' : '' }}{{ renameForm.name }}</div>
+            <q-input v-model.trim="renameForm.new_name" dark dense outlined autofocus :label="t.newName" :hint="t.newNameHint" @keyup.enter="confirmRename"></q-input>
+          </q-card-section>
+          <q-card-actions align="right"><q-btn flat dense no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated dense no-caps :label="t.confirm" color="primary" :loading="mutating" @click="confirmRename"></q-btn></q-card-actions>
+        </q-card>
+      </q-dialog>
+
+      <q-dialog v-model="removeOpen" persistent>
+        <q-card class="files-dialog-card">
+          <q-card-section class="text-h6">{{ t.deleteTitle }}</q-card-section>
+          <q-card-section>
+            <div class="files-dialog-path">{{ removeForm.path ? removeForm.path + '/' : '' }}{{ removeForm.name }}</div>
+            <p class="files-dialog-copy">{{ removeForm.type === 'dir' ? t.deleteDirCopy : t.deleteFileCopy }}</p>
+            <q-toggle v-if="removeForm.type === 'dir'" v-model="removeForm.recursive" dense color="negative" :label="t.deleteRecursive"></q-toggle>
+          </q-card-section>
+          <q-card-actions align="right"><q-btn flat dense no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated dense no-caps :label="t.confirm" color="negative" :loading="mutating" @click="confirmRemove"></q-btn></q-card-actions>
+        </q-card>
+      </q-dialog>
 
       <!-- 预览对话框（网格/列表模式） -->
       <q-dialog v-model="previewOpen" maximized>
@@ -136,8 +183,8 @@
   </div>
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./i18n.js?v=40"></script>
-  <script src="./api.js?v=18"></script>
+  <script src="./i18n.js?v=41"></script>
+  <script src="./api.js?v=19"></script>
   <script>
     const { createApp, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } = Vue
 
@@ -458,6 +505,131 @@
           anchor.click()
         }
 
+        // ── 写操作：上传 / 重命名 / 删除 ────────────────────────────────────
+        // 全部走 /_authz/api/files* 的 admin 端点；上传用 multipart 流式落盘，
+        // 前端只把 File 对象交给 FormData，不经 JSON、不读入内存字符串。
+        const csrf = ref('')
+        const fileInput = ref(null)
+        const uploading = ref(false)
+        const uploadingText = ref('')
+        const dragging = ref(false)
+        const mutating = ref(false)
+        const renameOpen = ref(false)
+        const renameForm = reactive({ path: '', name: '', new_name: '' })
+        const removeOpen = ref(false)
+        const removeForm = reactive({ path: '', name: '', type: 'file', recursive: false })
+
+        function notify (message, type) {
+          Quasar.Notify.create({ message, type, position: 'top-right', timeout: 2600 })
+        }
+
+        function pickFiles () {
+          fileInput.value?.click()
+        }
+
+        function onPickFiles (event) {
+          const filesPicked = Array.from(event.target.files || [])
+          event.target.value = ''
+          upload(filesPicked)
+        }
+
+        let dragTimer
+        // dragleave 在指针跨过任意子元素时也会触发，会闪断遮罩：改用短超时，
+        // dragover 每 200ms 续期一次，指针真正离开后遮罩自动消失。
+        function dragHover () {
+          dragging.value = true
+          window.clearTimeout(dragTimer)
+          dragTimer = window.setTimeout(() => { dragging.value = false }, 200)
+        }
+
+        function onDrop (event) {
+          window.clearTimeout(dragTimer)
+          dragging.value = false
+          const filesDropped = Array.from(event.dataTransfer?.files || [])
+          if (filesDropped.length) upload(filesDropped)
+        }
+
+        async function upload (filesPicked, overwrite) {
+          if (!filesPicked.length) return
+          uploading.value = true
+          uploadingText.value = t.value.uploading.replace('{n}', String(filesPicked.length))
+          try {
+            const result = await window.adminApi.uploadFiles(path.value, filesPicked, overwrite)
+            const skipped = result?.skipped || []
+            let doneMessage = t.value.uploaded.replace('{ok}', String((result?.uploaded || []).length))
+            if (skipped.length) doneMessage += t.value.uploadedSkipped.replace('{skip}', String(skipped.length))
+            notify(doneMessage, skipped.length ? 'warning' : 'positive')
+            if (skipped.length) console.warn('upload skipped:', skipped)
+            await load()
+          } catch (err) {
+            // 409 是同名冲突：确认后带 overwrite 重传，避免用户先去改名。
+            if (err.status === 409 && !overwrite) {
+              uploading.value = false
+              Quasar.Dialog.create({
+                title: t.value.overwriteTitle,
+                message: t.value.overwriteCopy,
+                cancel: true,
+                persistent: true
+              }).onOk(() => upload(filesPicked, true))
+              return
+            }
+            notify(err.message || String(err), 'negative')
+          } finally {
+            uploading.value = false
+            uploadingText.value = ''
+          }
+        }
+
+        function startRename (item) {
+          if (!item) return
+          Object.assign(renameForm, { path: path.value, name: item.name, new_name: item.name })
+          renameOpen.value = true
+        }
+
+        async function confirmRename () {
+          const next = renameForm.new_name.trim()
+          if (!next || next === renameForm.name) {
+            notify(t.value.renameUnchanged, 'warning')
+            return
+          }
+          mutating.value = true
+          try {
+            await window.adminApi.renameFile({ _csrf: csrf.value, path: renameForm.path, name: renameForm.name, new_name: next })
+            renameOpen.value = false
+            notify(t.value.renamed, 'positive')
+            await load()
+          } catch (err) {
+            notify(err.message || String(err), 'negative')
+          } finally {
+            mutating.value = false
+          }
+        }
+
+        function askRemove (item, recursive) {
+          if (!item) return
+          Object.assign(removeForm, { path: path.value, name: item.name, type: item.type, recursive: !!recursive })
+          removeOpen.value = true
+        }
+
+        async function confirmRemove () {
+          mutating.value = true
+          try {
+            await window.adminApi.removeFile({
+              _csrf: csrf.value,
+              path: removeForm.path,
+              name: removeForm.name,
+              recursive: removeForm.type === 'dir' ? removeForm.recursive : false
+            })
+            removeOpen.value = false
+            notify(t.value.deleted, 'positive')
+            await load()
+          } catch (err) {
+            notify(err.message || String(err), 'negative')
+          } finally {
+            mutating.value = false
+          }
+        }
+
         function toggleSortOrder () {
           sortDesc.value = !sortDesc.value
         }
@@ -550,14 +722,18 @@
           applyLocale(localeRef.value)
           unsubscribeLocale = window.adminI18n.subscribe(applyLocale)
           window.addEventListener('keydown', handleKeydown)
+          // 写操作（上传/重命名/删除）都要求 CSRF 头：启动时取一次会话缓存 token。
+          // 取不到（例如以 API Key 打开本页）只是没有写权限，浏览照旧。
+          window.adminApi.session().then(session => { csrf.value = session.csrf || '' }).catch(() => {})
           load()
         })
         onBeforeUnmount(() => {
           unsubscribeLocale?.()
+          window.clearTimeout(dragTimer)
           window.removeEventListener('keydown', handleKeydown)
         })
 
-        return { broken, colorOf, crumbs, detailText, download, dateText, error, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, kindOf, loading, load, moveFocus, navigate, onItemDouble, onItemClick, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, select, shown, sizeText, sortBy, sortDesc, sortKey, statText, stepPreview, t, toggleSortOrder, truncated, viewMode, viewOptions }
+        return { broken, colorOf, confirmRemove, confirmRename, crumbs, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, kindOf, loading, load, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
       }
     })
 

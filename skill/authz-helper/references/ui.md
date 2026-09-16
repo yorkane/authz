@@ -57,8 +57,9 @@ Cookie 会话或 `x-api-key` 头（Playwright setExtraHTTPHeaders）均可认证
 
 | 区块 | 功能 | API |
 |---|---|---|
-| 工具栏 | 路径导航、刷新 | `GET /api/files?path=` |
-| 列表 | 只读列 AUTHZ_FILES_ROOT 目录；沙箱预览依赖 SameSite=None Cookie | 同上 |
+| 工具栏 | 路径导航、刷新、上传（按钮或拖拽；同名 409 可确认后 overwrite 重传） | `GET /api/files?path=`、`POST /api/files/upload?path=&overwrite=1` |
+| 列表 | 列 AUTHZ_FILES_ROOT 目录 + 行操作菜单（下载/重命名/删除；目录非空需 recursive）；沙箱预览依赖 SameSite=None Cookie | `PUT /api/files/rename`、`DELETE /api/files/remove` |
+| 写权限 | 三项写操作 admin + CSRF + 浏览器会话专用（API Key 一律 403）；写路径锁死在 files_root 内，符号链接/越界名一律拒绝 | — |
 
 ## 5. nginx_conf.html — Nginx include 编辑
 

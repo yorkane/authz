@@ -106,6 +106,10 @@ location ^~ /_authz/apps/ {
 
 location ^~ /_authz/ {
     default_type text/html;
+    # 控制面 API 的体积上限：正文改写/JSON 请求都很小，唯一的大请求是
+    # 文件管理的 multipart 上传（/api/files/upload 流式落盘，不驻留内存）。
+    # 该值是整体请求的硬上限，防止上传把磁盘写满；单文件另有 2GB 配额。
+    client_max_body_size 2048m;
     content_by_lua_block {
         require("resty.authz.router"):handle()
     }

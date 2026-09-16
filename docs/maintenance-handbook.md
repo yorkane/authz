@@ -884,6 +884,11 @@ lualib/tracker/
   （`response_rewrite` 字段配置绑定级响应改写，字段与限制见 `docs/core-api.md`）
 - 策略：`GET /_authz/api/authorization`、`POST /_authz/api/policies`、`PATCH|DELETE /_authz/api/policies/:id`
 - API Key：`GET|POST /_authz/api/api-keys`、`PATCH|DELETE /_authz/api/api-keys/:id`
+- 文件管理（admin + 浏览器会话 + CSRF；机器 Key 一律拒绝）：
+  `GET /_authz/api/files`（列表）、`POST /_authz/api/files/upload`（multipart，
+  `?path=&overwrite=1`）、`PUT /_authz/api/files/rename`、`DELETE /_authz/api/files/remove`
+  （目录非空需 `recursive:true`）。写路径锁定 `AUTHZ_FILES_ROOT`：逐级真实目录、
+  符号链接一律拒绝；部署需可写 `FILES_DIR` 卷
 - Guest 诊断页：`GET /_authz/guest`（匿名即可访问；guest/admin 的 Key 与会话同样可用；加 `?json=1` 返回 JSON）
   ——**明文完整**回显当次请求的全部请求头（含 Cookie/Authorization/API Key）、来源 IP
   与代理转发头，用于 debug；guest 的代理访问范围可像其他角色一样用策略配置。

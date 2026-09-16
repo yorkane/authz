@@ -8,6 +8,7 @@ local service = require "resty.authz.api.service"
 local session = require "resty.authz.session"
 local ui = require "resty.authz.ui"
 local files = require "resty.authz.files"
+local files_upload = require "resty.authz.files_upload"
 local nginxconf = require "resty.authz.nginxconf"
 local guest = require "resty.authz.guest"
 
@@ -213,6 +214,29 @@ register("GET", "/api/files", guard.wrap(function(_, env)
     end
     return { data = listing }
 end))
+
+-- 文件管理写操作（上传 / 重命名 / 删除）：仅 admin，浏览器会话必须带 CSRF。
+-- 上传走 multipart 流式落盘（resty.authz.files_upload），不读 body、不驻留内存，
+-- 因此它在 guard 里只认证与鉴权；CSRF 头由 handler 自己比对（见下）。
+register("POST", "/api/files/upload", guard.wrap(function()
+    -- guard 的 CSRF 校验只读请求头，不会 consume body，流式上传仍然完整可读。
+    local payload, err, status = files_upload.upload()
+    if not payload then
+        return { error = { code = "upload_failed", message = err or "上传失败" } }, status or 400
+    end
+    -- 第二个返回值是 HTTP 状态码（201 新建 / 409 全量同名冲突由 handler 内部给出）。
+    return payload, status
+end, { admin = true, csrf = true, session_only = true }))
+
+register("PUT", "/api/files/rename", guard.wrap(with_body(function(_, data)
+    return files.rename(require("resty.authz").config.files_root or files.default_root,
+        data.path, data.name, data.new_name)
+end), { admin = true, csrf = true, session_only = true }))
+
+register("DELETE", "/api/files/remove", guard.wrap(with_body(function(_, data)
+    return files.remove(require("resty.authz").config.files_root or files.default_root,
+        data.path, data.name, data.recursive == true)
+end), { admin = true, csrf = true, session_only = true }))
 
 register("POST", "/api/menu-entries", guard.wrap(with_body(function(_, data)
     return service.create_menu_entry(data)

@@ -248,7 +248,14 @@ core-api.md 与代码为准）。
 
  - `GET /_authz/guest?json=1` — 请求探针（明文完整回显请求头/来源/代理链，
    服务端转义）；**匿名即可访问**，guest/admin Key 与会话同样可用。
-- `GET /api/files?path=` — 只读列 `AUTHZ_FILES_ROOT` 目录（登录或非 guest Key）。
+- `GET /api/files?path=` — 列 `AUTHZ_FILES_ROOT` 目录（登录或非 guest Key）。
+- 文件管理写操作（全部 **admin + 浏览器会话 + CSRF**，机器 Key 一律 403；部署需可写 `FILES_DIR`）：
+  - `POST /api/files/upload?path=<rel>&overwrite=1` — multipart（字段名 `file`，可多文件）流式落盘；
+    同名不带 overwrite 返回 409；响应 `{uploaded:[{name,size}], skipped:[{name,reason}]}`。
+  - `PUT /api/files/rename` — `{path,name,new_name}`；目标已存在 409。
+  - `DELETE /api/files/remove` — `{path,name,recursive}`；目录非空不带 recursive 返回 409。
+  安全边界：路径逐级要求真实目录、名称禁止分隔符/`..`、符号链接读不到也写不动；
+  上传先写 `.upload-*` 临时名再原子改名，中断不会留半截目标文件。
 - `PUT /api/me/password` — 改自己密码（session_only；改完其他会话全部下线）。
 - `PUT /api/users/:id/password` — admin 重置他人密码。
 - `PATCH/DELETE /api/remote-users/:provider` — 管理远程身份记录（角色覆盖/删除，

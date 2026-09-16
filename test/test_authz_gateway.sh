@@ -11,6 +11,10 @@ BUDGET_CONTAINER_NAME=""
 ENVKEY_CONTAINER_NAME=""
 ENVKEY2_CONTAINER_NAME=""
 TMP_DIR=$(mktemp -d)
+# 文件管理测试需要可写 /files：拷贝一份 admin 目录作为可写文件根
+# （只读浏览断言仍依赖其中的 vendor 子目录）。
+mkdir -p "$TMP_DIR/files"
+cp -r "$REPO_DIR/admin/." "$TMP_DIR/files/"
 PASS=0
 MOCK_PID=""
 REMOTE_PID=""
@@ -178,7 +182,7 @@ assert_json() {
 # 段名（默认全跑，TEST_ONLY 用逗号挑选）：
 #   guest domain-prefix request-rewrite body-rewrite gzip-negotiation
 #   conditional-rewrite
-#   complex-rewrite response-rewrite-xss menu-tree files files-legacy
+#   complex-rewrite response-rewrite-xss menu-tree files files-legacy files-manage
 #   nginx-conf agent-key login-lock http-redirect cookie-domain
 #   rewrite-budget envkey
 # 段之间共享登录会话、端口与 mock。被标记成可挑选的段都自带前置（自己登录、
@@ -483,7 +487,7 @@ docker run -d \
     -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
     -v "$TMP_DIR/data:/data" \
     -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
-    -v "$REPO_DIR/admin:/files:ro" \
+    -v "$TMP_DIR/files:/files" \
     -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
     -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
     -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
@@ -2943,6 +2947,202 @@ assert_eq "file listing missing directory 404" "$STATUS" "404"
 request GET "$ADMIN_HOST" /_authz/api/files
 assert_eq "file listing requires session" "$STATUS" "401"
 
+
+fi
+section files-manage
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
+# ── 文件管理写操作：上传 / 重命名 / 删除（admin + CSRF + 浏览器会话） ─────
+# 主测试容器的 /files 挂载自 $TMP_DIR/files（可写）；断言同时从宿主侧核对
+# 真实落盘结果，确认写路径真的落在 root 内。
+FM_DIR="$TMP_DIR/files/fm-test"
+mkdir -p "$FM_DIR"
+fm_part_dir="$TMP_DIR/parts"; mkdir -p "$fm_part_dir"
+
+# fm_upload <path> <csrf> <overwrite> name:content...（内容里的 \n 展开为换行）
+fm_upload() {
+    local path=$1 csrf_token=$2 overwrite=${3:-}; shift 3
+    local url="http://$ADMIN_HOST:$HTTP_PORT/_authz/api/files/upload?path=$path"
+    [[ -n "$overwrite" ]] && url="$url&overwrite=1"
+    local call=(-sS --max-time 20 -X POST --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1"
+        -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}')
+    [[ -n "$ADMIN_COOKIE" ]] && call+=(-H "Cookie: $(cookie_header "$ADMIN_COOKIE")")
+    [[ -n "$csrf_token" ]] && call+=(-H "X-CSRF-Token: $csrf_token")
+    local spec form=() n=0
+    for spec in "$@"; do
+        local fname=${spec%%:*} body=${spec#*:}
+        n=$((n + 1))
+        printf '%b' "$body" > "$fm_part_dir/part-$n"
+        form+=(-F "file=@$fm_part_dir/part-$n;filename=$fname")
+    done
+    STATUS=$(curl "${call[@]}" "${form[@]}" "$url")
+    BODY=$(<"$TMP_DIR/body")
+}
+
+# 同一上传但不带任何凭证（匿名访问写接口）。
+fm_upload_nocredential() {
+    local path=$1; shift
+    local url="http://$ADMIN_HOST:$HTTP_PORT/_authz/api/files/upload?path=$path"
+    local call=(-sS --max-time 20 -X POST --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1"
+        -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}')
+    local spec form=() n=0
+    for spec in "$@"; do
+        local fname=${spec%%:*} body=${spec#*:}
+        n=$((n + 1))
+        printf '%b' "$body" > "$fm_part_dir/part-$n"
+        form+=(-F "file=@$fm_part_dir/part-$n;filename=$fname")
+    done
+    STATUS=$(curl "${call[@]}" "${form[@]}" "$url")
+    BODY=$(<"$TMP_DIR/body")
+}
+
+fm_upload "fm-test" "$CSRF" "" "hello.txt:hello file manager\n"
+assert_eq "upload creates a file" "$STATUS" "201"
+assert_json "upload reports the created file" '.data.uploaded[0].name' "hello.txt"
+[[ "$(cat "$FM_DIR/hello.txt" 2>/dev/null)" == "hello file manager" ]] \
+    && pass "upload wrote the bytes through to disk" || fail "uploaded content mismatch"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=fm-test" "$ADMIN_COOKIE"
+assert_json "uploaded file shows up in the listing" '[.data.items[] | select(.name == "hello.txt")] | length' "1"
+
+fm_upload "fm-test" "$CSRF" "" "hello.txt:same name again"
+assert_eq "duplicate upload without overwrite conflicts" "$STATUS" "409"
+fm_upload "fm-test" "$CSRF" "1" "hello.txt:replaced content"
+assert_eq "overwrite upload succeeds" "$STATUS" "201"
+[[ "$(cat "$FM_DIR/hello.txt")" == "replaced content" ]] \
+    && pass "overwrite replaced the bytes" || fail "overwrite content mismatch"
+
+fm_upload "fm-test" "$CSRF" "" "a.txt:first\n" "b.txt:second\n"
+assert_eq "multi-file upload succeeds" "$STATUS" "201"
+assert_json "multi-file upload reports both files" '.data.uploaded | length' "2"
+[[ -f "$FM_DIR/a.txt" && -f "$FM_DIR/b.txt" ]] \
+    && pass "both uploaded files landed on disk" || fail "multi-file upload missing on disk"
+
+# 0 字节上传也是合法结果（先建 sink，part 结束即落盘）。
+fm_upload "fm-test" "$CSRF" "" "empty.txt:"
+assert_eq "empty-file upload succeeds" "$STATUS" "201"
+[[ -f "$FM_DIR/empty.txt" ]] \
+    && pass "empty file landed on disk" || fail "empty file missing"
+
+request POST "$ADMIN_HOST" "/_authz/api/files/upload?path=fm-test" "$ADMIN_COOKIE" "$CSRF" \
+    '{"file":"not-multipart"}'
+assert_eq "upload requires multipart" "$STATUS" "415"
+fm_upload "fm-test" "" "" "no-csrf.txt:x"
+assert_eq "upload without CSRF rejected" "$STATUS" "403"
+fm_upload_nocredential "fm-test" "anonymous.txt:x"
+assert_eq "upload without any credential rejected" "$STATUS" "401"
+[[ ! -e "$FM_DIR/no-csrf.txt" ]] \
+    && pass "rejected CSRF upload wrote nothing" || fail "CSRF-rejected upload wrote a file"
+# 非法文件名（"." / ".." 等）在 validate_name 就被拒绝，整请求 422。
+fm_upload "fm-test" "$CSRF" "" "..:escape attempt"
+assert_eq "upload rejects dotdot as a file name" "$STATUS" "422"
+fm_upload "../../etc" "$CSRF" "" "x.txt:x"
+assert_eq "upload rejects traversal path" "$STATUS" "400"
+fm_upload "fm-test/sub" "$CSRF" "" "deep.txt:deep\n"
+assert_eq "upload into a missing subdirectory 404" "$STATUS" "404"
+mkdir -p "$FM_DIR/sub"
+fm_upload "fm-test/sub" "$CSRF" "" "deep.txt:deep\n"
+assert_eq "upload into a subdirectory works" "$STATUS" "201"
+[[ -f "$FM_DIR/sub/deep.txt" ]] \
+    && pass "subdirectory upload landed in place" || fail "subdirectory upload missing"
+
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"a.txt","new_name":"renamed.txt"}'
+assert_eq "rename succeeds" "$STATUS" "200"
+[[ ! -e "$FM_DIR/a.txt" && -f "$FM_DIR/renamed.txt" ]] \
+    && pass "rename moved the file on disk" || fail "rename did not take effect"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"renamed.txt","new_name":"hello.txt"}'
+assert_eq "rename onto an existing name conflicts" "$STATUS" "409"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"renamed.txt","new_name":"../escape"}'
+assert_eq "rename rejects traversal name" "$STATUS" "422"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"missing.txt","new_name":"other.txt"}'
+assert_eq "rename missing file 404" "$STATUS" "404"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "" \
+    '{"path":"fm-test","name":"b.txt","new_name":"c.txt"}'
+assert_eq "rename without CSRF rejected" "$STATUS" "403"
+
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"b.txt"}'
+assert_eq "delete file succeeds" "$STATUS" "200"
+[[ ! -e "$FM_DIR/b.txt" ]] \
+    && pass "deleted file gone from disk" || fail "deleted file still present"
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"missing.txt"}'
+assert_eq "delete missing file 404" "$STATUS" "404"
+
+# 目录：非空必须显式递归。
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"sub"}'
+assert_eq "deleting a non-empty directory needs recursion" "$STATUS" "409"
+[[ -f "$FM_DIR/sub/deep.txt" ]] \
+    && pass "non-empty directory untouched without recursion" || fail "directory removed anyway"
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"sub","recursive":true}'
+assert_eq "recursive delete succeeds" "$STATUS" "200"
+[[ ! -e "$FM_DIR/sub" ]] \
+    && pass "recursive delete cleared the tree" || fail "recursive delete left content behind"
+
+# 符号链接防护：链接本身既不删、不改名、也不覆盖（否则等于把写/删能力送出 root）。
+ln -s /etc/passwd "$TMP_DIR/files/evil-link"
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"","name":"evil-link","recursive":true}'
+assert_eq "symlink delete is refused" "$STATUS" "400"
+[[ -L "$TMP_DIR/files/evil-link" ]] \
+    && pass "symlink survived the refused delete" || fail "symlink was removed"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"","name":"evil-link","new_name":"innocent.txt"}'
+assert_eq "symlink rename is refused" "$STATUS" "400"
+fm_upload "" "$CSRF" "1" "evil-link:overwritten"
+assert_eq "overwrite onto a symlink is refused" "$STATUS" "422"
+[[ -L "$TMP_DIR/files/evil-link" ]] \
+    && pass "symlink untouched by the overwrite attempt" || fail "symlink replaced"
+rm -f "$TMP_DIR/files/evil-link"
+# 目录作为符号链接的中间段同样拒绝（resolve_dir 逐级判定）。
+mkdir -p "$TMP_DIR/files/realdir"
+ln -s "$TMP_DIR/files/realdir" "$TMP_DIR/files/aliendir"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"aliendir","name":"nope.txt","new_name":"nope2.txt"}'
+assert_eq "write through a symlinked directory is refused" "$STATUS" "400"
+rm -f "$TMP_DIR/files/aliendir"
+
+# 机器 Key 即使带着合法 CSRF 值也进不了写接口（session_only 先拒绝）。
+# Key 由本段自建自删：TEST_ONLY 单跑时前序段不会创建共享 Key。
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" \
+    '{"name":"fm-manage-test","role":"admin"}'
+assert_eq "section creates its own admin key" "$STATUS" "201"
+FM_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+FM_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+fm_upload_with_key() {
+    local csrf_token=$1; shift
+    local call=(-sS --max-time 20 -X POST --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1"
+        -H "X-CSRF-Token: $csrf_token" -H "x-api-key: $FM_KEY_TOKEN"
+        -o "$TMP_DIR/body" -w '%{http_code}')
+    local spec form=() n=0
+    for spec in "$@"; do
+        local fname=${spec%%:*} body=${spec#*:}
+        n=$((n + 1))
+        printf '%b' "$body" > "$fm_part_dir/part-$n"
+        form+=(-F "file=@$fm_part_dir/part-$n;filename=$fname")
+    done
+    STATUS=$(curl "${call[@]}" "${form[@]}" \
+        "http://$ADMIN_HOST:$HTTP_PORT/_authz/api/files/upload?path=fm-test")
+}
+fm_upload_with_key "$CSRF" "key-only.txt:x"
+assert_eq "upload requires a browser session" "$STATUS" "403"
+[[ ! -e "$FM_DIR/key-only.txt" ]] \
+    && pass "no file written by the rejected key upload" || fail "key upload wrote a file"
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "" "" \
+    "{\"path\":\"fm-test\",\"name\":\"hello.txt\"}" "$FM_KEY_TOKEN"
+assert_eq "api key cannot delete files" "$STATUS" "403"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$FM_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "section removes its own admin key" "$STATUS" "200"
+
+# 收尾：清掉本段留在文件根里的一切，避免污染后续段或复跑。
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"hello.txt"}'
+assert_eq "cleanup deletes the test file" "$STATUS" "200"
 
 fi
 section nginx-conf

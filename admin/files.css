@@ -48,9 +48,14 @@
 .sort-caret { margin-left: 4px; vertical-align: middle; }
 .preview-expand-btn { position: absolute; top: 6px; right: 8px; z-index: 2; }
 .files-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) 90px 140px; gap: 8px;
+  display: grid; grid-template-columns: minmax(0, 1fr) 90px 140px 36px; gap: 8px;
   padding: 6px 12px; cursor: pointer; font-size: 13px; align-items: center; outline: none;
 }
+.files-row .col-action { display: flex; justify-content: flex-end; }
+.files-row .col-action .q-btn { opacity: 0; transition: opacity .12s; }
+.files-row:hover .col-action .q-btn, .files-row.files-focused .col-action .q-btn { opacity: .85; }
+.files-item-menu { min-width: 168px; }
+.files-item-menu .menu-danger { color: #ef5350; }
 .files-row:nth-child(even) { background: rgba(255, 255, 255, 0.03); }
 .files-row:hover { background: rgba(255, 255, 255, 0.07); }
 .files-row-head { font-weight: 600; background: rgba(255, 255, 255, 0.06); cursor: default; }
@@ -117,3 +122,24 @@
   .files-row { padding: 12px; }
   .files-pager { margin-top: 18px; }
 }
+
+/* ── 上传：隐藏 input、进度条、拖拽遮罩与管理对话框 ───────────────────── */
+.files-upload-input { display: none; }
+.files-uploading {
+  display: flex; align-items: center; gap: 12px;
+  margin: 0 0 12px; padding: 8px 12px; font-size: 13px;
+  background: rgba(25, 118, 210, 0.12); border: 1px solid rgba(25, 118, 210, 0.35); border-radius: 8px;
+}
+.files-uploading .q-linear-progress { flex: 1; }
+.files-drop-overlay {
+  position: fixed; inset: 0; z-index: 3000; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55); border: 2px dashed rgba(48, 164, 255, 0.9);
+  color: #90caf9; font-size: 15px; text-align: center;
+}
+.files-dialog-card { width: 420px; max-width: 92vw; }
+.files-dialog-path {
+  margin-bottom: 10px; padding: 6px 10px; font-size: 12px; word-break: break-all;
+  background: rgba(255, 255, 255, 0.06); border-radius: 6px; color: rgba(255, 255, 255, 0.7);
+}
+.files-dialog-copy { margin: 0 0 8px; font-size: 13px; color: rgba(255, 255, 255, 0.72); }

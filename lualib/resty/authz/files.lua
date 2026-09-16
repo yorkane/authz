@@ -121,4 +121,113 @@ function _M.list(root, rel)
     }
 end
 
+-- ── 写操作（文件管理的上传 / 重命名 / 删除） ────────────────────────────────
+-- 所有写路径都走 resolve_dir()：路径的每一级都必须已存在且是"真目录"
+-- （用 symlinkattributes 判定：符号链接报 mode=link，一律拒绝）。因此即使
+-- 根目录里被预先放置了指向外部的符号链接，写操作也不可能越出 root。
+-- 名称参数只接受单段文件名：分隔符、控制字符、. 与 .. 直接拒绝。
+
+--- lfs.symlinkattributes 的存在性探测与文件根可用性由 resolve_dir 统一处理。
+function _M.is_symlink(path)
+    local lfs = lfs_mod()
+    if not lfs then return false end
+    local attr = lfs.symlinkattributes(path)
+    return attr ~= nil and attr.mode == "link"
+end
+
+function _M.path_exists(path)
+    local lfs = lfs_mod()
+    if not lfs then return false end
+    return lfs.symlinkattributes(path) ~= nil
+end
+
+function _M.validate_name(name)
+    name = tostring(name or "")
+    if name == "" or name == "." or name == ".." then return nil end
+    if #name > 255 then return nil end
+    if name:find("[%c/\\]") then return nil end
+    return name
+end
+
+-- 把相对目录解析为 root 内的绝对目录；每个中间段必须是真实目录（非符号链接）。
+-- 返回绝对目录、错误、状态码、规范化后的相对路径。
+function _M.resolve_dir(root, rel)
+    local clean = _M.normalize(rel)
+    if not clean then return nil, "invalid path", 400 end
+    local lfs = lfs_mod()
+    _M.available = available
+    if not lfs then return nil, "lfs 模块不可用", 503 end
+    local current = root
+    local root_attr = lfs.symlinkattributes(current)
+    if not root_attr or root_attr.mode ~= "directory" then
+        return nil, "文件根目录不可用", 503
+    end
+    for segment in clean:gmatch("[^/]+") do
+        current = current .. "/" .. segment
+        local attr = lfs.symlinkattributes(current)
+        if not attr then return nil, "目录不存在: " .. segment, 404 end
+        if attr.mode ~= "directory" then return nil, "路径段不是目录: " .. segment, 400 end
+    end
+    return current, nil, nil, clean
+end
+
+function _M.rename(root, rel, old_name, new_name)
+    local dir, err, status = _M.resolve_dir(root, rel)
+    if not dir then return nil, err, status end
+    local old = _M.validate_name(old_name)
+    local new = _M.validate_name(new_name)
+    if not old or not new then
+        return nil, "名称不能为空且不能包含路径分隔符或控制字符", 422
+    end
+    if old == new then return nil, "新旧名称相同", 422 end
+    local lfs = lfs_mod()
+    local from = dir .. "/" .. old
+    local to = dir .. "/" .. new
+    local attr = lfs.symlinkattributes(from)
+    if not attr then return nil, "文件或目录不存在", 404 end
+    if attr.mode == "link" then return nil, "拒绝操作符号链接", 400 end
+    if lfs.symlinkattributes(to) then return nil, "目标名称已存在", 409 end
+    local ok, rename_err = os.rename(from, to)
+    if not ok then return nil, "重命名失败: " .. tostring(rename_err), 500 end
+    return { message = "已重命名", name = new }
+end
+
+local function delete_tree(lfs, path, recursive)
+    local attr = lfs.symlinkattributes(path)
+    if not attr then return nil, "文件或目录不存在", 404 end
+    if attr.mode == "link" then return nil, "拒绝删除符号链接", 400 end
+    if attr.mode == "directory" then
+        local names = {}
+        local iterator, handle = lfs.dir(path)
+        for name in iterator, handle do
+            if name ~= "." and name ~= ".." then names[#names + 1] = name end
+        end
+        -- lfs.dir keeps the DIR* open until GC; close it eagerly.
+        if handle then pcall(function() return handle:close() end) end
+        if #names > 0 and not recursive then
+            return nil, "目录非空：需要显式递归删除", 409
+        end
+        for _, name in ipairs(names) do
+            local ok, child_err, child_status = delete_tree(lfs, path .. "/" .. name, true)
+            if not ok then return nil, child_err, child_status end
+        end
+    end
+    local ok, remove_err = os.remove(path)
+    if not ok then return nil, "删除失败: " .. tostring(remove_err), 500 end
+    return true
+end
+
+function _M.remove(root, rel, name, recursive)
+    local dir, err, status = _M.resolve_dir(root, rel)
+    if not dir then return nil, err, status end
+    local target = _M.validate_name(name)
+    if not target then
+        return nil, "名称不能为空且不能包含路径分隔符或控制字符", 422
+    end
+    local lfs = lfs_mod()
+    local ok, remove_err, remove_status = delete_tree(lfs, dir .. "/" .. target, recursive == true)
+    if not ok then return nil, remove_err, remove_status or 500 end
+    return { message = "已删除", name = target }
+end
+
 return _M

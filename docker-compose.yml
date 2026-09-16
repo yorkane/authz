@@ -124,5 +124,7 @@ services:
       - ${ADMIN_UI_DIR:-./admin}:/usr/local/openresty/nginx/html/admin:ro
       - ${LUALIB_DIR:-./lualib}:/usr/local/openresty/site/lualib:ro
       - ${NGINX_TEMPLATE_DIR:-./conf}:/etc/openresty/templates:ro
-      # 文件浏览内容目录：宿主 FILES_DIR -> 容器 /files (只读)
+      # 文件浏览内容目录：宿主 FILES_DIR -> 容器 /files。
+      # 默认只读（files 界面仅浏览/预览）；要启用上传/重命名/删除，
+      # 去掉 :ro 挂成可写卷（写操作仍限 admin+CSRF+会话，且锁在本目录内）。
       - ${FILES_DIR:-./files}:/files:ro

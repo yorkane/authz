@@ -107,6 +107,29 @@ function saveNginxConf (values) {
 
 // API 管理：创建与轮换都返回一次性明文 token（库里只存摘要，事后不可回看）；
 // 角色/启停/删除走标准动作。
+// 文件管理：上传走 multipart（不经 JSON mutation），重命名/删除是普通 JSON。
+// 上传前先取会话拿 CSRF（浏览器会话才有；API Key 没有会话也就进不去写接口）。
+async function uploadFiles (path, files, overwrite) {
+  const session = await request('/session')
+  const form = new FormData()
+  for (const file of files) form.append('file', file, file.name)
+  const query = new URLSearchParams({ path: path || '' })
+  if (overwrite) query.set('overwrite', '1')
+  const response = await fetch(`${API_BASE}/files/upload?${query}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'X-CSRF-Token': session.csrf || '' },
+    body: form
+  })
+  const data = await response.json().catch(() => null)
+  if (!response.ok) {
+    const error = new Error(data?.error?.message || `HTTP ${response.status}`)
+    error.status = response.status
+    throw error
+  }
+  return data?.data
+}
+
 function saveApiKey (values) {
   const { action, id, ...payload } = values
   if (action === 'create') return mutation('POST', '/api-keys', payload)
@@ -125,6 +148,9 @@ window.adminApi = {
   menuTree: () => request('/menu-tree'),
   menuServices: () => request('/menu-services'),
   files: path => request('/files?path=' + encodeURIComponent(path || '')),
+  uploadFiles,
+  renameFile: values => mutation('PUT', '/files/rename', values),
+  removeFile: values => mutation('DELETE', '/files/remove', values),
   nginxConf: () => request('/nginx-conf'),
   apiKeys: () => request('/api-keys'),
   saveUser,

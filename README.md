@@ -60,7 +60,8 @@
 - 图标按文件类型着色：目录琥珀、HTML 橙、文本/脚本绿、JSON 黄、图片暗红、视频蓝、音频青；
 - 键盘操作：↑↓←→ 移动焦点、Enter 进入目录或打开预览、Backspace 返回上级、PageUp/PageDown 翻页、g/l/d 切换视图、f 聚焦搜索、Esc 关闭预览；触屏设备单击即打开；
 - 目录列表由 `GET /_authz/api/files?path=...` 提供（LuaFileSystem 实现，路径已做穿越防护、隐藏文件与 `.br` sidecar 过滤），文件字节走会话保护的 `/_authz/files/` 静态入口（`aio threads` + `open_file_cache`）；
-- 只读：不提供上传/删除；未登录访问 `/_authz/files/*` 与 API 均要求登录。
+- **管理操作（仅 admin，浏览器会话 + CSRF）**：工具栏「上传」按钮或直接把文件拖进页面上传到当前目录（multipart 流式落盘，单文件上限 2GB；同名冲突会弹窗确认后可选择覆盖）；列表行悬停出现操作菜单，支持下载 / 重命名 / 删除（目录需显式勾选递归删除）。写操作被限制在 `/files` 根内：路径逐级要求真实目录、符号链接一律拒绝读写，名称禁止任何路径分隔符。要开放写能力，部署时必须把 `FILES_DIR` 挂成可写卷（默认 compose 是 `:ro`，只读挂载时写操作返回 500）。
+- 未登录访问 `/_authz/files/*` 与只读 API 均要求登录（或合法非 guest API Key）。
 
 ### Nginx 配置编辑（危险）
 
