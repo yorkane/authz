@@ -207,6 +207,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
+        if self.path == "/compressible":
+            # 公共代理链路的压缩与缓存语义端点：正文超过 gzip_min_length，
+            # 上游自带校验器与可缓存头。用于验证经代理（带 Via）的响应仍被
+            # 网关压缩、上游 Cache-Control 原样透传（网关不注入 no-store）、
+            # 以及正文改写会撤掉上游 ETag/Last-Modified。
+            payload = b"compressible-line\n" * 40 + b"SECRET-compressible\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("ETag", '"upstream-etag-v1"')
+            self.send_header("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+            self.send_header("Cache-Control", "public, max-age=60")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if self.path == "/sse":
+            # text/event-stream 不在 gzip/brotli_types 列表里：网关必须保持它
+            # 不被压缩（压缩器会攒住事件、流式语义失效），同时由
+            # X-Accel-Buffering: no 声明下游代理不要缓冲。
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for index in range(4):
+                chunk = ("data: event-%d %s\n\n" % (index, "z" * 300)).encode()
+                self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+            return
+
         if self.path == "/rewrite-error":
             payload = b"upstream failure"
             self.send_response(503)

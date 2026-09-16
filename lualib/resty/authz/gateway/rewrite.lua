@@ -111,6 +111,119 @@ local function upstream_status(fallback)
     return tonumber(raw:match("([^,%s]+)$")) or fallback
 end
 
+-- ── 条件匹配（对齐 APISIX route vars，字段收敛为白名单）────────────────
+-- 整条响应改写只在条件命中时生效；不命中则状态码、响应头、正文一起跳过。
+-- 求值放在 header_filter：这是响应头与状态码刚刚就绪、又还没写任何东西的阶段。
+--
+-- 取值口径（写规则时要记住）：
+--   uri            $request_uri，含查询串（/a/b.js?x=1），不含 scheme/host；
+--   request_header 客户端发来的请求头（多值按 ", " 连接）；
+--   response_header 上游响应头（多值按 ", " 连接）；
+--   content_type   只看媒体类型本体，即去掉 "; charset=..." 后的部分，
+--                  因此 "text/html" 能命中 "text/html; charset=utf-8"；
+--   status         上游状态码（字符串比较，可用 contains/regex 做区段匹配）。
+-- 操作符全部大小写敏感、语义单一：equals 精确相等，contains 子串包含，
+-- regex 走 PCRE（"jo" 编译一次全局复用；要忽略大小写写内联 (?i)）。
+local function header_value(headers, name)
+    local value = headers[ name:lower() ]
+    if value == nil then value = headers[name] end
+    if type(value) == "table" then return table.concat(value, ", ") end
+    if value == nil then return nil end
+    return tostring(value)
+end
+
+local function condition_subject(cond)
+    if cond.field == "uri" then
+        return tostring(ngx.var.request_uri or "")
+    elseif cond.field == "content_type" then
+        return content_type_key()
+    elseif cond.field == "status" then
+        return tostring(upstream_status(tonumber(ngx.status) or 0))
+    end
+    local headers = cond.field == "request_header"
+        and (ngx.req.get_headers() or {}) or (ngx.resp.get_headers() or {})
+    return header_value(headers, cond.name or "")
+end
+
+local function condition_matches(cond)
+    local subject = condition_subject(cond)
+
+    local result
+    if cond.op == "exists" then
+        result = subject ~= nil and subject ~= ""
+    elseif cond.op == "missing" then
+        result = subject == nil or subject == ""
+    elseif subject == nil then
+        -- 头缺失时 equals/contains/regex 一律不命中，避免 nil 参与比较。
+        result = false
+    elseif cond.op == "equals" then
+        result = subject == (cond.value or "")
+    elseif cond.op == "contains" then
+        result = subject:find(cond.value or "", 1, true) ~= nil
+    else
+        local matched, _, err = ngx.re.find(subject, cond.value or "", "jo")
+        result = err == nil and matched ~= nil and matched ~= false
+    end
+    if cond.negate then result = not result end
+    return result
+end
+
+-- 无条件（含畸形条件）恒命中：向后兼容此前所有不带条件的规则。
+function _M.conditions_match(rule)
+    local conditions = type(rule) == "table" and rule.conditions or nil
+    if type(conditions) ~= "table" then return true end
+    local list = conditions.match
+    if type(list) ~= "table" or #list == 0 then return true end
+    if conditions.logic == "any" then
+        for _, cond in ipairs(list) do
+            if condition_matches(cond) then return true end
+        end
+        return false
+    end
+    for _, cond in ipairs(list) do
+        if not condition_matches(cond) then return false end
+    end
+    return true
+end
+
+-- 代理阶段（请求还没有响应）能否判定条件命中。响应侧字段
+-- （response_header / content_type / status）此刻还是未知数，按「可能命中」处理：
+--   * all：任一已知条件为假即整条为假；
+--   * any：任一已知条件为真即整条为真。
+-- 用途是给 upstream_accept_encoding 做优化：条件明确不命中时就不必强制上游返回
+-- 未压缩正文。命中与否的最终判定仍在 header_filter（见 conditions_match）。
+local function request_phase_evaluable(cond)
+    return cond.field == "uri" or cond.field == "request_header"
+end
+
+local function request_phase_match(conditions)
+    if type(conditions) ~= "table" then return true end
+    local list = conditions.match
+    if type(list) ~= "table" or #list == 0 then return true end
+    local unknown = false
+    if conditions.logic == "any" then
+        for _, cond in ipairs(list) do
+            if request_phase_evaluable(cond) and condition_matches(cond) then return true end
+            if not request_phase_evaluable(cond) then unknown = true end
+        end
+        return unknown or false
+    end
+    for _, cond in ipairs(list) do
+        if request_phase_evaluable(cond) then
+            if not condition_matches(cond) then return false end
+        else
+            unknown = true
+        end
+    end
+    return unknown or true
+end
+
+-- 代理层询问：这条规则会不会真的改写正文（考虑请求期能判定的条件）。
+function _M.body_rewrite_applies(rule)
+    if not _M.writes_body(rule) then return false end
+    return request_phase_match(type(rule) == "table" and rule.conditions or nil)
+end
+
 -- header_filter 与 body_filter 分处两个阶段，且代理可能经 ngx.exec 跳转，
 -- 因此 header_filter 重新命中绑定，正文改写状态记在 ngx.ctx 供 body_filter 使用。
 local function current_rule()
@@ -230,6 +343,11 @@ function _M.header_filter()
     local rule = current_rule()
     if not rule then return end
 
+    -- 条件不命中：整条规则当作没配置，不改状态码、不动响应头、不缓冲正文。
+    -- 不写 X-Authz-Rewrite 跳过标记：无条件规则也走同一条路径，标记只用于
+    -- 「本该改写但被安全限制拦下」的场景，否则每条正常响应都会多一个噪声头。
+    if not _M.conditions_match(rule) then return end
+
     local original_status = tonumber(ngx.status) or 0
     if tonumber(rule.status) and tonumber(rule.status) > 0 then
         ngx.status = tonumber(rule.status)
@@ -293,6 +411,12 @@ function _M.header_filter()
 
     -- 改写后长度必然变化，取消 Content-Length 交给分块编码，避免分帧不一致。
     ngx.header.content_length = nil
+    -- 同一原因要撤掉上游的校验器：正文已经变了，ETag / Last-Modified 仍是上游
+    -- 旧内容的指纹。终端一旦启用浏览器缓存（网关不注入 no-store，缓存头由上游
+    -- 决定），浏览器会拿旧校验器做条件请求，nginx 据上游 ETag 直接回 304，
+    -- 客户端于是把未改写的上游正文当成最新内容。撤掉后浏览器退回整包回源。
+    ngx.header.etag = nil
+    ngx.header.last_modified = nil
     if first_header_value(rule.content_type) ~= "" then
         ngx.header.content_type = rule.content_type
     end
@@ -393,6 +517,49 @@ function _M.parse(raw)
     end
     if type(decoded.content_type) == "string" then
         rule.content_type = decoded.content_type
+    end
+    -- 条件匹配：运行期第二道防线（保存侧已做过 PCRE 探测与字段白名单）。
+    -- 任何畸形条件条目直接丢弃；全部条目无效时整条 conditions 置空 = 恒命中，
+    -- 与不带条件的历史配置保持一致。
+    local conditions = decoded.conditions
+    if type(conditions) == "table" then
+        local list = conditions.match
+        if list == nil then list = conditions end
+        if type(list) == "table" then
+            local match = {}
+            for _, item in ipairs(list) do
+                if type(item) == "table" then
+                    local field = tostring(item.field or "")
+                    local op = tostring(item.op or "regex")
+                    local cond_value = tostring(item.value or "")
+                    local name = tostring(item.name or "")
+                    local ok_field = field == "uri" or field == "request_header"
+                        or field == "response_header" or field == "content_type"
+                        or field == "status"
+                    local ok_op = op == "equals" or op == "contains" or op == "regex"
+                        or op == "exists" or op == "missing"
+                    local needs_value = op ~= "exists" and op ~= "missing"
+                    local needs_name = field == "request_header" or field == "response_header"
+                    if ok_field and ok_op and
+                        (not needs_value or (cond_value ~= "" and not cond_value:find("%c"))) and
+                        (not needs_name or (name ~= "" and not name:find("%c"))) then
+                        match[#match + 1] = {
+                            field = field,
+                            name = needs_name and name or nil,
+                            op = op,
+                            value = cond_value ~= "" and cond_value or nil,
+                            negate = item.negate == true,
+                        }
+                    end
+                end
+            end
+            if #match > 0 then
+                rule.conditions = {
+                    logic = tostring(conditions.logic or "all"):lower() == "any" and "any" or "all",
+                    match = match,
+                }
+            end
+        end
     end
     return rule
 end

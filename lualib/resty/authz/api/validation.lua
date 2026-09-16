@@ -33,6 +33,7 @@ local RESPONSE_REWRITE_MAX_PATTERN = 512
 local RESPONSE_REWRITE_MAX_REPLACEMENT = 4096
 local RESPONSE_REWRITE_MAX_BODY = 65536
 local RESPONSE_REWRITE_MAX_JSON = 131072
+local RESPONSE_REWRITE_MAX_CONDITIONS = 16
 
 local function config()
     return require("resty.authz").config
@@ -471,6 +472,127 @@ local function normalize_rewrite_headers(headers, remove_headers)
     return set, remove
 end
 
+-- 条件匹配（对齐 APISIX route vars 的思路，收敛为固定字段白名单）：让整条
+-- 响应改写只在满足条件时生效，避免无差别改写。结构
+--   conditions = { logic = "all"|"any", match = { { field, name?, op, value?, negate? } } }
+-- 也接受裸数组（等价 logic = "all"）。字段：
+--   field   uri | request_header | response_header | content_type | status
+--   name    仅请求/响应头需要（Header 名称，大小写不敏感）
+--   op      equals（精确）| contains（包含）| regex（PCRE，可写 /re/ 包裹）| exists | missing
+--   value   比较值；exists / missing 留空
+--   negate  该条取反
+-- 运行期在 header_filter 阶段求值（响应头与状态码此时已就绪）；URI 取
+-- $request_uri（含查询串）。整条不匹配则状态码、响应头、正文一起跳过。
+local CONDITION_FIELDS = {
+    uri = true, request_header = true, response_header = true,
+    content_type = true, status = true,
+}
+local CONDITION_OPS = {
+    equals = true, contains = true, regex = true, exists = true, missing = true,
+}
+local CONDITION_LOGIC = { all = true, any = true }
+
+local function trim(value)
+    return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+-- 返回规范化后的 { logic, match = { ... } }；无条件时返回 nil（恒匹配）。
+function _M.normalize_conditions(value, label)
+    if value == nil or value == cjson.null then return nil end
+    label = label or "响应改写"
+    if type(value) ~= "table" then
+        return nil, label .. "条件必须是对象或数组", 422
+    end
+    local logic = "all"
+    local list = value
+    if value.match ~= nil and value.match ~= cjson.null then
+        list = value.match
+        if value.logic ~= nil and value.logic ~= cjson.null then
+            logic = trim(value.logic):lower()
+            if not CONDITION_LOGIC[logic] then
+                return nil, label .. "条件 logic 仅支持 all 或 any", 422
+            end
+        end
+    elseif next(value) ~= nil and value[1] == nil then
+        return nil, label .. "条件需要 match 数组", 422
+    end
+    if type(list) ~= "table" then
+        return nil, label .. "条件 match 必须是数组", 422
+    end
+    local out = {}
+    for _, item in ipairs(list) do
+        if type(item) ~= "table" then
+            return nil, label .. "条件必须是对象数组", 422
+        end
+        local field = trim(item.field):lower()
+        if not CONDITION_FIELDS[field] then
+            return nil, label .. "条件 field 仅支持 uri、request_header、"
+                .. "response_header、content_type、status", 422
+        end
+        local op
+        if item.op == nil or item.op == cjson.null or trim(item.op) == "" then
+            -- 留空默认正则：这是最常用的匹配方式（对齐 APISIX 的 vars 正则习惯）。
+            op = "regex"
+        else
+            op = trim(item.op):lower()
+        end
+        if not CONDITION_OPS[op] then
+            return nil, label .. "条件 op 仅支持 equals、contains、regex、exists、missing", 422
+        end
+        local name = ""
+        if field == "request_header" or field == "response_header" then
+            name = trim(item.name)
+            if #name < 1 or #name > 128 or
+                not ngx.re.match(name, [[^[A-Za-z0-9][A-Za-z0-9_-]*$]], "jo") then
+                return nil, label .. "条件 Header 名称只能包含字母、数字、下划线和中划线", 422
+            end
+        elseif item.name ~= nil and item.name ~= cjson.null and trim(item.name) ~= "" then
+            return nil, label .. "条件字段 " .. field .. " 不需要 name", 422
+        end
+        local cond_value = ""
+        if op == "exists" or op == "missing" then
+            if item.value ~= nil and item.value ~= cjson.null and trim(item.value) ~= "" then
+                return nil, label .. "条件 " .. op .. " 不需要 value", 422
+            end
+        else
+            if item.value == nil or item.value == cjson.null then
+                return nil, label .. "条件 " .. op .. " 必须提供 value", 422
+            end
+            cond_value = tostring(item.value)
+            if #cond_value > RESPONSE_REWRITE_MAX_PATTERN then
+                return nil, label .. "条件的值不能超过 " .. RESPONSE_REWRITE_MAX_PATTERN .. " 字符", 422
+            end
+            if cond_value:find("%c") then
+                return nil, label .. "条件的值不能包含控制字符", 422
+            end
+            if op == "regex" then
+                -- 与 APISIX 的 ~\\.js$ 习惯对齐：允许 /re/ 包裹，规范化时剥掉。
+                local wrapped = cond_value:match("^/(.*)/$")
+                if wrapped ~= nil then cond_value = wrapped end
+                if cond_value == "" then
+                    return nil, label .. "条件的正则不能为空", 422
+                end
+                local _, _, compile_err = ngx.re.find("authz-probe", cond_value, "jo")
+                if compile_err then
+                    return nil, label .. "条件正则不合法: " .. tostring(compile_err), 422
+                end
+            end
+        end
+        out[#out + 1] = {
+            field = field,
+            name = name ~= "" and name or nil,
+            op = op,
+            value = cond_value ~= "" and cond_value or nil,
+            negate = item.negate == true or item.negate == 1,
+        }
+    end
+    if #out > RESPONSE_REWRITE_MAX_CONDITIONS then
+        return nil, label .. "条件不能超过 " .. RESPONSE_REWRITE_MAX_CONDITIONS .. " 条", 422
+    end
+    if #out == 0 then return nil end
+    return { logic = logic, match = out }
+end
+
 normalize_rewrites = function(value)
     if value == nil or value == cjson.null then return {} end
     if type(value) ~= "table" then return nil, "响应改写 body 规则必须是数组" end
@@ -529,6 +651,7 @@ end
 local RESPONSE_REWRITE_FIELDS = {
     enabled = true, status = true, headers = true, remove_headers = true,
     body = true, body_base64 = true, content_type = true, rewrites = true,
+    conditions = true,
 }
 
 valid_content_type = function(value)
@@ -622,6 +745,12 @@ function _M.normalize_response_rewrite(value)
 
     local rewrites, rewrite_err = normalize_rewrites(config.rewrites)
     if not rewrites then return nil, rewrite_err, 422 end
+    -- 条件匹配：整条规则的开关（对齐 APISIX route vars，但字段收敛为白名单）。
+    local conditions, conditions_err, conditions_status =
+        _M.normalize_conditions(config.conditions, "响应改写")
+    if conditions_err then
+        return nil, conditions_err, conditions_status or 422
+    end
     -- 对齐 APISIX：body（整体替换）与 rewrites（正文过滤）互斥，二者语义冲突。
     if body_text ~= nil and #rewrites > 0 then
         return nil, "响应改写 body 与 rewrites 不能同时使用", 422
@@ -644,6 +773,7 @@ function _M.normalize_response_rewrite(value)
         out.content_type = content_type
     end
     if #rewrites > 0 then out.rewrites = rewrites end
+    if conditions then out.conditions = conditions end
     local encoded = cjson.encode(out)
     if not encoded then return nil, "响应改写配置编码失败", 422 end
     if #encoded > RESPONSE_REWRITE_MAX_JSON then return nil, "响应改写配置过大", 422 end

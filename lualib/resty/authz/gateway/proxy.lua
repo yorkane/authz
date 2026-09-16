@@ -29,17 +29,25 @@ local function upstream_cookie()
     return table.concat(filtered, "; ")
 end
 
--- 请求改写是否显式设置了某个请求头（大小写不敏感）。用于判断网关自动
--- 声明（如正文改写的 Accept-Encoding: identity）是否应让位于用户配置。
-local function request_sets_header(binding, lower_name)
+-- 发往上游的 Accept-Encoding。正文改写需要未压缩字节（上游一压缩就无法做文本
+-- 替换，网关只会跳过并标记 skipped=encoded），所以配了正文改写就声明 identity；
+-- 「改写请求」里显式写了该头时以显式值为准，便于上游必须压缩的场景自行权衡。
+-- 带条件匹配的正文改写只可能命中部分响应：条件里凡是请求期就能判定的字段
+-- 明确不命中时（见 rewrite.body_rewrite_applies），保留客户端的压缩协商，
+-- 不必让所有上游都退化成明文。
+local function upstream_accept_encoding(binding)
     local rr = binding and binding.request_rewrite
-    for _, header in ipairs(rr and rr.headers or {}) do
-        if tostring(header.name or ""):lower() == lower_name then return true end
+    for _, source in ipairs({ rr and rr.headers or {}, rr and rr.append_headers or {} }) do
+        for _, header in ipairs(source) do
+            if tostring(header.name or ""):lower() == "accept-encoding" then
+                return tostring(header.value or "")
+            end
+        end
     end
-    for _, header in ipairs(rr and rr.append_headers or {}) do
-        if tostring(header.name or ""):lower() == lower_name then return true end
+    if rewrite.body_rewrite_applies(binding and binding.response_rewrite) then
+        return "identity"
     end
-    return false
+    return tostring(ngx.var.http_accept_encoding or "")
 end
 
 -- 追加（append_headers，参考 APISIX 的 $Header 前缀语义）：
@@ -181,14 +189,10 @@ local function apply_headers(binding, target_ip, port)
             end
         end
     end
-    -- 正文改写只能在未压缩的字节上进行：上游看到 Accept-Encoding 就会自行压缩，
-    -- 压缩字节无法做文本替换（网关会跳过并标记 skipped=encoded）。因此当绑定
-    -- 配置了正文改写时，向上游声明不接受压缩；「改写请求」里显式写了
-    -- Accept-Encoding 时以其为准，便于上游必须压缩的特殊场景自行权衡。
-    if rewrite.writes_body(binding.response_rewrite)
-        and not request_sets_header(binding, "accept-encoding") then
-        ngx.req.set_header("Accept-Encoding", "identity")
-    end
+    -- 上游用的 Accept-Encoding 单独走变量（见 upstream_accept_encoding 与
+    -- server.conf 里的 proxy_set_header Accept-Encoding），绝不写请求头表：
+    -- nginx 的 gzip 模块按同一张表判定下游压缩，写进去会连带丢掉网关压缩。
+    ngx.var.authz_accept_encoding = upstream_accept_encoding(binding)
 end
 
 -- nginx hands proxy_pass the *decoded* request path (ngx.var.uri).  Raw

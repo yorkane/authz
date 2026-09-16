@@ -142,11 +142,11 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>   # 所有共享实例必须一
 
 ```bash
 cd /data/app/authz-test
-OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh   # 基线 882 项
+OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh   # 基线 998 项
 AUTHZ_API_KEY=... bash testcase/ui_api_tests.sh                     # 控制面 41 项
 ```
 
-结果判读：必须出现 All 882 authz gateway checks passed.。
+结果判读：必须出现 All 998 authz gateway checks passed.。
 出现 FAIL 先别当成偶发，用 git stash 跑一次纯净基线对比，确认是改动引入还是环境问题
 （曾出现过测试 fixture 用退役角色导致实例起不来的真实回归）。
 

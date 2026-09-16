@@ -242,6 +242,8 @@ docker exec <container_name> admin_password_reset
 - Dockerfile 使用 Buildx 多阶段构建，默认 `RESTY_J=8`；源码下载和编译层必须保持可缓存，容器内不配置代理。
 - `ngx_brotli` 静态编译进 OpenResty；动态 Brotli/Gzip 默认等级均为 5，Admin 静态资源在镜像构建时使用 Brotli
   等级 11 预压缩，并通过 `brotli_static on` 提供。
+- 公共代理响应默认压缩（`gzip_proxied any`，判据是请求是否带 `Via`），且网关不注入 `Cache-Control`：
+  缓存策略由上游决定，浏览器缓存可正常工作；`text/event-stream` 保持不压缩以维持流式语义。
 - Compose 的 `/data`、`admin/`、`lualib/` 和运行时 `conf/` 模板挂载路径必须与镜像约定一致，避免镜像和开发挂载行为不一致。
 
 ### 数据持久化
@@ -270,8 +272,8 @@ OPENRESTY_TEST_IMAGE=ghcr.io/yorkane/authz:latest bash test/test_shared_session.
 bash test/run_tests.sh ghcr.io/yorkane/authz:latest
 ```
 
-回归重点包括：SSI 菜单组装、Brotli/Gzip 静态资源、JSON 错误响应、CSRF、OAuth/PKCE、多来源同名身份、
-远程角色覆盖、启用状态、动态端口策略及 Router 注册错误处理。
+回归重点包括：SSI 菜单组装、Brotli/Gzip 静态资源、代理压缩与缓存头透传、JSON 错误响应、CSRF、
+OAuth/PKCE、多来源同名身份、远程角色覆盖、启用状态、动态端口策略及 Router 注册错误处理。
 
 ## NocoBase 与 OAuth 身份记录
 

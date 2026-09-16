@@ -451,7 +451,7 @@ bash test/run_tests.sh authz:latest
 | `test/test_shared_session.sh` | 共享会话 (Redis 单写多读、ACL、故障关闭) |
 | `test/run_tests.sh` | 镜像基础库、WebDAV、FancyIndex、JWT/旧 SSO 兼容 |
 
-截至本文更新，最近基线为 Router 99、Authz 882（含实例级 Key、guest 套件与
+截至本文更新，最近基线为 Router 99、Authz 998（含实例级 Key、guest 套件与
 TEST_ONLY/KEEP_GOING 分诊）、共享会话 29、基础镜像 17。数量不是固定契约；
 任何行为变更必须增加或调整能验证真实 HTTP 结果的断言。
 
@@ -556,6 +556,12 @@ bash scripts/restart_gateway.sh --build  # 按当前 Docker 架构重建镜像�
   host-only、旧子域和旧宽域作用域。当前实例规范域为 `.ws.example.com`。
 - `/_authz/apps/` 静态资源默认启用 Brotli/Gzip，Brotli 动态等级 5、Gzip 等级 5；镜像构建为普通资源生成 Brotli 等级 11 的 `.br` 侧车文件，并通过 `brotli_static on` 优先提供。含 SSI 菜单入口的 `admin/index.html` 必须排除 `.br` 生成，否则 Brotli 请求会绕过 SSI 过滤器，导致登录后左侧菜单消失。
 - Admin 入口启用 SSI；`index.html`、`users.html`、`authorization.html` 在页面内声明 `no-cache/no-store`，HTTP 响应不再添加这两个缓存控制头；普通静态资源通过 `expires max` 输出长期缓存头。
+- 公共代理响应默认压缩且**不注入任何缓存控制头**：`Cache-Control`、`ETag`、`Last-Modified` 由上游决定，网关只透传，终端因此可以正常启用浏览器缓存。防回归点：
+  1. `gzip_proxied` 必须显式写成 `any`。默认值 `off` 的判据是请求是否带 `Via`（不是 `X-Forwarded-For`），而 ngx_brotli 没有这层门控；保持默认会让经 SLB/边缘 nginx（带 `Via` 转发）进来的请求拿到未压缩正文，同一条链上 Gzip 与 Brotli 行为不一致。已在目标镜像实测：带 `Via` 时 gzip 完全不生效，写 `any` 之后恢复。
+  2. `text/event-stream` 绝不能进 `gzip_types`/`brotli_types`：压缩器会攒住事件，SSE 的逐块语义失效；流式响应靠 `X-Accel-Buffering: no` 声明下游不缓冲。
+  3. 正文改写（`response_rewrite`）除撤 `Content-Length` 外必须撤 `ETag` 与 `Last-Modified`（见 `gateway.rewrite.header_filter`）。正文已变而校验器仍是上游旧指纹时，浏览器条件请求命中 304，把未改写的上游正文当成最新内容。gzip 会把强校验器弱化成 `W/"..."`，断言按弱化形式写。
+  4. 给上游的 `Accept-Encoding: identity` 必须走独立变量（`$authz_accept_encoding` + `proxy_set_header`），不能用 `ngx.req.set_header`。nginx 的 gzip 模块按**同一张请求头表**判定是否压缩下游响应，写进表里会让所有配了正文改写的绑定整体丢掉网关压缩（实测：改写响应从 77 字节gzip 退回 743 字节明文）。
+  5. `response_rewrite.conditions`（对齐 APISIX route vars 的条件匹配）在 header_filter 阶段对整条规则求值：URI 用含查询串的 `$request_uri`，`content_type` 条件只比媒体类型本体；不命中即整条规则（状态码/头/正文）完全不介入，也不打 `X-Authz-Rewrite` 标记。代理阶段向上游声明 `identity` 前要先过 `body_rewrite_applies`：条件里凡是请求期可判定的字段明确不命中时保留客户端压缩协商。注意 Lua local 可见性：`request_phase_match` 必须定义在 `condition_matches` 之后，否则运行期 attempt to call a nil value。
 - Dockerfile 使用 Buildx 多阶段构建，`RESTY_J` 默认 8；源码下载单独缓存，GitHub Actions 使用 GHA cache。不要退回 `DOCKER_BUILDKIT=0`。
 - 发布或部署镜像时优先使用 GitHub Actions 推送到 GHCR 的镜像；只有调试 Dockerfile、验证未发布改动或 CI 不可用时才本地构建。
 - Docker Desktop for Mac 必须开启 Host Networking；否则容器内的 `127.0.0.1` 不代表宿主机端口，自动发现和代理测试都会产生误导性结果。

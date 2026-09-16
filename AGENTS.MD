@@ -44,7 +44,7 @@ TEST_ONLY=guest,envkey OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_ga
 ```
 
 - 三组脚本都占随机端口并起常驻 mock，**必须串行**；不要在脚本里用裸 `wait`。
-- 行为变更必须同步增改真实 HTTP 断言。最近基线：Router 99、Authz 882、共享会话 29。
+- 行为变更必须同步增改真实 HTTP 断言。最近基线：Router 99、Authz 998、共享会话 29。
 - 所有回归测试一律在 241.t 上跑；**除非用户明确要求，不向本机生产实例部署新代码或镜像**。
 
 ### 241.t 测试实例（共享会话 reader）

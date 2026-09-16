@@ -27,9 +27,11 @@ http {
         application/javascript
         application/json
         application/manifest+json
+        application/xhtml+xml
         application/xml
         image/svg+xml
         text/css
+        text/csv
         text/javascript
         text/plain
         text/xml;
@@ -37,13 +39,24 @@ http {
     gzip_comp_level 5;
     gzip_vary on;
     gzip_min_length 256;
+    # 代理响应默认也要压缩：gzip_proxied 默认 off 的判据是请求是否带 Via 头
+    # （不是 X-Forwarded-For），而 Brotli 没有这层门控。于是经 SLB/边缘 nginx
+    # （带 Via 转发）进来的请求会拿到未压缩正文，同一条链上 Gzip 与 Brotli
+    # 行为不一致。已在目标镜像实测：带 Via 时 gzip 完全不生效，去掉门控后恢复。
+    # 客户端声明支持 gzip 就一定压，与上游是否压缩无关：正文改写需要上游返回
+    # 未压缩字节，proxy 用独立变量把 Accept-Encoding: identity 只发给上游
+    # （见 gateway.proxy.upstream_accept_encoding），客户端的协商能力保持原样。
+    # text/event-stream 不在下面两个 types 列表里：压缩器会攒住事件，流式语义失效。
+    gzip_proxied any;
     gzip_types
         application/javascript
         application/json
         application/manifest+json
+        application/xhtml+xml
         application/xml
         image/svg+xml
         text/css
+        text/csv
         text/javascript
         text/plain
         text/xml;

@@ -178,6 +178,11 @@ location / {
     set $authz_forwarded "";
     set $authz_upstream_ssl_name "";
     set $authz_upstream_cookie "";
+    # 发给上游的 Accept-Encoding 独立成变量：正文改写需要上游返回未压缩字节，
+    # 但若用 ngx.req.set_header 直接改请求头表，nginx 的 gzip 模块会按同一个
+    # 值判定「客户端不要压缩」，于是配了改写的绑定整体丢掉网关压缩。变量只影响
+    # 上游请求，客户端声明保持原样。
+    set $authz_accept_encoding $http_accept_encoding;
     access_by_lua_block {
         require("resty.authz").access()
     }
@@ -205,6 +210,7 @@ location / {
     proxy_set_header Forwarded         $authz_forwarded;
     proxy_set_header Upgrade           $authz_upgrade;
     proxy_set_header Connection        $authz_connection;
+    proxy_set_header Accept-Encoding   $authz_accept_encoding;
     proxy_buffering off;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
@@ -255,6 +261,7 @@ location @authz_proxy_insecure {
     proxy_set_header Forwarded         $authz_forwarded;
     proxy_set_header Upgrade           $authz_upgrade;
     proxy_set_header Connection        $authz_connection;
+    proxy_set_header Accept-Encoding   $authz_accept_encoding;
     proxy_buffering off;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
