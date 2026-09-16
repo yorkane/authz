@@ -820,6 +820,20 @@ assert_contains_all "i18n exposes menu group labels and hints" "$BODY" \
     "Discovered local HTTP ports (no domain binding)" \
     "systemApps: '系统应用'" \
     "menuEditor: '菜单编辑'"
+assert_contains_all "i18n describes preview media gestures" "$BODY" \
+    "playPause: '点击画面播放 / 暂停，左右滑动切换文件'" \
+    "Tap to play / pause, swipe left or right"
+request GET "$ADMIN_HOST" '/_authz/apps/files.html' "$ADMIN_COOKIE"
+assert_contains_all "preview area binds tap and swipe gesture handlers" "$BODY" \
+    "@click=\"onPreviewClick\"" \
+    "@touchstart=\"onPreviewTouchStart\"" \
+    "@touchend=\"onPreviewTouchEnd\"" \
+    "if (kind === 'image') { previewOpen.value = false; return }" \
+    "toggleMedia(event.currentTarget)" \
+    "stepPreview(dx < 0 ? 1 : -1)" \
+    "if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.6) return" \
+    "if (state.target.tagName === 'AUDIO') return" \
+    "inControlZone"
 request GET "$ADMIN_HOST" '/_authz/apps/menu-editor.html' "$ADMIN_COOKIE"
 assert_contains_all "menu editor renders service entries with edit and reset" "$BODY" \
     "window.adminApi.menuServices()" \

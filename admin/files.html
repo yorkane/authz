@@ -9,7 +9,7 @@
   <title>Files</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
   <link rel="stylesheet" href="./app-page.css?v=15">
-  <link rel="stylesheet" href="./files.css?v=6">
+  <link rel="stylesheet" href="./files.css?v=7">
 </head>
 <body>
   <div id="q-app">
@@ -170,9 +170,14 @@
             </div>
           </q-card-section>
           <q-card-section class="files-preview-body">
-            <img v-if="previewKind === 'image'" :src="fileUrl(previewItem)" alt="" class="preview-image">
-            <video v-else-if="previewKind === 'video'" :src="fileUrl(previewItem)" controls autoplay preload="metadata" class="preview-media"></video>
-            <div v-else-if="previewKind === 'audio'" class="preview-audio-wrap"><q-icon name="mdi-music-circle-outline" size="84px"></q-icon><audio :src="fileUrl(previewItem)" controls preload="metadata" class="preview-audio"></audio></div>
+            <!-- 预览区触屏语义见 onPreviewClick / onPreviewTouchEnd：图片点开即关，视频音频
+                 点画面切播放暂停（原生控件条留给进度条/音量），媒体上横向滑动切上一/下一个。 -->
+            <img v-if="previewKind === 'image'" :src="fileUrl(previewItem)" alt="" class="preview-image" :title="t.close"
+              @click="onPreviewClick" @touchstart="onPreviewTouchStart" @touchend="onPreviewTouchEnd">
+            <video v-else-if="previewKind === 'video'" :src="fileUrl(previewItem)" controls autoplay preload="metadata" class="preview-media"
+              @click="onPreviewClick" @touchstart="onPreviewTouchStart" @touchend="onPreviewTouchEnd"></video>
+            <div v-else-if="previewKind === 'audio'" class="preview-audio-wrap" :title="t.playPause"
+              @click="onPreviewClick" @touchstart="onPreviewTouchStart" @touchend="onPreviewTouchEnd"><q-icon name="mdi-music-circle-outline" size="84px"></q-icon><audio :src="fileUrl(previewItem)" controls preload="metadata" class="preview-audio"></audio></div>
             <iframe v-else-if="previewKind === 'html'" :src="fileUrl(previewItem)" class="preview-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
             <div v-else-if="previewKind === 'text'" class="preview-text-wrap"><pre v-if="previewText !== null">{{ previewText }}</pre><q-spinner v-else size="34px"></q-spinner></div>
             <div v-else class="preview-none">
@@ -187,7 +192,7 @@
   </div>
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./i18n.js?v=41"></script>
+  <script src="./i18n.js?v=42"></script>
   <script src="./api.js?v=19"></script>
   <script>
     const { createApp, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } = Vue
@@ -312,6 +317,72 @@
           scrollFocusIntoView()
         }
         const focused = computed(() => shown.value[focusIndex.value] || null)
+
+        // 预览区手势：图片沿用 light-box 习惯（点图即关）；视频/音频点画面切播放/暂停，
+        // 但底部原生控件条（进度条、音量）内的点击让给控件本身；媒体上横向滑动切上一/下一个，
+        // 音频控件与视频控件条内的横向拖拽留给原生 seek。
+        const CONTROL_STRIP = 72
+        let swipeState = null
+        let tapGuarded = false
+
+        function inControlZone (el, y) {
+          if (!el || !el.getBoundingClientRect) return false
+          return y > el.getBoundingClientRect().bottom - CONTROL_STRIP
+        }
+
+        function mediaOf (el) {
+          if (!el) return null
+          if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') return el
+          return el.querySelector('video, audio')
+        }
+
+        function toggleMedia (el) {
+          const media = mediaOf(el)
+          if (!media) return
+          if (media.paused) {
+            const result = media.play()
+            if (result && typeof result.catch === 'function') result.catch(() => {})
+          } else {
+            media.pause()
+          }
+        }
+
+        function onPreviewClick (event) {
+          if (tapGuarded) return
+          const kind = previewKind.value
+          if (kind === 'image') { previewOpen.value = false; return }
+          if (kind !== 'video' && kind !== 'audio') return
+          if (event.target.tagName === 'AUDIO') return
+          if (kind === 'video' && inControlZone(event.currentTarget, event.clientY)) return
+          toggleMedia(event.currentTarget)
+        }
+
+        function onPreviewTouchStart (event) {
+          const touch = event.touches && event.touches[0]
+          swipeState = touch
+            ? { x: touch.clientX, y: touch.clientY, target: event.target, el: event.currentTarget }
+            : null
+        }
+
+        function onPreviewTouchEnd (event) {
+          const state = swipeState
+          swipeState = null
+          if (!state) return
+          const touch = event.changedTouches && event.changedTouches[0]
+          if (!touch) return
+          const dx = touch.clientX - state.x
+          const dy = touch.clientY - state.y
+          // 只认明显的横向滑动：位移够长且明显比纵向占优，否则留给原生滚动/拖拽。
+          if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.6) return
+          if (previewCount.value < 2) return
+          if (state.target.tagName === 'AUDIO') return
+          if (previewKind.value === 'video' && inControlZone(state.el, state.y)) return
+          // 滑动落地后浏览器还会补一个 click（图片会被误判成“点击关闭”），这里吃掉它。
+          tapGuarded = true
+          setTimeout(() => { tapGuarded = false }, 500)
+          event.preventDefault()
+          stepPreview(dx < 0 ? 1 : -1)
+        }
 
         function sizeText (bytes) {
           if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GiB'
@@ -737,7 +808,7 @@
           window.removeEventListener('keydown', handleKeydown)
         })
 
-        return { broken, colorOf, confirmRemove, confirmRename, crumbs, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, isTouch, kindOf, loading, load, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
+        return { broken, colorOf, confirmRemove, confirmRename, crumbs, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, isTouch, kindOf, loading, load, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, onPreviewClick, onPreviewTouchEnd, onPreviewTouchStart, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
       }
     })
 
