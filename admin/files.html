@@ -9,7 +9,7 @@
   <title>Files</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
   <link rel="stylesheet" href="./app-page.css?v=15">
-  <link rel="stylesheet" href="./files.css?v=3">
+  <link rel="stylesheet" href="./files.css?v=5">
 </head>
 <body>
   <div id="q-app">
@@ -155,15 +155,19 @@
       <!-- 预览对话框（网格/列表模式） -->
       <q-dialog v-model="previewOpen" maximized>
         <q-card class="files-preview-card">
-          <q-card-section class="row items-center q-pb-none">
-            <div class="text-h6"><q-icon :name="iconOf(previewItem)" :color="colorOf(previewItem)" class="q-mr-sm"></q-icon>{{ previewItem ? previewItem.name : '' }}</div>
+          <!-- 触屏没有 Esc，头部必须永远容得下关闭键：标题可截断、动作组在触屏/窄屏
+               下收缩为纯图标（见 files.css），关闭键在触屏下用实心高亮确保显眼可达。 -->
+          <q-card-section class="row items-center q-pb-none preview-head">
+            <div class="text-h6 preview-title ellipsis"><q-icon :name="iconOf(previewItem)" :color="colorOf(previewItem)" class="q-mr-sm"></q-icon>{{ previewItem ? previewItem.name : '' }}</div>
             <span v-if="previewCount > 1" class="text-caption q-ml-sm preview-counter">{{ previewPosition }} / {{ previewCount }}</span>
             <q-space></q-space>
-            <q-btn v-if="previewPosition > 1" flat dense round icon="mdi-chevron-left" :aria-label="t.prevFile" @click="stepPreview(-1)"></q-btn>
-            <q-btn v-if="previewPosition < previewCount" flat dense round icon="mdi-chevron-right" :aria-label="t.nextFile" @click="stepPreview(1)"></q-btn>
-            <q-btn v-if="previewItem" flat dense no-caps icon="mdi-open-in-new" :label="t.openInTab" @click="openInTab(previewItem)"></q-btn>
-            <q-btn v-if="previewItem && previewItem.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(previewItem)"></q-btn>
-            <q-btn flat dense round icon="mdi-close" :aria-label="t.close" @click="previewOpen = false"></q-btn>
+            <div class="preview-actions">
+              <q-btn v-if="previewPosition > 1" flat dense round icon="mdi-chevron-left" :aria-label="t.prevFile" @click="stepPreview(-1)"></q-btn>
+              <q-btn v-if="previewPosition < previewCount" flat dense round icon="mdi-chevron-right" :aria-label="t.nextFile" @click="stepPreview(1)"></q-btn>
+              <q-btn v-if="previewItem" flat dense no-caps icon="mdi-open-in-new" :label="isTouch ? '' : t.openInTab" :aria-label="t.openInTab" @click="openInTab(previewItem)"></q-btn>
+              <q-btn v-if="previewItem && previewItem.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="isTouch ? '' : t.download" :aria-label="t.download" @click="download(previewItem)"></q-btn>
+              <q-btn dense round icon="mdi-close" color="primary" :flat="!isTouch" :unelevated="isTouch" :aria-label="t.close" @click="previewOpen = false"></q-btn>
+            </div>
           </q-card-section>
           <q-card-section class="files-preview-body">
             <img v-if="previewKind === 'image'" :src="fileUrl(previewItem)" alt="" class="preview-image">
@@ -733,7 +737,7 @@
           window.removeEventListener('keydown', handleKeydown)
         })
 
-        return { broken, colorOf, confirmRemove, confirmRename, crumbs, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, kindOf, loading, load, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
+        return { broken, colorOf, confirmRemove, confirmRename, crumbs, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, isTouch, kindOf, loading, load, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
       }
     })
 

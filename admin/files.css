@@ -99,8 +99,19 @@
 .files-page-size { width: 110px; }
 
 /* ── 预览对话框 ───────────────────────────────────────── */
-.files-preview-card { display: flex; flex-direction: column; height: 100%; background: #14171c; }
+.files-preview-card { display: flex; flex-direction: column; height: 100%; background: #14171c; position: relative; }
 .files-preview-body { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; overflow: auto; }
+/* 预览头部：标题吃掉剩余宽度并截断，动作组靠右且不收缩，保证关闭键任何屏宽都可见。 */
+.preview-head { gap: 4px; }
+.preview-title { min-width: 0; flex: 1 1 auto; }
+.preview-actions { display: flex; align-items: center; flex: 0 0 auto; }
+/* 触屏/窄屏：按钮只留图标并收紧间距，保证头部（含关闭键）在任何屏宽都放得下；
+   关闭键由模板里的实心高亮样式凸显。 */
+@media (max-width: 720px), (pointer: coarse) {
+  .preview-head { gap: 0; }
+  .preview-actions .q-btn { margin-left: 2px; min-width: 36px; }
+  .preview-counter { display: none; }
+}
 .preview-image { max-width: 100%; max-height: 100%; object-fit: contain; }
 .preview-media { width: min(100%, 1100px); max-height: 100%; }
 .preview-audio-wrap { display: flex; flex-direction: column; align-items: center; gap: 18px; color: rgba(255, 255, 255, 0.5); }
