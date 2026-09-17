@@ -153,7 +153,8 @@
         </q-card>
       </q-dialog>
 
-      <q-dialog v-model="renameOpen" persistent>
+      <!-- 非 persistent：重命名同样支持 ESC / 点击遮罩取消 -->
+      <q-dialog v-model="renameOpen">
         <q-card class="files-dialog-card">
           <q-card-section class="text-h6">{{ t.renameTitle }}</q-card-section>
           <q-card-section>
