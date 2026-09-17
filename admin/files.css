@@ -56,6 +56,11 @@
 .files-row:hover .col-action .q-btn, .files-row.files-focused .col-action .q-btn { opacity: .85; }
 .files-item-menu { min-width: 168px; }
 .files-item-menu .menu-danger { color: #ef5350; }
+/* 网格卡片右上角的删除按钮：默认藏起来，悬停或键盘焦点时出现，避免误触。 */
+.files-card { position: relative; }
+.card-delete-btn { position: absolute; top: 4px; right: 4px; z-index: 2; opacity: 0; transition: opacity .15s ease; }
+.files-card:hover .card-delete-btn, .files-card.files-focused .card-delete-btn { opacity: 1; }
+@media (pointer: coarse) { .card-delete-btn { opacity: 1; } }
 .files-row:nth-child(even) { background: rgba(255, 255, 255, 0.03); }
 .files-row:hover { background: rgba(255, 255, 255, 0.07); }
 .files-row-head { font-weight: 600; background: rgba(255, 255, 255, 0.06); cursor: default; }

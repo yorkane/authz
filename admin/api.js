@@ -149,6 +149,7 @@ window.adminApi = {
   menuServices: () => request('/menu-services'),
   files: path => request('/files?path=' + encodeURIComponent(path || '')),
   uploadFiles,
+  mkdirFile: values => mutation('POST', '/files/mkdir', values),
   renameFile: values => mutation('PUT', '/files/rename', values),
   removeFile: values => mutation('DELETE', '/files/remove', values),
   nginxConf: () => request('/nginx-conf'),

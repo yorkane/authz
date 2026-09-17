@@ -886,7 +886,8 @@ lualib/tracker/
 - API Key：`GET|POST /_authz/api/api-keys`、`PATCH|DELETE /_authz/api/api-keys/:id`
 - 文件管理（admin + 浏览器会话 + CSRF；机器 Key 一律拒绝）：
   `GET /_authz/api/files`（列表）、`POST /_authz/api/files/upload`（multipart，
-  `?path=&overwrite=1`）、`PUT /_authz/api/files/rename`、`DELETE /_authz/api/files/remove`
+  `?path=&overwrite=1`，成功 201）、`POST /_authz/api/files/mkdir`（新建单层目录，成功 201）、
+  `PUT /_authz/api/files/rename`（文件与目录通用）、`DELETE /_authz/api/files/remove`
   （目录非空需 `recursive:true`）。写路径锁定 `AUTHZ_FILES_ROOT`：逐级真实目录、
   符号链接一律拒绝；部署需可写 `FILES_DIR` 卷
 - Guest 诊断页：`GET /_authz/guest`（匿名即可访问；guest/admin 的 Key 与会话同样可用；加 `?json=1` 返回 JSON）

@@ -192,6 +192,23 @@ function _M.rename(root, rel, old_name, new_name)
     return { message = "已重命名", name = new }
 end
 
+-- 新建单层目录。目录名与文件同规则校验（禁止分隔符/.. /控制字符），目标已存在 409。
+function _M.mkdir(root, rel, name)
+    local dir, err, status = _M.resolve_dir(root, rel)
+    if not dir then return nil, err, status end
+    local target = _M.validate_name(name)
+    if not target then
+        return nil, "名称不能为空且不能包含路径分隔符或控制字符", 422
+    end
+    local lfs = lfs_mod()
+    local to = dir .. "/" .. target
+    if lfs.symlinkattributes(to) then return nil, "同名文件或目录已存在", 409 end
+    local ok, mk_err = lfs.mkdir(to)
+    if not ok then return nil, "创建目录失败: " .. tostring(mk_err), 500 end
+    return { message = "已创建目录", name = target }
+end
+
+
 local function delete_tree(lfs, path, recursive)
     local attr = lfs.symlinkattributes(path)
     if not attr then return nil, "文件或目录不存在", 404 end

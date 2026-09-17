@@ -28,6 +28,7 @@
           <q-btn-toggle v-model="viewMode" dense unelevated no-caps :options="viewOptions" toggle-class="files-toggle-active"></q-btn-toggle>
           <q-btn dense unelevated round :icon="sortDesc ? 'mdi-sort-descending' : 'mdi-sort-ascending'" :title="t.sortOrder" @click="toggleSortOrder"></q-btn>
           <q-btn dense unelevated round icon="mdi-refresh" :title="t.refresh" @click="load"></q-btn>
+          <q-btn dense unelevated no-caps icon="mdi-create-folder-outline" :label="t.newFolder" @click="startMkdir"></q-btn>
           <q-btn dense unelevated no-caps icon="mdi-upload" color="primary" :label="t.upload" :loading="uploading" @click="pickFiles"></q-btn>
           <input ref="fileInput" type="file" multiple class="files-upload-input" @change="onPickFiles">
         </div>
@@ -65,6 +66,8 @@
       <div v-if="viewMode === 'grid'" ref="grid" class="files-grid">
         <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-card" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
              @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)" @contextmenu.prevent="download(item)">
+          <q-btn class="card-delete-btn" flat dense round size="sm" icon="mdi-trash-can-outline" color="negative"
+            :aria-label="t.delete" @click.stop="askRemove(item)"></q-btn>
           <div class="files-thumb">
             <img v-if="kindOf(item) === 'image'" :src="fileUrl(item)" loading="lazy" decoding="async" alt="" @error="broken[idx] = true" v-show="!broken[idx]">
             <q-icon v-else :name="iconOf(item)" :color="colorOf(item)" :size="item.type === 'dir' ? '44px' : '38px'"></q-icon>
@@ -87,6 +90,7 @@
             <span class="col-size">{{ item.type === 'dir' ? '-' : sizeText(item.size) }}</span>
             <span class="col-date">{{ dateText(item.mtime) }}</span>
             <span class="col-action">
+              <q-btn flat dense round size="sm" icon="mdi-trash-can-outline" color="negative" :aria-label="t.delete" @click.stop="askRemove(item)"></q-btn>
               <q-btn flat dense round size="sm" icon="mdi-dots-vertical" :aria-label="t.actions" @click.stop>
                 <q-menu auto-close>
                   <q-list dense class="files-item-menu">
@@ -135,6 +139,17 @@
       <div class="files-kbd-hint">{{ t.kbdHint }}</div>
 
       <!-- 重命名 / 删除确认 -->
+      <q-dialog v-model="mkdirOpen" persistent>
+        <q-card class="files-dialog-card">
+          <q-card-section class="text-h6">{{ t.newFolderTitle }}</q-card-section>
+          <q-card-section>
+            <div class="files-dialog-path">{{ path === '' ? t.root : path }}</div>
+            <q-input v-model.trim="mkdirForm.name" dark dense outlined autofocus :label="t.newName" :hint="t.newNameHint" @keyup.enter="confirmMkdir"></q-input>
+          </q-card-section>
+          <q-card-actions align="right"><q-btn flat dense no-caps :label="t.cancel" v-close-popup></q-btn><q-btn unelevated dense no-caps :label="t.confirm" color="primary" :loading="mutating" @click="confirmMkdir"></q-btn></q-card-actions>
+        </q-card>
+      </q-dialog>
+
       <q-dialog v-model="renameOpen" persistent>
         <q-card class="files-dialog-card">
           <q-card-section class="text-h6">{{ t.renameTitle }}</q-card-section>
@@ -201,8 +216,8 @@
   </div>
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./i18n.js?v=42"></script>
-  <script src="./api.js?v=19"></script>
+  <script src="./i18n.js?v=43"></script>
+  <script src="./api.js?v=20"></script>
   <script>
     const { createApp, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } = Vue
 
@@ -623,6 +638,8 @@
         const mutating = ref(false)
         const renameOpen = ref(false)
         const renameForm = reactive({ path: '', name: '', new_name: '' })
+        const mkdirOpen = ref(false)
+        const mkdirForm = reactive({ name: '' })
         const removeOpen = ref(false)
         const removeForm = reactive({ path: '', name: '', type: 'file', recursive: false })
 
@@ -709,6 +726,28 @@
           Object.assign(renameForm, { path: path.value, name: item.name, new_name: item.name })
           renameOpen.value = true
         }
+
+        function startMkdir () {
+          mkdirForm.name = ''
+          mkdirOpen.value = true
+        }
+
+        async function confirmMkdir () {
+          const name = mkdirForm.name.trim()
+          if (!name) return
+          mutating.value = true
+          try {
+            await window.adminApi.mkdirFile({ _csrf: csrf.value, path: path.value, name })
+            mkdirOpen.value = false
+            notify(t.value.created, 'positive')
+            await load()
+          } catch (err) {
+            notify(err.message || String(err), 'negative')
+          } finally {
+            mutating.value = false
+          }
+        }
+
 
         async function confirmRename () {
           const next = renameForm.new_name.trim()
@@ -802,6 +841,10 @@
             case 'Backspace':
               if (path.value !== '') navigate(path.value.split('/').slice(0, -1).join('/'))
               break
+            case 'Delete':
+              // 删除当前焦点项（与列表行删除按钮同一确认对话框，目录需勾选递归）。
+              if (focused.value) askRemove(focused.value)
+              break
             case 'g': viewMode.value = 'grid'; break
             case 'l': viewMode.value = 'list'; break
             case 'p': if (viewMode.value === 'list') previewPanelOpen.value = !previewPanelOpen.value; break
@@ -862,7 +905,7 @@
           window.removeEventListener('drop', onWindowDrop)
         })
 
-        return { broken, colorOf, confirmRemove, confirmRename, crumbs, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, isTouch, kindOf, loading, load, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, onPreviewClick, onPreviewTouchEnd, onPreviewTouchStart, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
+        return { broken, colorOf, confirmRemove, confirmRename, crumbs, startMkdir, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, confirmMkdir, iconOf, isTouch, kindOf, loading, load, mkdirForm, mkdirOpen, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, onPreviewClick, onPreviewTouchEnd, onPreviewTouchStart, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
       }
     })
 

@@ -3061,9 +3061,32 @@ assert_eq "upload into a subdirectory works" "$STATUS" "201"
 [[ -f "$FM_DIR/sub/deep.txt" ]] \
     && pass "subdirectory upload landed in place" || fail "subdirectory upload missing"
 
+
+# 新建目录：成功后可在宿主侧看到；同名 409、非法名 422、缺 CSRF 403。
+request POST "$ADMIN_HOST" /_authz/api/files/mkdir "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"new-dir"}'
+assert_eq "mkdir succeeds" "$STATUS" "201"
+[[ -d "$FM_DIR/new-dir" ]] \
+    && pass "mkdir created the directory on disk" || fail "mkdir missing on disk"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=fm-test" "$ADMIN_COOKIE"
+assert_json "mkdir shows up in the listing" '[.data.items[] | select(.name == "new-dir" and .type == "dir")] | length' "1"
+request POST "$ADMIN_HOST" /_authz/api/files/mkdir "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"new-dir"}'
+assert_eq "mkdir onto an existing name conflicts" "$STATUS" "409"
+request POST "$ADMIN_HOST" /_authz/api/files/mkdir "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"../escape"}'
+assert_eq "mkdir rejects traversal name" "$STATUS" "422"
+request POST "$ADMIN_HOST" /_authz/api/files/mkdir "$ADMIN_COOKIE" "" \
+    '{"path":"fm-test","name":"no-csrf-dir"}'
+assert_eq "mkdir without CSRF rejected" "$STATUS" "403"
+[[ ! -e "$FM_DIR/no-csrf-dir" ]] \
+    && pass "CSRF-rejected mkdir wrote nothing" || fail "CSRF-rejected mkdir created a directory"
+request POST "$ADMIN_HOST" /_authz/api/files/mkdir "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"nested/deep"}'
+assert_eq "mkdir rejects names with separators" "$STATUS" "422"
+
 request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
     '{"path":"fm-test","name":"a.txt","new_name":"renamed.txt"}'
-assert_eq "rename succeeds" "$STATUS" "200"
 [[ ! -e "$FM_DIR/a.txt" && -f "$FM_DIR/renamed.txt" ]] \
     && pass "rename moved the file on disk" || fail "rename did not take effect"
 request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
@@ -3099,6 +3122,13 @@ request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
 assert_eq "recursive delete succeeds" "$STATUS" "200"
 [[ ! -e "$FM_DIR/sub" ]] \
     && pass "recursive delete cleared the tree" || fail "recursive delete left content behind"
+
+# 目录改名：rename 对文件/目录通用，改名后目录内容仍在。
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"new-dir","new_name":"renamed-dir"}'
+assert_eq "rename a directory succeeds" "$STATUS" "200"
+[[ ! -e "$FM_DIR/new-dir" && -d "$FM_DIR/renamed-dir" ]] \
+    && pass "renamed directory kept on disk" || fail "directory rename lost the folder"
 
 # 符号链接防护：链接本身既不删、不改名、也不覆盖（否则等于把写/删能力送出 root）。
 ln -s /etc/passwd "$TMP_DIR/files/evil-link"

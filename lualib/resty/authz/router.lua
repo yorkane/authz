@@ -233,6 +233,17 @@ register("PUT", "/api/files/rename", guard.wrap(with_body(function(_, data)
         data.path, data.name, data.new_name)
 end), { admin = true, csrf = true, session_only = true }))
 
+-- with_body 会把 handler 的第二返回值喂给 guard.result 的 err 位，拿不到 201；
+-- 这里手写 body 解析，资源创建成功显式返回 201（与上传一致）。
+register("POST", "/api/files/mkdir", guard.wrap(function(params, env, req, current, token)
+    local data, payload, status = body_or_error(env, req)
+    if not data then return payload, status end
+    local created, err, err_status = files.mkdir(
+        require("resty.authz").config.files_root or files.default_root, data.path, data.name)
+    if not created then return guard.result(nil, err, err_status) end
+    return { data = created }, 201
+end, { admin = true, csrf = true, session_only = true }))
+
 register("DELETE", "/api/files/remove", guard.wrap(with_body(function(_, data)
     return files.remove(require("resty.authz").config.files_root or files.default_root,
         data.path, data.name, data.recursive == true)
