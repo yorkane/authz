@@ -9,7 +9,7 @@
   <title>Files</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
   <link rel="stylesheet" href="./app-page.css?v=15">
-  <link rel="stylesheet" href="./files.css?v=8">
+  <link rel="stylesheet" href="./files.css?v=9">
 </head>
 <body>
   <div id="q-app">
@@ -65,9 +65,12 @@
       <!-- 网格视图 -->
       <div v-if="viewMode === 'grid'" ref="grid" class="files-grid">
         <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-card" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
-             @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)" @contextmenu.prevent="download(item)">
-          <q-btn class="card-delete-btn" flat dense round size="sm" icon="mdi-trash-can-outline" color="negative"
-            :aria-label="t.delete" @click.stop="askRemove(item)"></q-btn>
+             @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)">
+          <div class="card-action-group">
+            <q-btn flat dense round size="sm" icon="mdi-rename-box-outline" :aria-label="t.rename" @click.stop="startRename(item)"></q-btn>
+            <q-btn flat dense round size="sm" icon="mdi-trash-can-outline" color="negative"
+              :aria-label="t.delete" @click.stop="askRemove(item)"></q-btn>
+          </div>
           <div class="files-thumb">
             <img v-if="kindOf(item) === 'image'" :src="fileUrl(item)" loading="lazy" decoding="async" alt="" @error="broken[idx] = true" v-show="!broken[idx]">
             <q-icon v-else :name="iconOf(item)" :color="colorOf(item)" :size="item.type === 'dir' ? '44px' : '38px'"></q-icon>
@@ -161,7 +164,8 @@
         </q-card>
       </q-dialog>
 
-      <q-dialog v-model="removeOpen" persistent>
+      <!-- 非 persistent：允许 ESC / 点击遮罩取消删除确认 -->
+      <q-dialog v-model="removeOpen">
         <q-card class="files-dialog-card">
           <q-card-section class="text-h6">{{ t.deleteTitle }}</q-card-section>
           <q-card-section>
