@@ -832,8 +832,10 @@ assert_contains_all "preview area binds tap and swipe gesture handlers" "$BODY" 
     "toggleMedia(event.currentTarget)" \
     "stepPreview(dx < 0 ? 1 : -1)" \
     "if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.6) return" \
-    "if (state.target.tagName === 'AUDIO') return" \
-    "inControlZone"
+    "if (state.target.tagName === 'AUDIO' || state.target.tagName === 'VIDEO') return" \
+    "inControlZone" \
+    "if (tapGuarded || Date.now() - previewOpenedAt < 800) return" \
+    "event.preventDefault()"
 request GET "$ADMIN_HOST" '/_authz/apps/menu-editor.html' "$ADMIN_COOKIE"
 assert_contains_all "menu editor renders service entries with edit and reset" "$BODY" \
     "window.adminApi.menuServices()" \

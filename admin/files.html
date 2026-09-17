@@ -174,8 +174,11 @@
                  点画面切播放暂停（原生控件条留给进度条/音量），媒体上横向滑动切上一/下一个。 -->
             <img v-if="previewKind === 'image'" :src="fileUrl(previewItem)" alt="" class="preview-image" :title="t.close"
               @click="onPreviewClick" @touchstart="onPreviewTouchStart" @touchend="onPreviewTouchEnd">
+            <!-- 视频的播放/暂停交给原生点击（我们自己再切一次会正好抵消），只挂滑动手势。 -->
+            <!-- 视频：画面区域的点按在 capture 阶段拦下（否则原生控件会再切一次，
+                 两次正好抵消）；底部控件条放行给原生进度条/音量。 -->
             <video v-else-if="previewKind === 'video'" :src="fileUrl(previewItem)" controls autoplay preload="metadata" class="preview-media"
-              @click="onPreviewClick" @touchstart="onPreviewTouchStart" @touchend="onPreviewTouchEnd"></video>
+              @touchstart.capture="onPreviewTouchStart" @touchend.capture="onPreviewTouchEnd"></video>
             <div v-else-if="previewKind === 'audio'" class="preview-audio-wrap" :title="t.playPause"
               @click="onPreviewClick" @touchstart="onPreviewTouchStart" @touchend="onPreviewTouchEnd"><q-icon name="mdi-music-circle-outline" size="84px"></q-icon><audio :src="fileUrl(previewItem)" controls preload="metadata" class="preview-audio"></audio></div>
             <iframe v-else-if="previewKind === 'html'" :src="fileUrl(previewItem)" class="preview-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
@@ -324,6 +327,11 @@
         const CONTROL_STRIP = 72
         let swipeState = null
         let tapGuarded = false
+        // 刚打开预览的一小段时间内忽略预览区点击：移动端（尤其 iOS WKWebView）可能在
+        // 触摸序列结束后延迟补发一个 click；此时列表项原位置已经渲染出预览图/视频，
+        // 补发的 click 落在新元素上会被“点图即关”立刻关闭，表现为“单击打不开预览”。
+        let previewOpenedAt = 0
+        watch(previewOpen, value => { if (value) previewOpenedAt = Date.now() })
 
         function inControlZone (el, y) {
           if (!el || !el.getBoundingClientRect) return false
@@ -348,19 +356,19 @@
         }
 
         function onPreviewClick (event) {
-          if (tapGuarded) return
-          const kind = previewKind.value
-          if (kind === 'image') { previewOpen.value = false; return }
-          if (kind !== 'video' && kind !== 'audio') return
+          if (tapGuarded || Date.now() - previewOpenedAt < 800) return
+          if (previewKind.value === 'image') { previewOpen.value = false; return }
+          // 媒体（视频/音频）的触屏点按在 touchend 里处理：视频带 controls 时浏览器
+          // 会抑制 click，且我们若与原生点击各切一次会正好抵消。这里只服务桌面鼠标。
+          if (previewKind.value !== 'audio' || isTouch) return
           if (event.target.tagName === 'AUDIO') return
-          if (kind === 'video' && inControlZone(event.currentTarget, event.clientY)) return
           toggleMedia(event.currentTarget)
         }
 
         function onPreviewTouchStart (event) {
           const touch = event.touches && event.touches[0]
           swipeState = touch
-            ? { x: touch.clientX, y: touch.clientY, target: event.target, el: event.currentTarget }
+            ? { x: touch.clientX, y: touch.clientY, target: event.target, el: event.currentTarget, at: Date.now() }
             : null
         }
 
@@ -372,10 +380,28 @@
           if (!touch) return
           const dx = touch.clientX - state.x
           const dy = touch.clientY - state.y
+          // 触屏上带 controls 的媒体不会派发 click（浏览器把它留给控件），
+          // 所以播放/暂停在这里按“位移很小 + 时间短”判定为点按。
+          const kind = previewKind.value
+          const isMediaTap = (kind === 'video' || kind === 'audio')
+            && Math.abs(dx) < 12 && Math.abs(dy) < 12 && Date.now() - state.at < 500
+          if (isMediaTap) {
+            // 点在原生 <audio> 控件上、或视频底部控件条内：放行给原生（seek / 音量）。
+            const onNative = state.target.tagName === 'AUDIO' || inControlZone(state.el, state.y)
+            if (!onNative && Date.now() - previewOpenedAt >= 800) {
+              tapGuarded = true
+              setTimeout(() => { tapGuarded = false }, 400)
+              event.preventDefault()
+              // capture 阶段阻断，避免原生控件与 toggleMedia 各切一次互相抵消。
+              event.stopPropagation()
+              toggleMedia(state.el)
+            }
+            return
+          }
           // 只认明显的横向滑动：位移够长且明显比纵向占优，否则留给原生滚动/拖拽。
           if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.6) return
           if (previewCount.value < 2) return
-          if (state.target.tagName === 'AUDIO') return
+          if (state.target.tagName === 'AUDIO' || state.target.tagName === 'VIDEO') return
           if (previewKind.value === 'video' && inControlZone(state.el, state.y)) return
           // 滑动落地后浏览器还会补一个 click（图片会被误判成“点击关闭”），这里吃掉它。
           tapGuarded = true
