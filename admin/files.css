@@ -152,6 +152,10 @@
   background: rgba(0, 0, 0, 0.55); border: 2px dashed rgba(48, 164, 255, 0.9);
   color: #90caf9; font-size: 15px; text-align: center;
 }
+.files-drop-path {
+  margin-top: 6px; padding: 4px 12px; font-size: 13px; word-break: break-all;
+  background: rgba(255, 255, 255, 0.12); border-radius: 999px;
+}
 .files-dialog-card { width: 420px; max-width: 92vw; }
 .files-dialog-path {
   margin-bottom: 10px; padding: 6px 10px; font-size: 12px; word-break: break-all;

@@ -9,13 +9,13 @@
   <title>Files</title>
   <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
   <link rel="stylesheet" href="./app-page.css?v=15">
-  <link rel="stylesheet" href="./files.css?v=7">
+  <link rel="stylesheet" href="./files.css?v=8">
 </head>
 <body>
   <div id="q-app">
-    <main class="workspace-page files-page"
-          @dragover.prevent="dragHover"
-          @drop.prevent="onDrop">
+    <!-- 拖拽监听挂在 window（见 onMounted）：只绑在 main 上时，落点一旦在页面
+         边距/滚动条/工具栏空隙，浏览器不拦截 drop，会把整个页面导航到被拖的文件。 -->
+    <main class="workspace-page files-page">
       <header class="page-heading">
         <div>
           <h1>{{ t.title }}</h1>
@@ -52,7 +52,13 @@
       <div v-if="loading" class="files-loading"><q-linear-progress indeterminate></q-linear-progress></div>
 
       <!-- 拖拽悬停提示与上传进度 -->
-      <div v-if="dragging" class="files-drop-overlay"><div><q-icon name="mdi-cloud-upload-outline" size="46px"></q-icon><div>{{ t.dropHint }}</div></div></div>
+      <div v-if="dragging" class="files-drop-overlay">
+        <div>
+          <q-icon name="mdi-cloud-upload-outline" size="46px"></q-icon>
+          <div>{{ t.dropHint }}</div>
+          <div class="files-drop-path">{{ path === '' ? t.root : path }}</div>
+        </div>
+      </div>
       <div v-if="uploading" class="files-uploading"><q-linear-progress indeterminate color="primary"></q-linear-progress><span>{{ uploadingText }}</span></div>
 
       <!-- 网格视图 -->
@@ -650,6 +656,23 @@
           if (filesDropped.length) upload(filesDropped)
         }
 
+        // 只对"携带文件"的拖拽生效，其余（选中文本、链接）保持浏览器原生行为。
+        function hasFileDrag (event) {
+          return Array.from(event.dataTransfer?.types || []).includes('Files')
+        }
+
+        function onWindowDragOver (event) {
+          if (!hasFileDrag(event)) return
+          event.preventDefault()
+          dragHover()
+        }
+
+        function onWindowDrop (event) {
+          if (!hasFileDrag(event)) return
+          event.preventDefault()
+          onDrop(event)
+        }
+
         async function upload (filesPicked, overwrite) {
           if (!filesPicked.length) return
           uploading.value = true
@@ -823,6 +846,9 @@
           applyLocale(localeRef.value)
           unsubscribeLocale = window.adminI18n.subscribe(applyLocale)
           window.addEventListener('keydown', handleKeydown)
+          // window 级拖放：只要落点在本页（iframe）内任何位置都能收进当前目录。
+          window.addEventListener('dragover', onWindowDragOver)
+          window.addEventListener('drop', onWindowDrop)
           // 写操作（上传/重命名/删除）都要求 CSRF 头：启动时取一次会话缓存 token。
           // 取不到（例如以 API Key 打开本页）只是没有写权限，浏览照旧。
           window.adminApi.session().then(session => { csrf.value = session.csrf || '' }).catch(() => {})
@@ -832,6 +858,8 @@
           unsubscribeLocale?.()
           window.clearTimeout(dragTimer)
           window.removeEventListener('keydown', handleKeydown)
+          window.removeEventListener('dragover', onWindowDragOver)
+          window.removeEventListener('drop', onWindowDrop)
         })
 
         return { broken, colorOf, confirmRemove, confirmRename, crumbs, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, iconOf, isTouch, kindOf, loading, load, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, onPreviewClick, onPreviewTouchEnd, onPreviewTouchStart, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }

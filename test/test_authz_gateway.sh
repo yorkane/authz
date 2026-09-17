@@ -828,7 +828,7 @@ assert_contains_all "preview area binds tap and swipe gesture handlers" "$BODY" 
     "@click=\"onPreviewClick\"" \
     "@touchstart=\"onPreviewTouchStart\"" \
     "@touchend=\"onPreviewTouchEnd\"" \
-    "if (kind === 'image') { previewOpen.value = false; return }" \
+    "if (previewKind.value === 'image') { previewOpen.value = false; return }" \
     "toggleMedia(event.currentTarget)" \
     "stepPreview(dx < 0 ? 1 : -1)" \
     "if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.6) return" \
