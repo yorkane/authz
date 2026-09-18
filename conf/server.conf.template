@@ -144,6 +144,12 @@ location ^~ /_authz/files/ {
     add_header Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-modals" always;
     add_header X-Content-Type-Options "nosniff" always;
     expires 1h;
+    # 预览请求（?authz_preview=1）注入 ESC 转发脚本，见 nginx.conf 的
+    # $authz_files_head_close map；其它请求替换为等价文本，字节不变。
+    # 依赖 text/html 默认命中 sub_filter；</head> 缺失或大小写变体不注入，
+    # 那种页面用预览头部的关闭按钮退出。
+    sub_filter '</head>' $authz_files_head_close;
+    sub_filter_once on;
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)

@@ -101,6 +101,16 @@ http {
         default              "";
     }
 
+    # 文件预览（/_authz/files/*.html?authz_preview=1）注入一段 ESC 转发脚本：
+    # 沙箱 iframe 内的按键不会冒泡到父页面，导致全屏预览里按 ESC 关不掉。
+    # 注入脚本把 ESC 用 postMessage 转给父页面（files.html 监听后关闭预览）。
+    # 仅 ?authz_preview=1 时注入；下载/直接打开命中 default（替换为等价文本，
+    # 内容不变），落盘字节与线上原文件一致。sub_filter 只在 text/html 上生效。
+    map $arg_authz_preview $authz_files_head_close {
+        1       "<script>document.addEventListener('keydown',function(e){if(e.key==='Escape'&&window.parent!==window){window.parent.postMessage({type:'authz-files-esc'},'*')}});</script></head>";
+        default "</head>";
+    }
+
     # Some outer proxies preserve the hostname but replace the public port.
     # Restore the Origin authority only when its hostname matches the request
     # hostname; a genuinely cross-origin hostname keeps the request Host.

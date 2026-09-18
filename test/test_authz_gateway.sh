@@ -3190,6 +3190,22 @@ request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
     '{"path":"fm-test","name":"hello.txt"}'
 assert_eq "cleanup deletes the test file" "$STATUS" "200"
 
+# 预览注入与复制路径的数据源：list 返回内容根 root；
+# /_authz/files/*.html 仅在 ?authz_preview=1 时注入 ESC 桥接脚本，
+# 不带参数（下载/直开）字节不变。
+fm_upload "fm-test" "$CSRF" "1" "preview.html:<!doctype html><html><head><title>t</title></head><body>x</body></html>"
+assert_eq "upload html for preview injection" "$STATUS" "201"
+request GET "$ADMIN_HOST" "/_authz/files/fm-test/preview.html?authz_preview=1" "$ADMIN_COOKIE"
+assert_eq "preview html fetch succeeds" "$STATUS" "200"
+assert_contains "preview injects the ESC bridge script" "$(cat "$TMP_DIR/body")" "authz-files-esc"
+request GET "$ADMIN_HOST" "/_authz/files/fm-test/preview.html" "$ADMIN_COOKIE"
+assert_not_contains "downloaded html stays byte-identical" "$(cat "$TMP_DIR/body")" "authz-files-esc"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=fm-test" "$ADMIN_COOKIE"
+assert_json "file listing exposes content root for copy-path" '.data.root' "/files"
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"preview.html"}'
+assert_eq "cleanup deletes the preview html" "$STATUS" "200"
+
 fi
 section nginx-conf
 if [[ "$SECTION_RUN" == "1" ]]; then

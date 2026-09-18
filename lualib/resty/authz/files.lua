@@ -113,6 +113,9 @@ function _M.list(root, rel)
 
     return {
         path = clean,
+        -- 内容根的服务器绝对路径：列表接口本就限 admin（游客与匿名一律 401/403），
+        -- UI 的「复制文件路径」用 root + path + name 拼出完整绝对路径。
+        root = root,
         items = items,
         dirs = dirs,
         files = files,

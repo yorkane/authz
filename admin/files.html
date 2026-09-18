@@ -113,13 +113,14 @@
             <img v-if="kindOf(focused) === 'image'" :src="fileUrl(focused)" alt="" class="detail-media">
             <video v-else-if="kindOf(focused) === 'video'" :src="fileUrl(focused)" controls preload="none" class="detail-media"></video>
             <audio v-else-if="kindOf(focused) === 'audio'" :src="fileUrl(focused)" controls preload="metadata" class="detail-audio"></audio>
-            <iframe v-else-if="kindOf(focused) === 'html'" :src="fileUrl(focused)" class="detail-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
+            <iframe v-else-if="kindOf(focused) === 'html'" :src="fileUrl(focused, true)" class="detail-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
             <pre v-else-if="detailText !== null" class="detail-text">{{ detailText }}</pre>
             <div v-else class="detail-none"><q-icon name="mdi-file-outline" size="52px"></q-icon><div>{{ t.noPreview }}</div></div>
           </div>
           <div class="detail-meta">
             <span>{{ focused.type === 'dir' ? t.folder : sizeText(focused.size) }}</span>
             <span>{{ dateText(focused.mtime) }}</span>
+            <q-btn flat dense no-caps icon="mdi-content-copy" :label="t.copyPath" @click="copyPath(focused)"></q-btn>
             <q-btn flat dense no-caps icon="mdi-open-in-new" :label="t.openInTab" @click="openInTab(focused)"></q-btn>
             <q-btn v-if="focused.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(focused)"></q-btn>
             <q-btn flat dense no-caps icon="mdi-rename-box" :label="t.rename" @click="startRename(focused)"></q-btn>
@@ -190,6 +191,7 @@
             <div class="preview-actions">
               <q-btn v-if="previewPosition > 1" flat dense round icon="mdi-chevron-left" :aria-label="t.prevFile" @click="stepPreview(-1)"></q-btn>
               <q-btn v-if="previewPosition < previewCount" flat dense round icon="mdi-chevron-right" :aria-label="t.nextFile" @click="stepPreview(1)"></q-btn>
+              <q-btn v-if="previewItem" flat dense no-caps icon="mdi-content-copy" :label="isTouch ? '' : t.copyPath" :aria-label="t.copyPath" @click="copyPath(previewItem)"></q-btn>
               <q-btn v-if="previewItem" flat dense no-caps icon="mdi-open-in-new" :label="isTouch ? '' : t.openInTab" :aria-label="t.openInTab" @click="openInTab(previewItem)"></q-btn>
               <q-btn v-if="previewItem && previewItem.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="isTouch ? '' : t.download" :aria-label="t.download" @click="download(previewItem)"></q-btn>
               <q-btn dense round icon="mdi-close" color="primary" :flat="!isTouch" :unelevated="isTouch" :aria-label="t.close" @click="previewOpen = false"></q-btn>
@@ -207,7 +209,7 @@
               @touchstart.capture="onPreviewTouchStart" @touchend.capture="onPreviewTouchEnd"></video>
             <div v-else-if="previewKind === 'audio'" class="preview-audio-wrap" :title="t.playPause"
               @click="onPreviewClick" @touchstart="onPreviewTouchStart" @touchend="onPreviewTouchEnd"><q-icon name="mdi-music-circle-outline" size="84px"></q-icon><audio :src="fileUrl(previewItem)" controls preload="metadata" class="preview-audio"></audio></div>
-            <iframe v-else-if="previewKind === 'html'" :src="fileUrl(previewItem)" class="preview-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
+            <iframe v-else-if="previewKind === 'html'" :src="fileUrl(previewItem, true)" class="preview-frame" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
             <div v-else-if="previewKind === 'text'" class="preview-text-wrap"><pre v-if="previewText !== null">{{ previewText }}</pre><q-spinner v-else size="34px"></q-spinner></div>
             <div v-else class="preview-none">
               <q-icon name="mdi-file-outline" size="64px"></q-icon>
@@ -221,7 +223,7 @@
   </div>
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./i18n.js?v=43"></script>
+  <script src="./i18n.js?v=44"></script>
   <script src="./api.js?v=20"></script>
   <script>
     const { createApp, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } = Vue
@@ -248,6 +250,8 @@
         const path = ref(localStorage.getItem('files_path') || '')
         const items = ref([])
         const truncated = ref(false)
+        // 内容根的服务器绝对路径（list 接口对 admin 返回），用于「复制文件路径」。
+        const rootPath = ref('')
         const filter = ref('')
         const focusIndex = ref(0)
         const broken = reactive({})
@@ -310,10 +314,45 @@
           return KIND_COLORS[kind] || 'grey-6'
         }
 
-        function fileUrl (item) {
+        // preview=true 时带 ?authz_preview=1：nginx 对该请求注入 ESC 转发脚本
+        // （沙箱 iframe 的按键不会冒泡到本页面，见 nginx.conf 的注入 map）。
+        function fileUrl (item, preview) {
           if (!item) return ''
           const segments = (path.value === '' ? item.name : path.value + '/' + item.name).split('/')
-          return '/_authz/files/' + segments.map(s => encodeURIComponent(s)).join('/')
+          const url = '/_authz/files/' + segments.map(s => encodeURIComponent(s)).join('/')
+          return preview ? url + '?authz_preview=1' : url
+        }
+
+        // 复制服务端绝对路径：list 接口对 admin 返回内容根 root（AUTHZ_FILES_ROOT），
+        // 与当前浏览目录、文件名拼成容器视角的完整路径。
+        function absolutePath (item) {
+          if (!item) return ''
+          const root = (rootPath.value || '/files').replace(/\/+$/, '')
+          const rel = path.value === '' ? item.name : path.value + '/' + item.name
+          return root + '/' + rel
+        }
+
+        async function copyPath (item) {
+          const text = absolutePath(item)
+          try {
+            if (navigator.clipboard && window.isSecureContext) {
+              await navigator.clipboard.writeText(text)
+            } else {
+              // 非安全上下文（http 直连 IP）没有 Clipboard API：回退到隐藏 textarea + execCommand。
+              const ta = document.createElement('textarea')
+              ta.value = text
+              ta.style.position = 'fixed'
+              ta.style.opacity = '0'
+              document.body.appendChild(ta)
+              ta.select()
+              const ok = document.execCommand('copy')
+              ta.remove()
+              if (!ok) throw new Error('execCommand failed')
+            }
+            notify(t.value.copied + '：' + text, 'positive')
+          } catch (err) {
+            notify(t.value.copyFailed + '：' + text, 'negative')
+          }
         }
 
         const previewKind = computed(() => previewItem.value ? kindOf(previewItem.value) : '')
@@ -503,6 +542,7 @@
             const data = await window.adminApi.files(path.value)
             items.value = data.items || []
             truncated.value = !!data.truncated
+            rootPath.value = data.root || ''
             focusFirst()
           } catch (err) {
             error.value = err.message || String(err)
@@ -894,6 +934,10 @@
           applyLocale(localeRef.value)
           unsubscribeLocale = window.adminI18n.subscribe(applyLocale)
           window.addEventListener('keydown', handleKeydown)
+          // 沙箱 iframe 里被注入的 ESC 转发脚本（nginx sub_filter）把按键
+          // postMessage 到这里，保证 html 预览也能用 ESC 关闭。来源不可信但
+          // 消息类型是自定义的，误触概率可忽略。
+          window.addEventListener('message', onPreviewEscMessage)
           // window 级拖放：只要落点在本页（iframe）内任何位置都能收进当前目录。
           window.addEventListener('dragover', onWindowDragOver)
           window.addEventListener('drop', onWindowDrop)
@@ -902,15 +946,22 @@
           window.adminApi.session().then(session => { csrf.value = session.csrf || '' }).catch(() => {})
           load()
         })
+        function onPreviewEscMessage (event) {
+          if (event.data && event.data.type === 'authz-files-esc' && previewOpen.value) {
+            previewOpen.value = false
+          }
+        }
+
         onBeforeUnmount(() => {
           unsubscribeLocale?.()
           window.clearTimeout(dragTimer)
           window.removeEventListener('keydown', handleKeydown)
+          window.removeEventListener('message', onPreviewEscMessage)
           window.removeEventListener('dragover', onWindowDragOver)
           window.removeEventListener('drop', onWindowDrop)
         })
 
-        return { broken, colorOf, confirmRemove, confirmRename, crumbs, startMkdir, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, confirmMkdir, iconOf, isTouch, kindOf, loading, load, mkdirForm, mkdirOpen, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, onPreviewClick, onPreviewTouchEnd, onPreviewTouchStart, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
+        return { broken, colorOf, confirmRemove, confirmRename, copyPath, crumbs, startMkdir, detailText, download, dateText, dragging, error, fileInput, fileUrl, filter, focused, focusIndex, focusFirst, grid, confirmMkdir, iconOf, isTouch, kindOf, loading, load, mkdirForm, mkdirOpen, moveFocus, mutating, navigate, onDrop, onItemDouble, onItemClick, onPickFiles, onPreviewClick, onPreviewTouchEnd, onPreviewTouchStart, open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles, previewCount, previewItem, previewKind, previewOpen, previewPanelOpen, previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen, askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload, uploading, uploadingText, viewMode, viewOptions }
       }
     })
 
