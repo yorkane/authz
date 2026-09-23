@@ -126,7 +126,9 @@
   .preview-actions .q-btn { margin-left: 2px; min-width: 36px; }
   .preview-counter { display: none; }
 }
-.preview-image { max-width: 100%; max-height: 100%; object-fit: contain; }
+/* 图片占满预览区宽度：窄图放大到 100%（object-fit contain 保证超高时
+   退回等比居中），避免两侧留黑浪费空间。 */
+.preview-image { width: 100%; max-height: 100%; object-fit: contain; }
 .preview-media { width: min(100%, 1100px); max-height: 100%; }
 /* 预览媒体可点击（图片关闭 / 媒体播放暂停），给出可点反馈。 */
 .preview-image, .preview-media, .preview-audio-wrap { cursor: pointer; }

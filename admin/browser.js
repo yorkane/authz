@@ -888,11 +888,28 @@
           await adapter.remove(removeForm.path, removeForm.name, recursive)
           removeOpen.value = false
           notify(t.value.deleted, 'positive')
-          await load()
+          // 不做整页 reload：从本地列表就地移除该项，焦点留在原位，
+          // 可以直接 Delete 连续删下一个；统计条随 computed 自动更新。
+          removeItemLocal(removeForm.name)
         } catch (err) {
           notify(err.message || String(err), 'negative')
         } finally {
           mutating.value = false
+        }
+      }
+
+      function removeItemLocal (name) {
+        const wasFocused = focused.value && focused.value.name === name
+        items.value = items.value.filter(item => item.name !== name)
+        // 预览恰好停在被删项上：关掉，避免预览指向不存在的文件。
+        if (previewItem.value && previewItem.value.name === name) {
+          previewOpen.value = false
+          previewItem.value = null
+        }
+        if (wasFocused) {
+          // 焦点收敛到剩余项原位；shown/分页是 computed，随 items 收缩。
+          focusIndex.value = Math.min(focusIndex.value, Math.max(0, shown.value.length - 1))
+          nextTick(() => { scrollFocusIntoView(); refreshDetailText() })
         }
       }
 
