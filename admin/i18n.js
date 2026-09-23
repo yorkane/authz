@@ -39,7 +39,7 @@
         deleteDirCopy: '删除后不可恢复。目录非空时需要勾选递归删除。',
         deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
         overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
-        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · Delete 删除选中 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览',
+        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览',
         loadMore: '加载下一页'
       },
       files: {
@@ -66,7 +66,7 @@
         deleteDirCopy: '删除后不可恢复。目录非空时需要勾选递归删除。',
         deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
         overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
-        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · Delete 删除选中 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览'
+        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览'
       },
       // S3 页特有部分：页面外壳（未配置卡片/桶选择器）与分享按钮；共享交互文案由 browser 块提供。
       s3: {
@@ -269,7 +269,7 @@
         deleteDirCopy: 'This is not recoverable. Removing a non-empty folder needs the recursive switch.',
         deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
         overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
-        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · Delete removes selection · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview',
+        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · Delete removes selection (Enter confirms, Esc cancels) · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview',
         loadMore: 'Load next page'
       },
       files: {
@@ -296,7 +296,7 @@
         deleteDirCopy: 'This is not recoverable. Removing a non-empty folder needs the recursive switch.',
         deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
         overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
-        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · Delete removes selection · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview'
+        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · Delete removes selection (Enter confirms, Esc cancels) · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview'
       },
       // S3 page specifics: page shell (not-configured card / bucket picker) and share buttons.
       s3: {

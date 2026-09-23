@@ -841,6 +841,11 @@ assert_contains_all "shared browser component binds tap and swipe gesture handle
     "inControlZone" \
     "if (tapGuarded || Date.now() - previewOpenedAt < 800) return" \
     "event.preventDefault()"
+request GET "$ADMIN_HOST" '/_authz/apps/browser.js' "$ADMIN_COOKIE"
+assert_contains_all "delete dialog confirms on Enter and swallows other keys" "$BODY" \
+    "if (removeOpen.value) {" \
+    "if (event.key === 'Enter' && !mutating.value) {" \
+    "confirmRemove()"
 request GET "$ADMIN_HOST" '/_authz/apps/menu-editor.html' "$ADMIN_COOKIE"
 assert_contains_all "menu editor renders service entries with edit and reset" "$BODY" \
     "window.adminApi.menuServices()" \

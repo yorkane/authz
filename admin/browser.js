@@ -908,6 +908,16 @@
 
       function handleKeydown (event) {
         const target = event.target
+        // 删除确认框打开时：Enter 直接确认删除（preventDefault 同时抑制焦点按钮的
+        // 原生激活，避免双重提交），ESC / 点遮罩取消由对话框自己处理；
+        // 其余按键不下落到列表逻辑，防止隔框误触（Enter 打开、Delete 再弹框等）。
+        if (removeOpen.value) {
+          if (event.key === 'Enter' && !mutating.value) {
+            confirmRemove()
+            event.preventDefault()
+          }
+          return
+        }
         if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
           // 搜索框内的 Enter 视为"打开当前选中项"，其余按键保持正常编辑。
           if (target.tagName === 'INPUT' && event.key === 'Enter' && !previewOpen.value) {
