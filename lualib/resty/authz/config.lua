@@ -137,6 +137,58 @@ function _M.load()
     c.nginx_prefix = os.getenv("AUTHZ_NGINX_PREFIX") or "/usr/local/openresty/nginx"
     c.nginx_bin = os.getenv("AUTHZ_NGINX_BIN") or "/usr/local/openresty/bin/openresty"
     c.nginx_template_dir = os.getenv("OPENRESTY_TEMPLATE_DIR") or ""
+    -- 对象存储（S3 兼容）浏览器：私有 endpoint + SigV4 静态凭证。
+    -- 未设 AUTHZ_S3_ENDPOINT 时功能整体关闭（菜单可见但页面显示未配置卡片），
+    -- 因此 SECRET 缺失只警告不报错——和 NocoBase 的渐进启用一致。
+    c.s3 = nil
+    local s3_endpoint = tostring(os.getenv("AUTHZ_S3_ENDPOINT") or ""):gsub("/+$", "")
+    if s3_endpoint ~= "" then
+        local scheme, authority = s3_endpoint:match("^(https?)://([^/]+)$")
+        if not scheme or authority == "" or authority:find("[?#]") then
+            error("AUTHZ_S3_ENDPOINT must be http(s)://<host>[:<port>] without a path")
+        end
+        local host, port_text = authority:match("^([^:]+):(%d+)$")
+        if not host then host, port_text = authority, nil end
+        local port = port_text and tonumber(port_text) or (scheme == "https" and 443 or 80)
+        if not port or port < 1 or port > 65535 then
+            error("AUTHZ_S3_ENDPOINT port must be 1-65535")
+        end
+        if scheme ~= "https" and not env_bool("AUTHZ_S3_ALLOW_HTTP", false) then
+            error("AUTHZ_S3_ENDPOINT uses plaintext http; set AUTHZ_S3_ALLOW_HTTP=true " ..
+                "explicitly after confirming the network is trusted")
+        end
+        local region = tostring(os.getenv("AUTHZ_S3_REGION") or "us-east-1")
+        local akid = tostring(os.getenv("AUTHZ_S3_ACCESS_KEY_ID") or "")
+        local secret = tostring(os.getenv("AUTHZ_S3_SECRET_ACCESS_KEY") or "")
+        if region == "" or region:find("[%c%s]") or #region > 64 then
+            error("AUTHZ_S3_REGION is invalid")
+        end
+        if akid == "" or secret == "" or akid:find("[%c%s]") or secret:find("[%c%s]") then
+            error("AUTHZ_S3_ENDPOINT requires AUTHZ_S3_ACCESS_KEY_ID / AUTHZ_S3_SECRET_ACCESS_KEY")
+        end
+        c.s3 = {
+            enabled = true,
+            host = host,
+            port = port,
+            tls = scheme == "https",
+            region = region,
+            access_key_id = akid,
+            secret_access_key = secret,
+            -- 给签名器（vendored 上游读 config.timeout）与自设超时两侧共用的值。
+            timeout = math.max(200, tonumber(os.getenv("AUTHZ_S3_READ_TIMEOUT_MS")) or 30000),
+            connect_timeout = math.max(50, tonumber(os.getenv("AUTHZ_S3_CONNECT_TIMEOUT_MS")) or 2000),
+            send_timeout = math.max(200, tonumber(os.getenv("AUTHZ_S3_SEND_TIMEOUT_MS")) or 30000),
+            read_timeout = math.max(200, tonumber(os.getenv("AUTHZ_S3_READ_TIMEOUT_MS")) or 30000),
+            keepalive_idle = math.max(1000, tonumber(os.getenv("AUTHZ_S3_KEEPALIVE_MS")) or 30000),
+            share_ttl = math.max(60, math.min(604800,
+                tonumber(os.getenv("AUTHZ_S3_SHARE_TTL")) or 3600)),
+        }
+        -- endpoint 会回显给管理页面（帮助排障），凭证只在签名器内部使用。
+        c.s3_endpoint_display = scheme .. "://" .. authority
+        c.s3_region_display = region
+        ngx.log(ngx.NOTICE, "authz: S3 browser enabled (", c.s3_endpoint_display,
+            ", region ", region, ")")
+    end
     c.login_attempts = math.max(1, tonumber(os.getenv("AUTHZ_LOGIN_ATTEMPTS")) or 5)
     c.login_window = math.max(60, tonumber(os.getenv("AUTHZ_LOGIN_WINDOW")) or 1800)
     c.login_fail_delay_ms = math.min(10000, math.max(0,

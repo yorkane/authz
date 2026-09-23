@@ -9,6 +9,8 @@ local session = require "resty.authz.session"
 local ui = require "resty.authz.ui"
 local files = require "resty.authz.files"
 local files_upload = require "resty.authz.files_upload"
+local s3 = require "resty.authz.s3"
+local s3_upload = require "resty.authz.s3_upload"
 local nginxconf = require "resty.authz.nginxconf"
 local guest = require "resty.authz.guest"
 
@@ -248,6 +250,169 @@ register("DELETE", "/api/files/remove", guard.wrap(with_body(function(_, data)
     return files.remove(require("resty.authz").config.files_root or files.default_root,
         data.path, data.name, data.recursive == true)
 end), { admin = true, csrf = true, session_only = true }))
+
+-- ── Object storage browser (S3-compatible private endpoint) ─────────────────
+-- 全部走 config.s3：未配置时 GET /api/s3 返回 enabled=false（前端显示未配置卡片），
+-- 其余操作 423。凭证（AKID/SECRET）只在签名器内部使用，任何接口都不回显。
+local function s3_cfg()
+    return require("resty.authz").config.s3
+end
+
+-- 把 s3_context 失败时的 (payload, status) 原样透传给 router（它期待的是
+-- (error_payload, status)，不能经 guard.result，否则会被包成 {"data":{"error":...}}）。
+local function payload_or_error(payload, status)
+    return payload, status
+end
+
+-- 统一的“未配置/参数非法”前置校验。返回 (cfg, bucket, path) 或 (nil, payload, status)。
+local function s3_context(args, need_bucket)
+    local cfg = s3_cfg()
+    if not cfg then
+        return nil, { error = { code = "s3_disabled", message = "对象存储未配置" } }, 423
+    end
+    local bucket = args.bucket and s3.normalize_bucket(tostring(args.bucket)) or nil
+    if need_bucket and not bucket then
+        return nil, { error = { code = "invalid_bucket", message = "缺少或非法的 bucket 参数" } }, 400
+    end
+    local path = s3.normalize_prefix(args.path)
+    if path == nil then
+        return nil, { error = { code = "invalid_path", message = "路径非法" } }, 400
+    end
+    return cfg, bucket, path
+end
+
+register("GET", "/api/s3", guard.wrap(function(_, env)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    local cfg = s3_cfg()
+    if not cfg then
+        -- 未配置不是错误：菜单点进来要能看到“未配置”提示，所以 200 + enabled=false。
+        return { data = { enabled = false, endpoint = "", region = "", buckets = cjson.empty_array } }
+    end
+    local bucket, path = s3.normalize_bucket(tostring(args.bucket or "")), s3.normalize_prefix(args.path)
+    if args.bucket and args.bucket ~= "" and not bucket then
+        return { error = { code = "invalid_bucket", message = "缺少或非法的 bucket 参数" } }, 400
+    end
+    if not path then
+        return { error = { code = "invalid_path", message = "路径非法" } }, 400
+    end
+    -- 不带 bucket：回桶列表（首页选择器用）。带 bucket：回目录内容。
+    if not bucket then
+        local buckets, err, status = s3.list_buckets(cfg)
+        if not buckets then
+            return { error = { code = "s3_error", message = err } }, status or 502
+        end
+        return { data = {
+            enabled = true,
+            endpoint = require("resty.authz").config.s3_endpoint_display,
+            region = require("resty.authz").config.s3_region_display,
+            buckets = array_data(buckets),
+            bucket = cjson.null,
+        } }
+    end
+    local token = args.token and tostring(args.token) or nil
+    local listing, err, status = s3.browse(cfg, bucket, path, token)
+    if not listing then
+        return { error = {
+            code = status == 404 and "not_found" or "request_failed",
+            message = err or "无法读取对象列表",
+        } }, status or 400
+    end
+    listing.items = array_data(listing.items)
+    listing.next_token = listing.next_token or cjson.null
+    return { data = listing }
+end))
+
+-- 分享链接：presigned GET。凭证不外泄，签名在 query 里，到期自动失效。
+register("GET", "/api/s3/share", guard.wrap(function(_, env)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    local cfg, bucket, path = s3_context(args, true)
+    if not cfg then return bucket, path end
+    local name = s3.normalize_name(args.name)
+    if not name then
+        return { error = { code = "invalid_name", message = "缺少或非法的 name 参数" } }, 400
+    end
+    local url, err = s3.presign_get(cfg, bucket, s3.join(path, name),
+        cfg.share_ttl, args.download == "1")
+    if not url then
+        return { error = { code = "s3_error", message = err } }, 502
+    end
+    return { data = { url = url, expires_in = cfg.share_ttl } }
+end))
+
+-- 上传：guard 只做认证+CSRF，body 留给流式解析（resty.upload 要求未 read_body）。
+register("POST", "/api/s3/upload", guard.wrap(function(params, env)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    local cfg, bucket, path = s3_context(args, true)
+    if not cfg then return bucket, path end
+    local overwrite = args.overwrite == "1" or args.overwrite == "true"
+    local payload, err, status = s3_upload.upload(cfg, bucket, path, overwrite)
+    if not payload then
+        return { error = { code = "upload_failed", message = err or "上传失败" } }, status or 400
+    end
+    return payload, status
+end, { admin = true, csrf = true, session_only = true }))
+
+register("PUT", "/api/s3/rename", guard.wrap(function(params, env, req)
+    local data, payload, status = body_or_error(env, req)
+    if not data then return payload, status end
+    local cfg, bucket, path = s3_context(data, true)
+    if not cfg then return payload_or_error(bucket, path) end
+    local name = s3.normalize_name(data.name)
+    local new_name = s3.normalize_name(data.new_name)
+    if not name or not new_name then
+        return { error = { code = "invalid_name", message = "缺少或非法的 name/new_name" } }, 400
+    end
+    return guard.result(s3.rename(cfg, bucket, path, name, new_name))
+end, { admin = true, csrf = true, session_only = true }))
+
+register("DELETE", "/api/s3/remove", guard.wrap(function(params, env, req)
+    local data, payload, status = body_or_error(env, req)
+    if not data then return payload, status end
+    local cfg, bucket, path = s3_context(data, true)
+    if not cfg then return payload_or_error(bucket, path) end
+    local name = s3.normalize_name(data.name)
+    if not name then
+        return { error = { code = "invalid_name", message = "缺少或非法的 name" } }, 400
+    end
+    local key = s3.join(path, name)
+    if data.recursive == true then
+        -- 三值返回必须过 guard.result：klib.router 只取前两个返回值，
+        -- 直接 return nil, err, status 会把 err 文案当成状态码（实测变空 200）。
+        return guard.result(s3.delete_prefix(cfg, bucket, key))
+    end
+    -- 非递归：前缀下还有对象就拒绝，避免一个误点删掉整棵树（与 files.remove 对齐）。
+    local occupied, perr, pstatus = s3.has_objects_under(cfg, bucket, key)
+    if occupied == nil then
+        return guard.result(nil, perr, pstatus or 502)
+    end
+    if occupied then
+        return guard.result(nil, "目录非空，需勾选递归删除", 409)
+    end
+    local ok, err, status = s3.delete(cfg, bucket, key)
+    if not ok then
+        return guard.result(nil, err, status or 500)
+    end
+    return { data = { removed = 1, bucket = bucket, path = path, name = name } }
+end, { admin = true, csrf = true, session_only = true }))
+
+-- 新建目录：S3 没有真目录，写一个以 / 结尾的 0 字节标记对象。该服务会自动生成这种
+-- “幻影”条目（列表里过滤掉），但显式写一个能让空目录在别人也看得见。
+register("POST", "/api/s3/mkdir", guard.wrap(function(params, env, req)
+    local data, payload, status = body_or_error(env, req)
+    if not data then return payload, status end
+    local cfg, bucket, path = s3_context(data, true)
+    if not cfg then return bucket, path end
+    local name = s3.normalize_name(data.name)
+    if not name then
+        return { error = { code = "invalid_name", message = "缺少或非法的 name" } }, 400
+    end
+    local key = s3.join(path, name) .. "/"
+    local ok, err, err_status = s3.put(cfg, bucket, key, { body = "" })
+    if not ok then
+        return { error = { code = "mkdir_failed", message = err } }, err_status or 500
+    end
+    return { data = { path = key, bucket = bucket } }, 201
+end, { admin = true, csrf = true, session_only = true }))
 
 register("POST", "/api/menu-entries", guard.wrap(with_body(function(_, data)
     return service.create_menu_entry(data)

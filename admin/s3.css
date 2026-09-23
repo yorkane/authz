@@ -1,0 +1,26 @@
+/* S3 对象存储页特有样式：共享部分走 browser.css。 */
+
+/* 桶选择器：下拉选项可含长桶名，宽度收窄避免挤压工具栏。 */
+.s3-bucket-select {
+  width: 220px;
+  max-width: 45vw;
+}
+
+/* 未配置说明卡片：居中、虚线边框，与页面暗色变量保持一致。 */
+.s3-not-configured {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 60px;
+  padding: 32px 24px;
+  border: 1px dashed rgba(255, 255, 255, 0.25);
+  border-radius: 10px;
+  text-align: center;
+}
+.s3-not-configured p {
+  max-width: 520px;
+  line-height: 1.6;
+  opacity: 0.85;
+}

@@ -139,6 +139,45 @@ function saveApiKey (values) {
   throw new Error('Unsupported api key action')
 }
 
+// 对象存储（S3）：列表/分享是 GET 查询参数，mkdir/rename/remove 是普通 JSON mutation，
+// 上传与 files 同构（multipart + X-CSRF-Token，全同名冲突 409 触发覆盖确认）。
+function s3Info (bucket) {
+  return request('/s3' + (bucket ? '?bucket=' + encodeURIComponent(bucket) : ''))
+}
+
+function s3List (bucket, path, token) {
+  const query = new URLSearchParams({ bucket: bucket, path: path || '' })
+  if (token) query.set('token', token)
+  return request('/s3?' + query)
+}
+
+async function uploadS3 (bucket, path, files, overwrite) {
+  const session = await request('/session')
+  const form = new FormData()
+  for (const file of files) form.append('file', file, file.name)
+  const query = new URLSearchParams({ bucket: bucket, path: path || '' })
+  if (overwrite) query.set('overwrite', '1')
+  const response = await fetch(`${API_BASE}/s3/upload?${query}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'X-CSRF-Token': session.csrf || '' },
+    body: form
+  })
+  const data = await response.json().catch(() => null)
+  if (!response.ok) {
+    const error = new Error(data?.error?.message || `HTTP ${response.status}`)
+    error.status = response.status
+    throw error
+  }
+  return data?.data
+}
+
+function shareS3 (bucket, path, name, download) {
+  const query = new URLSearchParams({ bucket: bucket, path: path || '', name: name })
+  if (download) query.set('download', '1')
+  return request('/s3/share?' + query)
+}
+
 window.adminApi = {
   session: () => request('/session'),
   applications: () => request('/applications'),
@@ -152,6 +191,13 @@ window.adminApi = {
   mkdirFile: values => mutation('POST', '/files/mkdir', values),
   renameFile: values => mutation('PUT', '/files/rename', values),
   removeFile: values => mutation('DELETE', '/files/remove', values),
+  s3Info,
+  s3List,
+  uploadS3,
+  shareS3,
+  mkdirS3: values => mutation('POST', '/s3/mkdir', values),
+  renameS3: values => mutation('PUT', '/s3/rename', values),
+  removeS3: values => mutation('DELETE', '/s3/remove', values),
   nginxConf: () => request('/nginx-conf'),
   apiKeys: () => request('/api-keys'),
   saveUser,

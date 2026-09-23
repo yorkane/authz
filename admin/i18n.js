@@ -11,7 +11,36 @@
         files: '文件浏览', filesTitle: '浏览并预览挂载的文件目录',
         nginxConf: 'Nginx配置(危险)', nginxConfTitle: '编辑 nginx 自定义 include 并热重载',
         systemApps: '系统应用', systemAppsHint: '网关内置的管理与展示页面',
-        menuEditor: '菜单编辑', menuEditorTitle: '左侧菜单排序、显示与入口管理'
+        menuEditor: '菜单编辑', menuEditorTitle: '左侧菜单排序、显示与入口管理',
+        s3: '对象存储', s3Title: '浏览并管理 S3 对象存储'
+      },
+      // 共享浏览器组件（browser.js）的通用文案：打底用，页面各自块（files/s3）覆盖同名键。
+      browser: {
+        title: '文件浏览器', description: '浏览目录，支持图片 / 音频 / 视频 / HTML 预览与下载。',
+        search: '搜索文件名', sortBy: '排序', sortName: '名称', sortSize: '大小', sortTime: '修改时间',
+        sortOrder: '切换升 / 降序', refresh: '刷新', root: '根目录', folder: '目录', name: '名称', size: '大小', modified: '修改时间',
+        foldersUnit: '个目录', filesUnit: '个文件',
+        pageOf: '第 %s / %n 页', perPage: '每页',
+        empty: '目录为空', emptyFilter: '没有匹配的文件', noPreview: '不支持在线预览，可下载查看',
+        openInTab: '新窗口打开', download: '下载', close: '关闭', retry: '重试',
+        copyPath: '复制文件路径', copied: '已复制路径', copyFailed: '复制失败，路径：',
+        textTooLarge: '文件过大，不适合在线预览',
+        collapsePreview: '收起预览', expandPreview: '展开预览',
+        prevFile: '上一个文件', nextFile: '下一个文件',
+        playPause: '点击画面播放 / 暂停，左右滑动切换文件',
+        truncated: '目录条目过多，仅显示前 2000 条',
+        upload: '上传', dropHint: '松手上传到当前目录', uploading: '正在上传 {n} 个文件…',
+        uploaded: '已上传 {ok} 个文件', uploadedSkipped: '，{skip} 个被跳过',
+        actions: '操作', rename: '重命名', delete: '删除', cancel: '取消', confirm: '确认',
+        newFolder: '新建文件夹', newFolderTitle: '新建文件夹', created: '已创建文件夹',
+        renameTitle: '重命名', newName: '新名称', newNameHint: '只能是单级名称，不能包含 / 或 ..',
+        renameUnchanged: '名称没有变化', renamed: '已重命名',
+        deleteTitle: '删除确认', deleteFileCopy: '删除后不可恢复，确定删除这个文件吗？',
+        deleteDirCopy: '删除后不可恢复。目录非空时需要勾选递归删除。',
+        deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
+        overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
+        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · Delete 删除选中 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览',
+        loadMore: '加载下一页'
       },
       files: {
         title: '文件浏览', description: '浏览挂载目录，支持图片 / 音频 / 视频 / HTML 预览与下载。',
@@ -38,6 +67,14 @@
         deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
         overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
         kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · Delete 删除选中 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览'
+      },
+      // S3 页特有部分：页面外壳（未配置卡片/桶选择器）与分享按钮；共享交互文案由 browser 块提供。
+      s3: {
+        title: '对象存储', description: '浏览 S3 桶，支持预览、下载与分享链接。',
+        selectBucket: '选择桶',
+        notConfiguredTitle: '对象存储未配置',
+        notConfigured: 'S3 对象存储未配置：请在网关配置 s3 endpoint / region / 凭证后重试。',
+        share: '分享链接', shared: '已生成分享链接', shareFailed: '分享链接生成失败'
       },
       nginxConf: {
         title: 'Nginx 配置（危险）',
@@ -204,7 +241,36 @@
         files: 'File Browser', filesTitle: 'Browse and preview the mounted file directory',
         nginxConf: 'Nginx Config (danger)', nginxConfTitle: 'Edit nginx include files and hot-reload',
         systemApps: 'System apps', systemAppsHint: 'Built-in management and demo pages',
-        menuEditor: 'Menu editor', menuEditorTitle: 'Left-menu ordering, visibility and entries'
+        menuEditor: 'Menu editor', menuEditorTitle: 'Left-menu ordering, visibility and entries',
+        s3: 'Object Storage', s3Title: 'Browse and manage S3 object storage'
+      },
+      // Shared browser component (browser.js) strings: base layer, overridden per page (files/s3).
+      browser: {
+        title: 'File Browser', description: 'Browse directories with image / audio / video / HTML preview and download.',
+        search: 'Search file name', sortBy: 'Sort', sortName: 'Name', sortSize: 'Size', sortTime: 'Modified',
+        sortOrder: 'Toggle sort order', refresh: 'Refresh', root: 'Root', folder: 'Folder', name: 'Name', size: 'Size', modified: 'Modified',
+        foldersUnit: 'folders', filesUnit: 'files',
+        pageOf: 'page %s of %n', perPage: 'Per page',
+        empty: 'Empty directory', emptyFilter: 'No matching files', noPreview: 'No inline preview; download to view',
+        openInTab: 'Open in tab', download: 'Download', close: 'Close', retry: 'Retry',
+        copyPath: 'Copy path', copied: 'Path copied', copyFailed: 'Copy failed; path:',
+        textTooLarge: 'File too large for inline preview',
+        collapsePreview: 'Collapse preview', expandPreview: 'Expand preview',
+        prevFile: 'Previous file', nextFile: 'Next file',
+        playPause: 'Tap to play / pause, swipe left or right for the previous or next file',
+        truncated: 'Too many entries; only the first 2000 are listed',
+        upload: 'Upload', dropHint: 'Drop to upload into this folder', uploading: 'Uploading {n} file(s)…',
+        uploaded: 'Uploaded {ok} file(s)', uploadedSkipped: ', {skip} skipped',
+        actions: 'Actions', rename: 'Rename', delete: 'Delete', cancel: 'Cancel', confirm: 'Confirm',
+        newFolder: 'New folder', newFolderTitle: 'New folder', created: 'Folder created',
+        renameTitle: 'Rename', newName: 'New name', newNameHint: 'A single-level name; / and .. are not allowed',
+        renameUnchanged: 'The name did not change', renamed: 'Renamed',
+        deleteTitle: 'Delete confirmation', deleteFileCopy: 'This is not recoverable. Delete this file?',
+        deleteDirCopy: 'This is not recoverable. Removing a non-empty folder needs the recursive switch.',
+        deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
+        overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
+        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · Delete removes selection · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview',
+        loadMore: 'Load next page'
       },
       files: {
         title: 'File Browser', description: 'Browse the mounted directory with image / audio / video / HTML preview and download.',
@@ -231,6 +297,14 @@
         deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
         overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
         kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · Delete removes selection · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview'
+      },
+      // S3 page specifics: page shell (not-configured card / bucket picker) and share buttons.
+      s3: {
+        title: 'Object Storage', description: 'Browse S3 buckets with preview, download and share links.',
+        selectBucket: 'Bucket',
+        notConfiguredTitle: 'Object storage is not configured',
+        notConfigured: 'S3 object storage is not configured: set the s3 endpoint / region / credentials in the gateway and try again.',
+        share: 'Share link', shared: 'Share link generated', shareFailed: 'Failed to generate share link'
       },
       nginxConf: {
         title: 'Nginx Configuration (danger)',

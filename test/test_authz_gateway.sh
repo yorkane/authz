@@ -10,6 +10,7 @@ ORIGIN_CONTAINER_NAME=""
 BUDGET_CONTAINER_NAME=""
 ENVKEY_CONTAINER_NAME=""
 ENVKEY2_CONTAINER_NAME=""
+S3_CONTAINER_NAME=""
 TMP_DIR=$(mktemp -d)
 # 文件管理测试需要可写 /files：拷贝一份 admin 目录作为可写文件根
 # （只读浏览断言仍依赖其中的 vendor 子目录）。
@@ -83,6 +84,10 @@ cleanup() {
     if [[ -n "$ENVKEY2_CONTAINER_NAME" ]]; then
         docker exec "$ENVKEY2_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
         docker rm -f "$ENVKEY2_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${S3_CONTAINER_NAME:-}" ]]; then
+        docker exec "$S3_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+        docker rm -f "$S3_CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
     if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" >/dev/null 2>&1 || true; fi
     if [[ -n "$REMOTE_PID" ]]; then kill "$REMOTE_PID" >/dev/null 2>&1 || true; fi
@@ -183,7 +188,7 @@ assert_json() {
 #   guest domain-prefix request-rewrite body-rewrite gzip-negotiation
 #   conditional-rewrite
 #   complex-rewrite response-rewrite-xss menu-tree files files-legacy files-manage
-#   nginx-conf agent-key login-lock http-redirect cookie-domain
+#   nginx-conf agent-key login-lock http-redirect cookie-domain s3 s3-live
 #   rewrite-budget envkey
 # 段之间共享登录会话、端口与 mock。被标记成可挑选的段都自带前置（自己登录、
 # 自己建数据）；挑中的段若依赖被跳过段留下的变量，ensure 会让它安静跳过而不是
@@ -619,7 +624,7 @@ assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "retired viewer role folded into guest everywhere" "$(report_get viewer_retired)" "yes"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new|21:menu_entry_s3_browser"
 
 cookie_header() {
     awk '
@@ -823,8 +828,8 @@ assert_contains_all "i18n exposes menu group labels and hints" "$BODY" \
 assert_contains_all "i18n describes preview media gestures" "$BODY" \
     "playPause: '点击画面播放 / 暂停，左右滑动切换文件'" \
     "Tap to play / pause, swipe left or right"
-request GET "$ADMIN_HOST" '/_authz/apps/files.html' "$ADMIN_COOKIE"
-assert_contains_all "preview area binds tap and swipe gesture handlers" "$BODY" \
+request GET "$ADMIN_HOST" '/_authz/apps/browser.js' "$ADMIN_COOKIE"
+assert_contains_all "shared browser component binds tap and swipe gesture handlers" "$BODY" \
     "@click=\"onPreviewClick\"" \
     "@touchstart=\"onPreviewTouchStart\"" \
     "@touchend=\"onPreviewTouchEnd\"" \
@@ -2808,7 +2813,7 @@ request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
 assert_eq "menu tree loads" "$STATUS" "200"
 assert_json "menu tree seeds three groups" '.data.groups | length' "3"
 assert_json "first seeded group is system apps" '.data.groups[0].label' "系统应用"
-assert_json "system group carries five built-in pages" '.data.groups[0].children | length' "5"
+assert_json "system group carries six built-in pages" '.data.groups[0].children | length' "6"
 assert_json "file browser built-in is seeded" '[.data.groups[0].children[] | select(.builtin == "files")] | length' "1"
 assert_json "built-in item maps to internal page" '.data.groups[0].children[0].builtin' "users"
 assert_json "second seeded group is domain services" '.data.groups[1].builtin' "domains"
@@ -3207,6 +3212,203 @@ request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
 assert_eq "cleanup deletes the preview html" "$STATUS" "200"
 
 fi
+section s3
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
+# 未配置 S3 时的优雅降级：信息接口 200+enabled=false，桶级操作 423，
+# 写接口在认证/CSRF/session 门禁先拦下（403/401 优先于 423）。
+request GET "$ADMIN_HOST" /_authz/api/s3 "$ADMIN_COOKIE"
+assert_eq "unconfigured S3 info answers 200" "$STATUS" "200"
+assert_json "unconfigured S3 reports enabled false" '.data.enabled | tostring' "false"
+# 带 bucket 但未配置仍回 enabled=false：/api/s3 的降级语义统一由信息接口表达，
+# 桶级写操作（share/upload/...）才用 423 + s3_disabled。
+request GET "$ADMIN_HOST" "/_authz/api/s3?bucket=any-bucket&path=" "$ADMIN_COOKIE"
+assert_eq "unconfigured S3 bucket listing still degrades to info" "$STATUS" "200"
+assert_json "unconfigured bucket listing reports disabled" '.data.enabled | tostring' "false"
+request GET "$ADMIN_HOST" "/_authz/api/s3/share?bucket=any&name=x.txt" "$ADMIN_COOKIE"
+assert_eq "unconfigured S3 share 423" "$STATUS" "423"
+request GET "$ADMIN_HOST" /_authz/s3/any-bucket/some/key.txt "$ADMIN_COOKIE"
+assert_eq "unconfigured bytes proxy 423" "$STATUS" "423"
+request GET "$ADMIN_HOST" /_authz/api/s3
+assert_eq "S3 info requires a session" "$STATUS" "401"
+request GET "$ADMIN_HOST" /_authz/s3/any-bucket/some/key.txt
+assert_eq "S3 bytes redirect anonymous visitors to login" "$STATUS" "302"
+request PUT "$ADMIN_HOST" /_authz/api/s3/rename "$ADMIN_COOKIE" "" '{"bucket":"any","path":"","name":"a","new_name":"b"}'
+assert_eq "S3 rename without CSRF rejected" "$STATUS" "403"
+request POST "$ADMIN_HOST" "/_authz/api/s3/upload?bucket=any" "$ADMIN_COOKIE" "" '{"not":"multipart"}'
+assert_eq "S3 upload without CSRF rejected before body parse" "$STATUS" "403"
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name":"s3-session-only","role":"admin"}'
+assert_eq "S3 section creates its own admin key" "$STATUS" "201"
+S3_ONLY_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+S3_ONLY_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+request POST "$ADMIN_HOST" /_authz/api/s3/mkdir "" "" '{"bucket":"any","path":"","name":"x"}' "$S3_ONLY_KEY_TOKEN"
+assert_eq "S3 mkdir requires a browser session" "$STATUS" "403"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$S3_ONLY_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "S3 section removes its admin key" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
+assert_json "object storage builtin is seeded" '[.data.groups[0].children[] | select(.builtin == "s3")] | length' "1"
+assert_json "object storage entry label" '[.data.groups[0].children[] | select(.builtin == "s3") | .label] | first' "对象存储"
+request GET "$ADMIN_HOST" /_authz/apps/s3.html "$ADMIN_COOKIE"
+assert_eq "object storage page loads" "$STATUS" "200"
+assert_contains_all "object storage page mounts the shared browser component" "$BODY" \
+    "window.authzBrowser" "window.adminApi.s3Info" "adapter"
+request GET "$ADMIN_HOST" /_authz/apps/files.html "$ADMIN_COOKIE"
+assert_contains_all "files page reuses the shared browser component" "$BODY" \
+    "browser.js" "window.authzBrowser"
+fi
+
+section s3-live
+if [[ "$SECTION_RUN" == "1" ]]; then
+# S3 全生命周期（真实私有服务）。凭据只从环境注入，绝不进仓库：
+#   AUTHZ_S3_TEST_ENDPOINT / AUTHZ_S3_TEST_BUCKET / AUTHZ_S3_TEST_KEY /
+#   AUTHZ_S3_TEST_SECRET / [AUTHZ_S3_TEST_REGION]。未设置即跳过（计 1 pass）。
+if [[ -z "${AUTHZ_S3_TEST_ENDPOINT:-}" || -z "${AUTHZ_S3_TEST_BUCKET:-}" \
+    || -z "${AUTHZ_S3_TEST_KEY:-}" || -z "${AUTHZ_S3_TEST_SECRET:-}" ]]; then
+    pass "S3 live suite skipped (AUTHZ_S3_TEST_* unset)"
+else
+S3_LIVE_CONTAINER="authz-gateway-s3live-$$"
+S3_LIVE_PORT=$(free_port)
+S3_LIVE_TLS=$(free_port)
+S3_URL="http://127.0.0.1:$S3_LIVE_PORT"
+S3_COOKIE="$TMP_DIR/s3live-cookie"
+S3_B="${AUTHZ_S3_TEST_BUCKET:-}"
+S3_P="authz-live-$$"
+mkdir -p "$TMP_DIR/s3live-data/authz"
+docker run -d \
+    --name "$S3_LIVE_CONTAINER" \
+    --network host \
+    -e NGINX_WORKER_PROCESSES=1 \
+    -e AUTHZ_HTTP_PORT="$S3_LIVE_PORT" \
+    -e AUTHZ_HTTPS_PORT="$S3_LIVE_TLS" \
+    -e AUTHZ_HTTP_MODE=serve \
+    -e AUTHZ_ADMIN_PASSWORD=admin123 \
+    -e AUTHZ_PORT_MIN=1000 \
+    -e AUTHZ_PORT_MAX=65535 \
+    -e AUTHZ_S3_ENDPOINT="$AUTHZ_S3_TEST_ENDPOINT" \
+    -e AUTHZ_S3_REGION="${AUTHZ_S3_TEST_REGION:-us-east-1}" \
+    -e AUTHZ_S3_ACCESS_KEY_ID="$AUTHZ_S3_TEST_KEY" \
+    -e AUTHZ_S3_SECRET_ACCESS_KEY="$AUTHZ_S3_TEST_SECRET" \
+    -e AUTHZ_S3_ALLOW_HTTP=true \
+    -e AUTHZ_S3_TMP_DIR=/data/s3tmp \
+    -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
+    -v "$TMP_DIR/s3live-data:/data" \
+    -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+    "$IMAGE" >/dev/null
+S3_CONTAINER_NAME="$S3_LIVE_CONTAINER"
+for _ in $(seq 1 120); do
+    STATUS=$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:$S3_LIVE_PORT/_authz/api/session" 2>/dev/null || true)
+    [[ "$STATUS" == "401" ]] && break
+    sleep 0.25
+done
+[[ "$STATUS" == "401" ]] || fail "S3 live container did not become ready"
+S3_LOGIN_STATUS=$(curl -sS --max-time 5 -D "$TMP_DIR/s3live-login-headers" -o /dev/null \
+    -w '%{http_code}' -X POST "$S3_URL/_authz/login" \
+    --data-urlencode 'username=admin' --data-urlencode 'password=admin123')
+assert_eq "live container issues a session" "$S3_LOGIN_STATUS" "302"
+save_session_cookie "$TMP_DIR/s3live-login-headers" "$S3_COOKIE"
+s3req() {
+    local method=$1 path=$2 cookie=${3:-} csrf=${4:-} data=${5:-}
+    local args=(--silent --show-error --max-time 30 --request "$method" \
+        -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}')
+    [[ -n "$cookie" ]] && args+=(-H "Cookie: $(cookie_header "$cookie")")
+    [[ -n "$csrf" ]] && args+=(-H "X-CSRF-Token: $csrf")
+    [[ -n "$data" ]] && args+=(-H 'Content-Type: application/json' --data "$data")
+    STATUS=$(curl "${args[@]}" "$S3_URL$path")
+    BODY=$(<"$TMP_DIR/body")
+}
+s3put() {
+    local path=$1 fname=$2 src=$3 overwrite=${4:-} url
+    url="$S3_URL/_authz/api/s3/upload?bucket=$S3_B&path=$path"
+    [[ -n "$overwrite" ]] && url="$url&overwrite=1"
+    STATUS=$(curl -sS --max-time 30 -X POST -H "Cookie: $(cookie_header "$S3_COOKIE")" \
+        -H "X-CSRF-Token: $S3_CSRF" -F "file=@$src;filename=$fname" \
+        -o "$TMP_DIR/body" -w '%{http_code}' "$url")
+    BODY=$(<"$TMP_DIR/body")
+}
+s3req GET /_authz/api/session "$S3_COOKIE"
+S3_CSRF=$(jq -er '.data.csrf' "$TMP_DIR/body")
+s3req GET /_authz/api/s3 "$S3_COOKIE"
+assert_eq "live S3 info 200" "$STATUS" "200"
+assert_json "live S3 enabled" '.data.enabled | tostring' "true"
+assert_json "live S3 lists buckets" '.data.buckets | length > 0 | tostring' "true"
+s3req GET "/_authz/api/s3?bucket=$S3_B&path=" "$S3_COOKIE"
+assert_eq "live bucket root listing" "$STATUS" "200"
+printf 'authz-live-%s' "$$" > "$TMP_DIR/s3-hello.txt"
+s3put "$S3_P" "hello.txt" "$TMP_DIR/s3-hello.txt"
+assert_eq "live upload 201" "$STATUS" "201"
+assert_json "live upload names the file" '.data.uploaded[0].name' "hello.txt"
+s3req GET "/_authz/api/s3?bucket=$S3_B&path=$S3_P" "$S3_COOKIE"
+assert_json "uploaded object listed" '[.data.items[] | select(.name == "hello.txt")] | length' "1"
+s3req GET "/_authz/s3/$S3_B/$S3_P/hello.txt" "$S3_COOKIE"
+assert_eq "live object bytes" "$BODY" "authz-live-$$"
+assert_contains "live bytes content type" "$(cat "$TMP_DIR/headers")" "Content-Type: text/plain"
+assert_contains "live bytes sandbox CSP" "$(cat "$TMP_DIR/headers")" "Content-Security-Policy: sandbox"
+RANGE_STATUS=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H 'Range: bytes=0-4' \
+    -H "Cookie: $(cookie_header "$S3_COOKIE")" \
+    "$S3_URL/_authz/s3/$S3_B/$S3_P/hello.txt")
+assert_eq "live Range returns 206" "$RANGE_STATUS" "206"
+DISP_HEADERS=$(curl -sS -D - --max-time 10 -o /dev/null \
+    -H "Cookie: $(cookie_header "$S3_COOKIE")" \
+    "$S3_URL/_authz/s3/$S3_B/$S3_P/hello.txt?download=1")
+assert_contains "live download disposition" "$DISP_HEADERS" "Content-Disposition: attachment"
+s3req GET "/_authz/s3/$S3_B/..%2F..%2Fetc" "$S3_COOKIE"
+assert_eq "live bytes traversal rejected" "$STATUS" "404"
+s3req GET "/_authz/api/s3/share?bucket=$S3_B&path=$S3_P&name=hello.txt" "$S3_COOKIE"
+assert_eq "live share 200" "$STATUS" "200"
+S3_SHARE_URL=$(jq -er '.data.url' "$TMP_DIR/body")
+assert_eq "live presigned URL fetches" \
+    "$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$S3_SHARE_URL")" "200"
+s3put "$S3_P" "hello.txt" "$TMP_DIR/s3-hello.txt"
+assert_eq "live duplicate upload 409" "$STATUS" "409"
+s3put "$S3_P" "hello.txt" "$TMP_DIR/s3-hello.txt" "1"
+assert_eq "live overwrite upload 201" "$STATUS" "201"
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"hello.txt\",\"new_name\":\"hello2.txt\"}"
+assert_eq "live rename 200" "$STATUS" "200"
+assert_json "live rename reports new name" '.data.new_name' "hello2.txt"
+s3req GET "/_authz/s3/$S3_B/$S3_P/hello2.txt" "$S3_COOKIE"
+assert_eq "live renamed object readable" "$STATUS" "200"
+s3req POST /_authz/api/s3/mkdir "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"subdir\"}"
+assert_eq "live mkdir 201" "$STATUS" "201"
+s3req GET "/_authz/api/s3?bucket=$S3_B&path=$S3_P" "$S3_COOKIE"
+assert_json "live mkdir shows as directory" '[.data.items[] | select(.name == "subdir" and .type == "dir")] | length' "1"
+s3put "$S3_P/subdir" "inner.txt" "$TMP_DIR/s3-hello.txt"
+assert_eq "live upload into subdir 201" "$STATUS" "201"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"subdir\"}"
+assert_eq "live non-empty dir delete 409" "$STATUS" "409"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"subdir\",\"recursive\":true}"
+assert_eq "live recursive delete 200" "$STATUS" "200"
+assert_json "live recursive delete counted" '.data.removed >= 2 | tostring' "true"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"hello2.txt\",\"recursive\":true}"
+assert_eq "live cleanup removes the last object" "$STATUS" "200"
+s3req GET "/_authz/api/s3?bucket=$S3_B&path=$S3_P" "$S3_COOKIE"
+assert_json "live prefix empty after cleanup" '.data.items | length' "0"
+s3req POST /_authz/api/api-keys "$S3_COOKIE" "$S3_CSRF" '{"name":"s3-live-key","role":"admin"}'
+assert_eq "live section creates an admin key" "$STATUS" "201"
+S3_LIVE_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+S3_LIVE_KEY=$(jq -er '.data.token' "$TMP_DIR/body")
+assert_eq "live rename rejects machine keys" \
+    "$(curl -sS --max-time 10 -X PUT -H "x-api-key: $S3_LIVE_KEY" -H "X-CSRF-Token: $S3_CSRF" \
+        -H 'Content-Type: application/json' \
+        -d '{\"bucket\":\"'$S3_B'\",\"path\":\"\",\"name\":\"a\",\"new_name\":\"b\"}' \
+        -o /dev/null -w '%{http_code}' "$S3_URL/_authz/api/s3/rename")" "403"
+s3req DELETE "/_authz/api/api-keys/$S3_LIVE_KEY_ID" "$S3_COOKIE" "$S3_CSRF"
+assert_eq "live section removes its key" "$STATUS" "200"
+docker exec "$S3_LIVE_CONTAINER" chmod -R a+rwx /data >/dev/null 2>&1 || true
+docker rm -f "$S3_LIVE_CONTAINER" >/dev/null 2>&1 || true
+S3_CONTAINER_NAME=""
+fi
+fi
+
+
 section nginx-conf
 if [[ "$SECTION_RUN" == "1" ]]; then
 ensure ADMIN_COOKIE CSRF

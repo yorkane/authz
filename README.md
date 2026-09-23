@@ -65,6 +65,16 @@
 - **管理操作（仅 admin，浏览器会话 + CSRF）**：工具栏「新建文件夹」在当前目录创建单层目录；「上传」按钮或直接把文件拖进页面上传到当前目录（multipart 流式落盘，单文件上限 2GB；同名冲突会弹窗确认后可选择覆盖；拖拽监听挂在 window，落在页面任何位置都能收进当前目录，遮罩会显示目标目录名）；列表行悬停出现操作菜单，网格卡片悬停出现删除按钮，支持下载 / 重命名（文件与目录通用）/ 删除（目录需显式勾选递归删除）。写操作被限制在 `/files` 根内：路径逐级要求真实目录、符号链接一律拒绝读写，名称禁止任何路径分隔符。要开放写能力，部署时必须把 `FILES_DIR` 挂成可写卷（默认 compose 是 `:ro`，只读挂载时写操作返回 500）。
 - 未登录访问 `/_authz/files/*` 与只读 API 均要求登录（或合法非 guest API Key）。
 
+### 对象存储浏览（S3 兼容）
+
+管理壳内置“对象存储”应用（左侧菜单 → 系统应用 → 对象存储 / Object Storage，即 `/_authz/apps/` 下的 `s3.html`，仅 admin 可见）：
+
+- 网关侧存凭证并代签 SigV4（vendored 的 Kong/lua-resty-aws 签名器，含 UNSIGNED-PAYLOAD 本地补丁），浏览器永远接触不到 AKID/SECRET；启用需 `AUTHZ_S3_ENDPOINT` + `AUTHZ_S3_REGION` + AKID/SECRET（明文 http 另加 `AUTHZ_S3_ALLOW_HTTP=true`），完整契约与私有服务实测坑清单见 [doc/s3-integration.md](doc/s3-integration.md)；
+- 能力与文件浏览对齐：列目录（桶选择器 + 分页）、上传（multipart 落暂存再 PUT，同名冲突 409 后可覆盖）、下载/预览（图片/音频/视频/HTML 沙箱/文本）、Range 206 分段、重命名（Copy+Delete）、新建目录（`key/` 标记对象）、递归删除、presign 分享链接（60s–7 天，带 response-content-type/disposition 覆盖）；
+- 对象字节走 `/_authz/s3/<bucket>/<key>`（`?download=1` / `?authz_preview=1`，CSP sandbox + nosniff 由 Lua 下发），认证与 `/_authz/files/` 同款（会话或合法非 guest API Key）；
+- 与文件浏览共用同一套浏览器组件（`admin/browser.js` + `browser.css`，含预览/手势/上传/重命名/删除），`files.html`/`files.css` 瘦身为薄壳，仅接口 adapter 不同；
+- 未配置 `AUTHZ_S3_ENDPOINT` 时菜单仍可见，`/api/s3` 返回 `enabled:false` 显示“未配置”卡片，桶级操作与字节流返回 423。
+
 ### Nginx 配置编辑（危险）
 
 管理壳内置“Nginx配置(危险)”应用（左侧菜单 → 系统应用 → Nginx配置(危险)，即 `/_authz/apps/` 下的 `nginx_conf.html`，仅 admin 可见）：
@@ -438,13 +448,15 @@ GHCR 推送使用内置 `GITHUB_TOKEN`，无需额外配置。
 │   ├── apps/                    # 用户/角色与授权管理页面
 │   ├── vendor/                  # 合并后的 Quasar/Vue/语言包/MDI 静态资源
 │   ├── api.js                   # 应用公共 API 客户端
-│   └── i18n.js                  # 全局中英文状态
+│   ├── i18n.js                  # 全局中英文状态
+│   ├── browser.js / browser.css # files 与 s3 共用的浏览器组件
+│   └── s3.html / s3.css         # 对象存储页（薄壳 + S3 adapter）
 ├── scripts/
 │   └── register_nocobase_oauth.py # NocoBase Client 注册脚本
 ├── lualib/
 │   └── resty/
 │       ├── hmac.lua            # resty.hmac 适配器（基于捆绑 resty.openssl.hmac）
-│       └── authz/              # Authz Gateway (动态端口代理+认证)
+│       ├── authz/              # Authz Gateway (动态端口代理+认证)
 │           ├── init.lua        # 稳定生命周期入口
 │           ├── config.lua      # 通用环境配置
 │           ├── provider_config.lua # OAuth/身份 Provider 装配
@@ -458,7 +470,11 @@ GHCR 推送使用内置 `GITHUB_TOKEN`，无需额外配置。
 │           ├── nocobase.lua    # NocoBase 登录/角色查询与身份快照
 │           ├── casbin.lua      # mini-casbin (p/g, deny优先)
 │           ├── session.lua     # 服务端会话
+│           ├── s3.lua          # 对象存储客户端（SigV4 代签 + 目录语义）
+│           ├── s3_proxy.lua    # /_authz/s3/ 字节流代理（Range/CSP/HTML注入）
+│           ├── s3_upload.lua   # S3 multipart 上传（落暂存再 PUT）
 │           └── util.lua        # 密码哈希/随机token/HTML转义
+│       └── aws/                # vendored Kong/lua-resty-aws SigV4 签名器（1.7.2，含本地补丁）
 ├── conf/
 │   ├── nginx.conf.template     # 全局配置、HTTP/HTTPS listener 与 TLS
 │   ├── server.conf.template    # HTTP/HTTPS 共用 location 与代理配置

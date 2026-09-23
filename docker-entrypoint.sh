@@ -57,6 +57,9 @@ case "$HTTP_MODE" in
 esac
 
 mkdir -p "$(dirname "$DB_PATH")" "$CERT_DIR" /var/log/openresty
+# S3 上传暂存目录：配了 endpoint 才需要；缺目录时上传会以「暂存目录不可写」失败，
+# 在这里建好，运维只需把 AUTHZ_S3_TMP_DIR 指到 /data 下的可写路径。
+[ -n "${AUTHZ_S3_ENDPOINT:-}" ] && mkdir -p "${AUTHZ_S3_TMP_DIR:-/data/s3tmp}"
 
 # ── 自签默认证书 (10 年, SAN: DNS:*) ─────────────────────────────
 if [ ! -s "$CERT_FILE" ] || [ ! -s "$CERT_KEY" ]; then

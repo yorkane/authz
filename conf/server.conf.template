@@ -170,6 +170,40 @@ location ^~ /_authz/files/ {
     }
 }
 
+# ── 对象存储（S3）浏览模块 ─────────────────────────────────────
+# 目录列表走 /_authz/api/s3（router），这里只按路径吐对象字节：内容在远端 S3
+# 服务上，nginx 无法静态 alias，所以用 content_by_lua 流式代理（resty.http →
+# ngx.print），并把认证做成与 /_authz/files/ 完全同款的 access 门（会话或 API Key，
+# guest 一律引导到诊断页）。路径挂在 /_authz/ 下避免与业务代理的 /s3 前缀冲突。
+location = /_authz/s3 {
+    return 301 /_authz/s3/;
+}
+
+location ^~ /_authz/s3/ {
+    # 大对象（视频）用线程池读；慢客户端不阻塞 worker（ngx.flush 已经逐块推送）。
+    client_max_body_size 0;
+    # CSP 与 nosniff 由 s3_proxy 自己下发（add_header 会叠加出重复头，reject() 分支也需要它们）。
+    proxy_buffering off;
+    access_by_lua_block {
+        local authz = require "resty.authz"
+        require("resty.authz.db").open(authz.config.db_path)
+        -- 免登录放行：合法 API Key 直接取对象，与文件浏览一致。
+        if require("resty.authz.api_key").authorize_request() then return end
+        local session = require "resty.authz.session"
+        local token = session.get_request_token()
+        local current = token and session.get(token)
+        if not current then
+            return ngx.redirect("/_authz/login?next=" .. ngx.escape_uri(ngx.var.request_uri))
+        end
+        if require("resty.authz.api.common").is_guest(current) then
+            return ngx.redirect("/_authz/guest")
+        end
+    }
+    content_by_lua_block {
+        require("resty.authz.s3_proxy").serve()
+    }
+}
+
 location / {
     set $authz_target "";
     set $authz_user   "";

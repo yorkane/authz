@@ -119,6 +119,20 @@ services:
       OPENRESTY_TEMPLATE_DIR: /etc/openresty/templates
       # 文件浏览应用只读内容根（默认 /files，与 server.conf 的 alias 保持一致）
       AUTHZ_FILES_ROOT: ${AUTHZ_FILES_ROOT:-/files}
+      # 对象存储浏览应用（S3 兼容私有服务）。留空 AUTHZ_S3_ENDPOINT 即整体关闭，
+      # 菜单仍可见，页面显示“未配置”卡片。SECRET 只进签名器，任何接口都不回显。
+      AUTHZ_S3_ENDPOINT: ${AUTHZ_S3_ENDPOINT:-}
+      AUTHZ_S3_REGION: ${AUTHZ_S3_REGION:-us-east-1}
+      AUTHZ_S3_ACCESS_KEY_ID: ${AUTHZ_S3_ACCESS_KEY_ID:-}
+      AUTHZ_S3_SECRET_ACCESS_KEY: ${AUTHZ_S3_SECRET_ACCESS_KEY:-}
+      # endpoint 用 http 明文时必须显式打开，避免误配成明文却以为在走 TLS。
+      AUTHZ_S3_ALLOW_HTTP: ${AUTHZ_S3_ALLOW_HTTP:-false}
+      AUTHZ_S3_TMP_DIR: ${AUTHZ_S3_TMP_DIR:-/data/s3tmp}
+      AUTHZ_S3_SHARE_TTL: ${AUTHZ_S3_SHARE_TTL:-3600}
+      AUTHZ_S3_CONNECT_TIMEOUT_MS: ${AUTHZ_S3_CONNECT_TIMEOUT_MS:-2000}
+      AUTHZ_S3_READ_TIMEOUT_MS: ${AUTHZ_S3_READ_TIMEOUT_MS:-30000}
+      AUTHZ_S3_SEND_TIMEOUT_MS: ${AUTHZ_S3_SEND_TIMEOUT_MS:-30000}
+      AUTHZ_S3_KEEPALIVE_MS: ${AUTHZ_S3_KEEPALIVE_MS:-30000}
     volumes:
       - ${DATA_DIR:-./data}:/data
       - ${ADMIN_UI_DIR:-./admin}:/usr/local/openresty/nginx/html/admin:ro

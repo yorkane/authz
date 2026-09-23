@@ -478,6 +478,26 @@ _M.list = {
                 "open_in_new INTEGER NOT NULL DEFAULT 0")
         end,
     },
+    {
+        version = 21,
+        name = "menu_entry_s3_browser",
+        up = function(db)
+            -- 内置“对象存储”入口（前端 builtin=s3 映射到 s3.html）。
+            -- admin_only=1：这个页面能读写远端对象存储的凭证所及范围，与 nginx
+            -- 配置编辑器同级，不给 staff 看到（浏览文件页仍可给全员）。
+            local rows = db.query("SELECT id FROM menu_entries WHERE builtin = 's3'")
+            if rows and rows[1] then return end
+            local groups = db.query([[SELECT id FROM menu_entries
+                WHERE kind = 'group' AND label = '系统应用' ORDER BY id LIMIT 1]])
+            local sys_id = groups and groups[1] and groups[1].id
+            if not sys_id then return end
+            local now = os.time()
+            must(db.exec([[INSERT INTO menu_entries(
+                kind, parent_id, label, url, icon, builtin, admin_only, sort_order, enabled, created_at, updated_at)
+                VALUES('item', ?, '对象存储', '', 'mdi-bucket', 's3', 1, 17, 1, ?, ?)]],
+                sys_id, now, now))
+        end,
+    },
 }
 
 function _M.run(db)
