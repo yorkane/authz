@@ -24,3 +24,14 @@
   line-height: 1.6;
   opacity: 0.85;
 }
+
+/* 可写范围提示：工具条内的小字，部分可写（AUTHZ_S3_WRITABLE_PATHS）时显示。 */
+.s3-writable-scope {
+  align-self: center;
+  font-size: 12px;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40vw;
+}

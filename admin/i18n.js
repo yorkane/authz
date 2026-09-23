@@ -30,6 +30,7 @@
         playPause: '点击画面播放 / 暂停，左右滑动切换文件',
         truncated: '目录条目过多，仅显示前 2000 条',
         upload: '上传', dropHint: '松手上传到当前目录', uploading: '正在上传 {n} 个文件…',
+        readOnlyDir: '只读目录：不在允许写入/删除的范围内（AUTHZ_S3_WRITABLE_PATHS）',
         uploaded: '已上传 {ok} 个文件', uploadedSkipped: '，{skip} 个被跳过',
         actions: '操作', rename: '重命名', delete: '删除', cancel: '取消', confirm: '确认',
         newFolder: '新建文件夹', newFolderTitle: '新建文件夹', created: '已创建文件夹',
@@ -74,6 +75,7 @@
         selectBucket: '选择桶',
         notConfiguredTitle: '对象存储未配置',
         notConfigured: 'S3 对象存储未配置：请在网关配置 s3 endpoint / region / 凭证后重试。',
+        writableScope: '可写范围：',
         share: '分享链接', shared: '已生成分享链接', shareFailed: '分享链接生成失败'
       },
       nginxConf: {
@@ -260,6 +262,7 @@
         playPause: 'Tap to play / pause, swipe left or right for the previous or next file',
         truncated: 'Too many entries; only the first 2000 are listed',
         upload: 'Upload', dropHint: 'Drop to upload into this folder', uploading: 'Uploading {n} file(s)…',
+        readOnlyDir: 'Read-only: outside the writable scope (AUTHZ_S3_WRITABLE_PATHS)',
         uploaded: 'Uploaded {ok} file(s)', uploadedSkipped: ', {skip} skipped',
         actions: 'Actions', rename: 'Rename', delete: 'Delete', cancel: 'Cancel', confirm: 'Confirm',
         newFolder: 'New folder', newFolderTitle: 'New folder', created: 'Folder created',
@@ -304,6 +307,7 @@
         selectBucket: 'Bucket',
         notConfiguredTitle: 'Object storage is not configured',
         notConfigured: 'S3 object storage is not configured: set the s3 endpoint / region / credentials in the gateway and try again.',
+        writableScope: 'Writable scope: ',
         share: 'Share link', shared: 'Share link generated', shareFailed: 'Failed to generate share link'
       },
       nginxConf: {

@@ -28,6 +28,7 @@
           <q-btn v-for="crumb in crumbs" :key="crumb.path" flat dense no-caps :icon="crumb.root ? 'mdi-bucket-outline' : ''" :label="crumb.label" :class="{ 'crumb-current': crumb.current }" @click="crumb.go"></q-btn>
         </template>
         <template v-slot:toolbar-extra>
+          <div v-if="writableScope.length" class="s3-writable-scope">{{ t.writableScope }}{{ writableScope.join(', ') }}</div>
           <q-select v-model="bucket" dense outlined :options="buckets" :label="t.selectBucket"
             class="s3-bucket-select" :disabled="buckets.length < 2"></q-select>
         </template>
@@ -38,9 +39,9 @@
   </div>
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./i18n.js?v=46"></script>
+  <script src="./i18n.js?v=47"></script>
   <script src="./api.js?v=21"></script>
-  <script src="./browser.js?v=3"></script>
+  <script src="./browser.js?v=4"></script>
   <script>
     const { computed, onMounted, ref, watch } = Vue
 
@@ -60,10 +61,18 @@
 
     const buckets = computed(() => (info.value && info.value.buckets || []).map(b => b.name))
 
+    // 可写范围提示：仅当“部分可写”（writable_all=false 且 writable_roots 非空）时显示。
+    const writableScope = computed(() => {
+      const d = info.value
+      if (!d || d.writable_all || !Array.isArray(d.writable_roots) || !d.writable_roots.length) return []
+      return d.writable_roots
+    })
+
     const adapter = {
       storagePrefix: 'authz-s3',
       i18nRoot: 's3',
       supportsMkdir: true, // 后端实现了目录标记对象（以 / 结尾的 0 字节对象）
+      supportsWritable: true, // 后端按 AUTHZ_S3_WRITABLE_PATHS 返回 data.writable / items[].writable
       rootLabel: () => bucket.value || '', // 面包屑起点 = 当前桶名
       list (path, token) {
         // token 是上一页返回的 next_token（组件 loadMore 传入）；首轮为空。
@@ -144,7 +153,7 @@
           loadInfo()
         })
 
-        return { adapter, browser, bucket, buckets, info, infoLoading, t }
+        return { adapter, browser, bucket, buckets, info, infoLoading, t, writableScope }
       }
     })
     app.component('AzBrowser', window.authzBrowser.component)

@@ -11,6 +11,7 @@ local files = require "resty.authz.files"
 local files_upload = require "resty.authz.files_upload"
 local s3 = require "resty.authz.s3"
 local s3_upload = require "resty.authz.s3_upload"
+local s3_scope = require "resty.authz.s3_scope"
 local nginxconf = require "resty.authz.nginxconf"
 local guest = require "resty.authz.guest"
 
@@ -264,6 +265,13 @@ local function payload_or_error(payload, status)
     return payload, status
 end
 
+-- 可写范围外的统一 403（upload/mkdir/rename/remove 共用）：两值返回，不碰 klib.router
+-- “只取前两个返回值”的坑。
+local function s3_read_only()
+    return { error = { code = "s3_read_only",
+        message = "该路径不在可写范围内（AUTHZ_S3_WRITABLE_PATHS）" } }, 403
+end
+
 -- 统一的“未配置/参数非法”前置校验。返回 (cfg, bucket, path) 或 (nil, payload, status)。
 local function s3_context(args, need_bucket)
     local cfg = s3_cfg()
@@ -301,12 +309,24 @@ register("GET", "/api/s3", guard.wrap(function(_, env)
         if not buckets then
             return { error = { code = "s3_error", message = err } }, status or 502
         end
+        local bucket_rows = {}
+        for index, b in ipairs(buckets) do
+            bucket_rows[index] = {
+                name = b.name,
+                creation_date = b.creation_date,
+                -- 整桶可写：全写，或存在条目==bucket（桶内前缀条目不算整桶可写）。
+                writable = s3_scope.bucket_writable(cfg.writable, b.name),
+            }
+        end
         return { data = {
             enabled = true,
             endpoint = require("resty.authz").config.s3_endpoint_display,
             region = require("resty.authz").config.s3_region_display,
-            buckets = array_data(buckets),
+            buckets = array_data(bucket_rows),
             bucket = cjson.null,
+            -- 可写范围回显（空时必须是 cjson.empty_array，否则前端拿到 null）。
+            writable_roots = array_data(cfg.writable_roots),
+            writable_all = cfg.writable_all,
         } }
     end
     local token = args.token and tostring(args.token) or nil
@@ -317,7 +337,15 @@ register("GET", "/api/s3", guard.wrap(function(_, env)
             message = err or "无法读取对象列表",
         } }, status or 400
     end
-    listing.items = array_data(listing.items)
+    -- 只读标记：每个条目按 item 语义（key = join(path, name)），目录整体按 dir 语义。
+    -- 注意先遍历再 array_data：空列表时 array_data 会换成 cjson.empty_array
+    --（userdata 哨兵），对它 ipairs 会直接 500。
+    local rows = listing.items or {}
+    for index, item in ipairs(rows) do
+        item.writable = s3_scope.item_writable(cfg.writable, bucket, s3.join(path, item.name))
+    end
+    listing.items = array_data(rows)
+    listing.writable = s3_scope.dir_writable(cfg.writable, bucket, path)
     listing.next_token = listing.next_token or cjson.null
     return { data = listing }
 end))
@@ -344,6 +372,10 @@ register("POST", "/api/s3/upload", guard.wrap(function(params, env)
     local args = type(env.uri_args) == "table" and env.uri_args or {}
     local cfg, bucket, path = s3_context(args, true)
     if not cfg then return bucket, path end
+    -- 可写范围拦截（dir 语义：对象落在当前目录 path 下）。
+    if not s3_scope.dir_writable(cfg.writable, bucket, path) then
+        return s3_read_only()
+    end
     local overwrite = args.overwrite == "1" or args.overwrite == "true"
     local payload, err, status = s3_upload.upload(cfg, bucket, path, overwrite)
     if not payload then
@@ -362,6 +394,11 @@ register("PUT", "/api/s3/rename", guard.wrap(function(params, env, req)
     if not name or not new_name then
         return { error = { code = "invalid_name", message = "缺少或非法的 name/new_name" } }, 400
     end
+    -- 可写范围拦截（item 语义：源与目标对象 key 都必须在范围内）。
+    if not s3_scope.item_writable(cfg.writable, bucket, s3.join(path, name)) or
+        not s3_scope.item_writable(cfg.writable, bucket, s3.join(path, new_name)) then
+        return s3_read_only()
+    end
     return guard.result(s3.rename(cfg, bucket, path, name, new_name))
 end, { admin = true, csrf = true, session_only = true }))
 
@@ -375,6 +412,10 @@ register("DELETE", "/api/s3/remove", guard.wrap(function(params, env, req)
         return { error = { code = "invalid_name", message = "缺少或非法的 name" } }, 400
     end
     local key = s3.join(path, name)
+    -- 可写范围拦截（item 语义；递归删除同此判定，整个前缀下任一对象越界即拒绝）。
+    if not s3_scope.item_writable(cfg.writable, bucket, key) then
+        return s3_read_only()
+    end
     if data.recursive == true then
         -- 三值返回必须过 guard.result：klib.router 只取前两个返回值，
         -- 直接 return nil, err, status 会把 err 文案当成状态码（实测变空 200）。
@@ -405,6 +446,12 @@ register("POST", "/api/s3/mkdir", guard.wrap(function(params, env, req)
     local name = s3.normalize_name(data.name)
     if not name then
         return { error = { code = "invalid_name", message = "缺少或非法的 name" } }, 400
+    end
+    -- 可写范围拦截按【目标目录自身】判定：若父目录可写，目标必然在范围内
+    --（前缀语义）；父目录只读但目标本身落在可写范围内时也必须放行——否则
+    -- 默认场景（范围=LAN IP 前缀）下该前缀目录永远无法被首次创建。
+    if not s3_scope.dir_writable(cfg.writable, bucket, s3.join(path, name)) then
+        return s3_read_only()
     end
     local key = s3.join(path, name) .. "/"
     local ok, err, err_status = s3.put(cfg, bucket, key, { body = "" })
@@ -455,7 +502,12 @@ register("DELETE", "/api/menu-entries/:id", guard.wrap(function(params)
 end, { admin = true, csrf = true }))
 
 -- ── Error handlers ──────────────────────────────────────────────────────────
-local function error_handler(ctx, status, _, _, _)
+local function error_handler(ctx, status, err, _, _)
+    if status >= 500 and err then
+        -- klib 用 xpcall+debug.traceback 捕获 handler 异常后交到这里；不在这里落
+        -- 日志的话，线上 500 完全无法定位（error.log 一个字节都不会有）。
+        ngx.log(ngx.ERR, "authz router error: ", tostring(err))
+    end
     local accept_json = tostring(ngx.req.get_headers()["Accept"] or "")
         :find("application/json", 1, true) ~= nil
 

@@ -3277,7 +3277,7 @@ S3_LIVE_TLS=$(free_port)
 S3_URL="http://127.0.0.1:$S3_LIVE_PORT"
 S3_COOKIE="$TMP_DIR/s3live-cookie"
 S3_B="${AUTHZ_S3_TEST_BUCKET:-}"
-S3_P="authz-live-$$"
+S3_P="10.254.253.252/authz-live-$$"
 mkdir -p "$TMP_DIR/s3live-data/authz"
 docker run -d \
     --name "$S3_LIVE_CONTAINER" \
@@ -3295,6 +3295,7 @@ docker run -d \
     -e AUTHZ_S3_SECRET_ACCESS_KEY="$AUTHZ_S3_TEST_SECRET" \
     -e AUTHZ_S3_ALLOW_HTTP=true \
     -e AUTHZ_S3_TMP_DIR=/data/s3tmp \
+    -e AUTHZ_HOST_LAN_IP=10.254.253.252 \
     -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
     -v "$TMP_DIR/s3live-data:/data" \
     -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
@@ -3408,7 +3409,41 @@ s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
     "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"heal.txt\",\"recursive\":true}"
 assert_eq "live cleanup removes the heal object" "$STATUS" "200"
 s3req GET "/_authz/api/s3?bucket=$S3_B&path=$S3_P" "$S3_COOKIE"
+# 空目录列表必须 200：array_data 会把空 items 换成 cjson.empty_array（userdata），
+# 在它上面 ipairs 会让整个请求 500（jq 对 null 取 length 得 0，会掩盖这个缺陷）。
+assert_eq "live empty prefix listing returns 200" "$STATUS" "200"
 assert_json "live prefix empty after cleanup" '.data.items | length' "0"
+# ── 默认只读范围（AUTHZ_S3_WRITABLE_PATHS 未设 = 本机 LAN IP 前缀）────────
+# 容器里 AUTHZ_HOST_LAN_IP=10.254.253.252 ⇒ 可写范围=该前缀；S3_P 就在其内，
+# 上面的写操作全部合法。以下验证范围外：写一律 403 s3_read_only，读不受影响。
+s3req POST /_authz/api/s3/mkdir "$S3_COOKIE" "$S3_CSRF" \
+    '{"bucket":"'$S3_B'","path":"","name":"authz-ro-$$"}'
+assert_eq "live mkdir at bucket root rejected (read-only scope)" "$STATUS" "403"
+assert_json "read-only 403 carries s3_read_only code" '.error.code' "s3_read_only"
+# 只读父目录下、目标本身在范围内 → mkdir 必须放行（默认场景下 LAN IP 前缀
+# 目录的首次创建走的就是这条路径；回归容器里该前缀的父目录即桶根，只读）。
+s3req POST /_authz/api/s3/mkdir "$S3_COOKIE" "$S3_CSRF" \
+    '{"bucket":"'$S3_B'","path":"","name":"10.254.253.252"}'
+assert_eq "live first-time mkdir into read-only parent" "$STATUS" "201"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    '{"bucket":"'$S3_B'","path":"","name":"10.254.253.252","recursive":true}'
+assert_eq "live cleanup of the first-time mkdir dir" "$STATUS" "200"
+printf 'authz-ro-%s' "$$" > "$TMP_DIR/s3-ro.txt"
+s3put "" "ro-root.txt" "$TMP_DIR/s3-ro.txt"
+assert_eq "live upload at bucket root rejected" "$STATUS" "403"
+s3put "nonip-authz-ro" "keep.txt" "$TMP_DIR/s3-ro.txt"
+assert_eq "live upload into out-of-scope prefix 403" "$STATUS" "403"
+s3req GET "/_authz/api/s3?bucket=$S3_B&path=" "$S3_COOKIE"
+assert_eq "read-only bucket root still lists (200)" "$STATUS" "200"
+assert_json "listing marks bucket root read-only" '.data.writable | tostring' "false"
+s3req GET "/_authz/api/s3?bucket=$S3_B&path=10.254.253.252" "$S3_COOKIE"
+assert_eq "in-scope empty dir listing returns 200" "$STATUS" "200"
+assert_json "listing marks in-scope dir writable" '.data.writable | tostring' "true"
+assert_json "in-scope dir items all writable" '[.data.items[] | select(.writable != true)] | length' "0"
+s3req GET /_authz/api/s3 "$S3_COOKIE"
+assert_json "info echoes writable roots" '.data.writable_roots | index("10.254.253.252") != null | tostring' "true"
+assert_json "info writable_all false" '.data.writable_all | tostring' "false"
+assert_json "info buckets all read-only" '[.data.buckets[] | select(.writable != false)] | length' "0"
 s3req POST /_authz/api/api-keys "$S3_COOKIE" "$S3_CSRF" '{"name":"s3-live-key","role":"admin"}'
 assert_eq "live section creates an admin key" "$STATUS" "201"
 S3_LIVE_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")

@@ -68,6 +68,9 @@ AKID/SECRET），`signatureVersion="s3"`、`endpointPrefix="s3"`。
 | `AUTHZ_S3_SECRET_ACCESS_KEY` | 空 | endpoint 已设时必填（不得含空白/控制字符） |
 | `AUTHZ_S3_ALLOW_HTTP` | `false` | endpoint 为明文 `http` 时必须显式置 `true`，否则**启动报错**（防止误以为在走 TLS） |
 | `AUTHZ_S3_TMP_DIR` | `/data/s3tmp` | 上传中转暂存目录（容器内路径，需可写；与 `/data` 同卷最省 IO）。`docker-entrypoint.sh` 在 endpoint 已设时自动 `mkdir -p`；即使 entrypoint 是旧版或目录运行期被清掉，上传路径每次也会先逐级自建（见 §6.k） |
+| `AUTHZ_S3_WRITABLE_PATHS` | 空（= 默认本机局域网 IP） | **可写范围白名单**（逗号分隔）。上传/建目录/重命名/删除只允许落在范围内；范围外一律只读（仍可浏览、预览、下载、分享）。条目语义：`noco`=整桶、`noco/rpa`=该桶内前缀、`*/docs`=任意桶内前缀、无分隔符条目（如 LAN IP）=同名整桶或任意桶内该路径前缀。`/` 或 `*` = 全部可写；条目含 `..`/控制字符/`?`/`#` 启动报错 |
+| `AUTHZ_HOST_LAN_IP` | 空（= 自动探测） | 覆盖「本机局域网 IP」的探测值（非 host 网络或测试用）。探测用 FFI UDP connect 到保留地址选路由源地址，不发包；探测失败且未设本变量时**整体降级为只读**并告警 |
+
 | `AUTHZ_S3_SHARE_TTL` | `3600` | 分享 presigned URL 有效期（秒），钳制在 **60–604800** |
 | `AUTHZ_S3_CONNECT_TIMEOUT_MS` | `2000` | 建连超时（毫秒，下限 50） |
 | `AUTHZ_S3_SEND_TIMEOUT_MS` | `30000` | 发送超时（毫秒，下限 200） |
@@ -88,12 +91,18 @@ compose 与 `.env.example` 已列出全部超时项；`config.lua` 对每个数�
 
 统一响应形状：成功 `{"data": ...}`，失败 `{"error":{"code","message"}}`。
 
+写接口（upload/mkdir/rename/remove）先过 `s3_scope` 可写范围白名单（见 §3
+`AUTHZ_S3_WRITABLE_PATHS`）：范围外一律 `403` + `code=s3_read_only`。
+判定口径：upload 看当前目录（dir 语义）；mkdir 看目标目录自身（允许在只读
+父目录下首次创建范围内的目录）；rename 源与目标都要可写，
+remove 看目标条目（item 语义）。只读接口（列表/share/字节流）不受影响。
+
 ### `GET /api/s3`（info / 列表，只读）
 
 - 查询参数：`bucket`（可选）、`path`（可选，目录前缀）、`token`（可选，翻页）。
-- 不带 `bucket` → 桶列表：`data = { enabled, endpoint, region, buckets: [{name, creation_date}], bucket: null }`
+- 不带 `bucket` → 桶列表：`data = { enabled, endpoint, region, buckets: [{name, creation_date, writable}], bucket: null, writable_roots: [...], writable_all: bool }`
   （`enabled=false` 时 `buckets` 为空数组、`endpoint`/`region` 为空串）。
-- 带 `bucket` → 目录内容：`data = { items: [{name, type: "file"|"dir", size, mtime}], bucket, path, truncated, next_token }`
+- 带 `bucket` → 目录内容：`data = { items: [{name, type: "file"|"dir", size, mtime, writable}], bucket, path, truncated, next_token, writable }`（`data.writable`=当前目录可写，`items[].writable`=该条目可写，均由 `AUTHZ_S3_WRITABLE_PATHS` 判定）
   （目录在前、`type=dir` 且 `size=0/mtime=null`；`next_token` 无下一页时为 `null`）。
 - 权限：任意非 guest 会话或 API Key；未配置时 200 + `enabled=false`。
 
@@ -185,6 +194,11 @@ compose 与 `.env.example` 已列出全部超时项；`config.lua` 对每个数�
 - 路由：`admin/app.js` 的 builtin 映射加 `s3: 's3.html?v=1'`；菜单由迁移
   `21:menu_entry_s3_browser` 写入 `menu_entries`（系统应用组，label=对象存储，
   icon=mdi-bucket，`builtin='s3'`，`admin_only=1`，sort_order=17）。
+- **只读范围（写白名单）**：s3 adapter 声明 `supportsWritable: true` 后，
+  组件按 `GET /api/s3` 的 `data.writable`（当前目录）与 `items[].writable`
+  （每个条目）隐藏上传/新建目录/重命名/删除入口，只留下载/分享/预览；
+  范围外条目名旁显示 `mdi-lock`，目录只读时顶部一条 banner。files 页不声明
+  该属性 → 恒可写，行为不变。后端仍独立 403（`s3_read_only`），前端只是省点击。
 - **回归测试断言迁移**：「手势处理」相关断言已从 `files.html` 改指
   `/_authz/apps/browser.js`（逻辑移进了共享组件），`section s3` 同时断言
   s3 页与 files 页都挂载 `window.authzBrowser`。
@@ -278,18 +292,18 @@ l. **不支持条件请求，网关不得转发 ETag/Last-Modified**：该服务
   未登录 401/302、无 CSRF 403、机器 Key 拒绝写接口 403、
   菜单 seed（builtin=s3、label=对象存储）、s3.html 与 files.html
   都挂载共享组件。
-- `section s3-live`（36 项断言，需真实服务）：临时起一个带 S3 env 的
+- `section s3-live`（52 项断言，需真实服务）：临时起一个带 S3 env 的
   网关容器，跑完整生命周期——info/桶列表、上传 201、列表命中、字节回读
   （含 Content-Type 与 sandbox CSP）、Range 206、`?download=1` 的
   Content-Disposition、路径穿越 404、presign 链接可直取 200、同名 409、
   覆盖 201、rename、mkdir 显示为目录、子目录上传、非空目录删 409、
-  递归删除、清理后前缀为空、机器 Key 403、字节响应不带 ETag/Last-Modified
-  （防 nginx 伪造 304）、`rm -rf` 暂存目录后上传仍 201 且目录被重建（自愈）。
+  递归删除、清理后前缀为空（空前缀列表必须 200：array_data 把空 items 换成 cjson.empty_array 后不能再 ipairs，否则整个请求 500）、机器 Key 403、字节响应不带 ETag/Last-Modified
+  （防 nginx 伪造 304）、`rm -rf` 暂存目录后上传仍 201 且目录被重建（自愈）。（默认可写范围=容器内 AUTHZ_HOST_LAN_IP 前缀：范围外写 403 s3_read_only、列表/桶/info 的 writable 标记与 writable_roots 回显）
   凭据只从环境注入（绝不进仓库）：
   `AUTHZ_S3_TEST_ENDPOINT` / `AUTHZ_S3_TEST_BUCKET` / `AUTHZ_S3_TEST_KEY` /
   `AUTHZ_S3_TEST_SECRET` / 可选 `AUTHZ_S3_TEST_REGION`；缺任一即跳过（计 1 pass）。
 
-跑法（当前全量 **1115 项**检查通过，日志 `/data/tmp/s3-test/full-run5.log`）：
+跑法（当前全量 **1131 项**检查通过，日志 `/data/tmp/s3-wr/full-run9.log`）：
 
 ```bash
 export OPENRESTY_TEST_IMAGE=authz:latest

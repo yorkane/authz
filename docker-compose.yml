@@ -135,6 +135,10 @@ services:
       AUTHZ_S3_READ_TIMEOUT_MS: ${AUTHZ_S3_READ_TIMEOUT_MS:-30000}
       AUTHZ_S3_SEND_TIMEOUT_MS: ${AUTHZ_S3_SEND_TIMEOUT_MS:-30000}
       AUTHZ_S3_KEEPALIVE_MS: ${AUTHZ_S3_KEEPALIVE_MS:-30000}
+      # S3 可写范围：逗号分隔多个；空 = 默认本机局域网 IP 前缀；"/" 或 "*" = 全部可写；范围外只读
+      AUTHZ_S3_WRITABLE_PATHS: ${AUTHZ_S3_WRITABLE_PATHS:-}
+      # 显式覆盖本机局域网 IP（默认自动探测；测试或非 host 网络模式用）
+      AUTHZ_HOST_LAN_IP: ${AUTHZ_HOST_LAN_IP:-}
     volumes:
       - ${DATA_DIR:-./data}:/data
       - ${ADMIN_UI_DIR:-./admin}:/usr/local/openresty/nginx/html/admin:ro

@@ -58,8 +58,8 @@
       <q-btn-toggle v-model="viewMode" dense unelevated no-caps :options="viewOptions" toggle-class="files-toggle-active"></q-btn-toggle>
       <q-btn dense unelevated round :icon="sortDesc ? 'mdi-sort-descending' : 'mdi-sort-ascending'" :title="t.sortOrder" @click="toggleSortOrder"></q-btn>
       <q-btn dense unelevated round icon="mdi-refresh" :title="t.refresh" @click="load"></q-btn>
-      <q-btn v-if="adapter.supportsMkdir" dense unelevated no-caps icon="mdi-create-folder-outline" :label="t.newFolder" @click="startMkdir"></q-btn>
-      <q-btn dense unelevated no-caps icon="mdi-upload" color="primary" :label="t.upload" :loading="uploading" @click="pickFiles"></q-btn>
+      <q-btn v-if="adapter.supportsMkdir && dirWritable" dense unelevated no-caps icon="mdi-create-folder-outline" :label="t.newFolder" @click="startMkdir"></q-btn>
+      <q-btn v-if="dirWritable" dense unelevated no-caps icon="mdi-upload" color="primary" :label="t.upload" :loading="uploading" @click="pickFiles"></q-btn>
       <input ref="fileInput" type="file" multiple class="files-upload-input" @change="onPickFiles">
     </div>
   </header>
@@ -74,6 +74,10 @@
     <template v-slot:avatar><q-icon name="mdi-alert-circle-outline"></q-icon></template>
     {{ error }}
     <template v-slot:action><q-btn flat dense no-caps :label="t.retry" @click="load"></q-btn></template>
+  </q-banner>
+  <q-banner v-if="!dirWritable" rounded class="q-mb-md" dense>
+    <template v-slot:avatar><q-icon name="mdi-lock-outline"></q-icon></template>
+    {{ t.readOnlyDir }}
   </q-banner>
   <q-banner v-if="truncated" rounded class="q-mb-md" dense>
     <template v-slot:avatar><q-icon name="mdi-information-outline"></q-icon></template>
@@ -94,7 +98,7 @@
   <div v-if="viewMode === 'grid'" ref="grid" class="files-grid">
     <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-card" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
          @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)">
-      <div class="card-action-group">
+      <div v-if="itemWritable(item)" class="card-action-group">
         <q-btn flat dense round size="sm" icon="mdi-rename-box-outline" :aria-label="t.rename" @click.stop="startRename(item)"></q-btn>
         <q-btn flat dense round size="sm" icon="mdi-trash-can-outline" color="negative" :aria-label="t.delete" @click.stop="askRemove(item)"></q-btn>
       </div>
@@ -102,7 +106,7 @@
         <img v-if="kindOf(item) === 'image'" :src="fileUrl(item)" loading="lazy" decoding="async" alt="" @error="broken[idx] = true" v-show="!broken[idx]">
         <q-icon v-else :name="iconOf(item)" :color="colorOf(item)" :size="item.type === 'dir' ? '44px' : '38px'"></q-icon>
       </div>
-      <div class="files-name" :title="item.name">{{ item.name }}</div>
+      <div class="files-name" :title="item.name">{{ item.name }}<q-icon v-if="!itemWritable(item)" name="mdi-lock" size="14px" color="grey" class="q-ml-xs"></q-icon></div>
       <div class="files-meta">{{ item.type === 'dir' ? t.folder : sizeText(item.size) }}</div>
     </div>
   </div>
@@ -115,20 +119,20 @@
       </div>
       <div v-for="(item, idx) in shown" :key="item.name" :id="'fx-' + idx" class="files-row" :class="{ 'files-focused': idx === focusIndex }" tabindex="-1"
            @click="onItemClick(item, idx)" @dblclick="onItemDouble(item)">
-        <span class="col-name"><q-icon :name="iconOf(item)" :color="colorOf(item)" size="18px" class="q-mr-sm"></q-icon>{{ item.name }}</span>
+        <span class="col-name"><q-icon :name="iconOf(item)" :color="colorOf(item)" size="18px" class="q-mr-sm"></q-icon>{{ item.name }}<q-icon v-if="!itemWritable(item)" name="mdi-lock" size="14px" color="grey" class="q-ml-xs"></q-icon></span>
         <span class="col-size">{{ item.type === 'dir' ? '-' : sizeText(item.size) }}</span>
         <span class="col-date">{{ dateText(item.mtime) }}</span>
         <span class="col-action">
-          <q-btn flat dense round size="sm" icon="mdi-trash-can-outline" color="negative" :aria-label="t.delete" @click.stop="askRemove(item)"></q-btn>
+          <q-btn v-if="itemWritable(item)" flat dense round size="sm" icon="mdi-trash-can-outline" color="negative" :aria-label="t.delete" @click.stop="askRemove(item)"></q-btn>
           <q-btn flat dense round size="sm" icon="mdi-dots-vertical" :aria-label="t.actions" @click.stop>
             <q-menu auto-close>
               <q-list dense class="files-item-menu">
                 <q-item v-if="item.type !== 'dir'" clickable v-close-popup @click="download(item)"><q-item-section side><q-icon name="mdi-download" size="18px"></q-icon></q-item-section><q-item-section>{{ t.download }}</q-item-section></q-item>
                 <q-item v-if="adapter.shareUrl" clickable v-close-popup @click="share(item)"><q-item-section side><q-icon name="mdi-link-variant" size="18px"></q-icon></q-item-section><q-item-section>{{ t.share }}</q-item-section></q-item>
                 <q-item v-for="action in (adapter.extraActions || [])" :key="action.label" clickable v-close-popup @click="action.onClick(item)"><q-item-section side><q-icon :name="action.icon || 'mdi-dots-vertical'" size="18px"></q-icon></q-item-section><q-item-section>{{ action.label }}</q-item-section></q-item>
-                <q-item clickable v-close-popup @click="startRename(item)"><q-item-section side><q-icon name="mdi-rename-box" size="18px"></q-icon></q-item-section><q-item-section>{{ t.rename }}</q-item-section></q-item>
+                <q-item v-if="itemWritable(item)" clickable v-close-popup @click="startRename(item)"><q-item-section side><q-icon name="mdi-rename-box" size="18px"></q-icon></q-item-section><q-item-section>{{ t.rename }}</q-item-section></q-item>
                 <q-separator></q-separator>
-                <q-item clickable v-close-popup class="menu-danger" @click="askRemove(item)"><q-item-section side><q-icon name="mdi-trash-can-outline" size="18px"></q-icon></q-item-section><q-item-section>{{ t.delete }}</q-item-section></q-item>
+                <q-item v-if="itemWritable(item)" clickable v-close-popup class="menu-danger" @click="askRemove(item)"><q-item-section side><q-icon name="mdi-trash-can-outline" size="18px"></q-icon></q-item-section><q-item-section>{{ t.delete }}</q-item-section></q-item>
               </q-list>
             </q-menu>
           </q-btn>
@@ -155,8 +159,8 @@
         <q-btn flat dense no-caps icon="mdi-open-in-new" :label="t.openInTab" @click="openInTab(focused)"></q-btn>
         <q-btn v-if="focused.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(focused)"></q-btn>
         <q-btn v-if="focused.type !== 'dir' && adapter.shareUrl" flat dense no-caps icon="mdi-link-variant" :label="t.share" @click="share(focused)"></q-btn>
-        <q-btn flat dense no-caps icon="mdi-rename-box" :label="t.rename" @click="startRename(focused)"></q-btn>
-        <q-btn flat dense no-caps icon="mdi-trash-can-outline" color="negative" :label="t.delete" @click="askRemove(focused)"></q-btn>
+        <q-btn v-if="itemWritable(focused)" flat dense no-caps icon="mdi-rename-box" :label="t.rename" @click="startRename(focused)"></q-btn>
+        <q-btn v-if="itemWritable(focused)" flat dense no-caps icon="mdi-trash-can-outline" color="negative" :label="t.delete" @click="askRemove(focused)"></q-btn>
       </div>
     </aside>
     <q-btn v-else class="preview-expand-btn" flat dense round icon="mdi-page-layout-sidebar-right" :title="t.expandPreview" @click="previewPanelOpen = true"></q-btn>
@@ -264,6 +268,14 @@
       const path = ref(localStorage.getItem(prefix + '_path') || '')
       const items = ref([])
       const truncated = ref(false)
+      // 只读门控：仅当 adapter.supportsWritable（S3 页）时启用；files 页恒可写，行为不变。
+      // dirWritable 由 GET /api/s3（带 bucket）的 data.writable 决定，itemWritable 由 items[].writable 决定。
+      const writableMode = computed(() => adapter.supportsWritable === true)
+      const dirWritable = ref(true)
+      function itemWritable (item) {
+        if (!writableMode.value) return true
+        return item && item.writable === true
+      }
       // 服务端翻页 token（S3 用）：files 后端一次给全量，永远为 null。
       const nextToken = ref(null)
       const moreLoading = ref(false)
@@ -577,6 +589,7 @@
           const data = await adapter.list(path.value)
           items.value = data.items || []
           truncated.value = !!data.truncated
+          dirWritable.value = !writableMode.value || data.writable === true
           nextToken.value = data.next_token || null
           focusFirst()
         } catch (err) {
@@ -601,6 +614,7 @@
             if (!seen.has(item.name)) items.value.push(item)
           }
           truncated.value = !!data.truncated
+          dirWritable.value = !writableMode.value || data.writable === true
           nextToken.value = data.next_token || null
         } catch (err) {
           notify(err.message || String(err), 'negative')
@@ -757,10 +771,15 @@
       }
 
       function pickFiles () {
+        if (!dirWritable.value) return
         fileInput.value?.click()
       }
 
       function onPickFiles (event) {
+        if (!dirWritable.value) {
+          event.target.value = ''
+          return
+        }
         const filesPicked = Array.from(event.target.files || [])
         event.target.value = ''
         upload(filesPicked)
@@ -778,6 +797,7 @@
       function onDrop (event) {
         window.clearTimeout(dragTimer)
         dragging.value = false
+        if (!dirWritable.value) return
         const filesDropped = Array.from(event.dataTransfer?.files || [])
         if (filesDropped.length) upload(filesDropped)
       }
@@ -789,18 +809,21 @@
 
       function onWindowDragOver (event) {
         if (!hasFileDrag(event)) return
+        if (!dirWritable.value) return
         event.preventDefault()
         dragHover()
       }
 
       function onWindowDrop (event) {
         if (!hasFileDrag(event)) return
+        if (!dirWritable.value) return
         event.preventDefault()
         onDrop(event)
       }
 
       async function upload (filesPicked, overwrite) {
         if (!filesPicked.length) return
+        if (!dirWritable.value) return
         uploading.value = true
         uploadingText.value = t.value.uploading.replace('{n}', String(filesPicked.length))
         try {
@@ -830,12 +853,13 @@
         }
       }
       function startRename (item) {
-        if (!item) return
+        if (!item || !itemWritable(item)) return
         Object.assign(renameForm, { path: path.value, name: item.name, new_name: item.name })
         renameOpen.value = true
       }
 
       function startMkdir () {
+        if (!dirWritable.value) return
         mkdirForm.name = ''
         mkdirOpen.value = true
       }
@@ -876,7 +900,7 @@
       }
 
       function askRemove (item, recursive) {
-        if (!item) return
+        if (!item || !itemWritable(item)) return
         Object.assign(removeForm, { path: path.value, name: item.name, type: item.type, recursive: !!recursive })
         removeOpen.value = true
       }
@@ -973,7 +997,8 @@
             break
           case 'Delete':
             // 删除当前焦点项（与列表行删除按钮同一确认对话框，目录需勾选递归）。
-            if (focused.value) askRemove(focused.value)
+            // 只读条目不响应：焦点仍在，但删除动作交给 itemWritable 门控。
+            if (focused.value && itemWritable(focused.value)) askRemove(focused.value)
             break
           case 'g': viewMode.value = 'grid'; break
           case 'l': viewMode.value = 'list'; break
@@ -1075,7 +1100,7 @@
         open, openInTab, page, pageCount, pageSize, pageSizeOptions, path, pickFiles,
         previewCount, previewItem, previewKind, previewOpen, previewPanelOpen,
         previewPosition, previewText, removeForm, removeOpen, renameForm, renameOpen,
-        askRemove, select, share, shown, sizeText, sortBy, sortDesc, sortKey,
+        askRemove, select, share, shown, sizeText, sortBy, sortDesc, sortKey, dirWritable, itemWritable,
         startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload,
         uploading, uploadingText, viewMode, viewOptions, currentLocationText
       }

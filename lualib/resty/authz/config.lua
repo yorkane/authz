@@ -2,6 +2,7 @@ local provider_config = require "resty.authz.provider_config"
 local session = require "resty.authz.session"
 local api_key = require "resty.authz.api_key"
 local target = require "resty.authz.target"
+local s3_scope = require "resty.authz.s3_scope"
 
 local _M = {}
 
@@ -166,6 +167,25 @@ function _M.load()
         if akid == "" or secret == "" or akid:find("[%c%s]") or secret:find("[%c%s]") then
             error("AUTHZ_S3_ENDPOINT requires AUTHZ_S3_ACCESS_KEY_ID / AUTHZ_S3_SECRET_ACCESS_KEY")
         end
+        -- 可写范围（写操作白名单）：AUTHZ_S3_WRITABLE_PATHS 留空 = 默认本机局域网
+        -- IP 前缀；"/" 或 "*" = 全部可写；逗号分隔多个范围；条目含 .. / 控制字符直接报错。
+        local s3_spec = tostring(os.getenv("AUTHZ_S3_WRITABLE_PATHS") or "")
+        -- 条目校验（fail-fast，与 AUTHZ_S3_ENDPOINT 等现有风格一致）：
+        -- 出现 ".."、控制字符、反斜杠、?、# 直接启动失败，不静默降级。
+        for raw in (s3_spec .. ","):gmatch("([^,]*)") do
+            local e = raw:gsub("^%s+", ""):gsub("%s+$", "")
+            if e ~= "" and e ~= "/" and e ~= "*"
+                and (e:find("..", 1, true) or e:find("[%%c\\?#]")) then
+                error("AUTHZ_S3_WRITABLE_PATHS entry is illegal (no '..'/control/?/#): " ..
+                    tostring(raw))
+            end
+        end
+        local lan_override = tostring(os.getenv("AUTHZ_HOST_LAN_IP") or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        local lan_ip = lan_override ~= "" and lan_override or s3_scope.detect_lan_ip()
+        local writable, writable_roots, writable_all = s3_scope.parse(s3_spec, lan_ip)
+        if s3_spec == "" and not lan_ip then
+            ngx.log(ngx.WARN, "authz: cannot detect LAN IP; S3 browser is read-only")
+        end
         c.s3 = {
             enabled = true,
             host = host,
@@ -174,6 +194,10 @@ function _M.load()
             region = region,
             access_key_id = akid,
             secret_access_key = secret,
+            -- 可写范围（s3_scope 契约）：内部结构 / 全可写标志 / 回显用归一化条目。
+            writable = writable,
+            writable_all = writable_all,
+            writable_roots = writable_roots,
             -- 给签名器（vendored 上游读 config.timeout）与自设超时两侧共用的值。
             timeout = math.max(200, tonumber(os.getenv("AUTHZ_S3_READ_TIMEOUT_MS")) or 30000),
             connect_timeout = math.max(50, tonumber(os.getenv("AUTHZ_S3_CONNECT_TIMEOUT_MS")) or 2000),
