@@ -22,6 +22,32 @@ local function tmp_dir()
     return tostring(os.getenv("AUTHZ_S3_TMP_DIR") or "/data/s3tmp")
 end
 
+-- 暂存目录兜底：镜像 entrypoint 只在容器启动时 mkdir 一次；运行期目录被清掉、
+-- 或镜像内 entrypoint 早于该特性（如 241 只读挂载仓库代码但不挂 entrypoint，
+-- 用的还是旧镜像）时，上传会整批以「暂存目录不可写」失败。每个文件开暂存前
+-- 先逐级 mkdir -p：常驻场景就是一两条 EEXIST(17) 的 mkdir 系统调用，相对落盘
+-- 开销可忽略；也因此不缓存“成功”，目录再被删掉时下一次上传仍然自愈。
+local ffi_ok, ffi = pcall(require, "ffi")
+if ffi_ok then
+    pcall(ffi.cdef, "int mkdir(const char *path, unsigned long mode);")
+end
+
+local function ensure_tmp_dir()
+    local dir = tmp_dir()
+    if not ffi_ok or dir:sub(1, 1) ~= "/" then return false end
+    local cursor = ""
+    for segment in dir:gmatch("[^/]+") do
+        cursor = cursor .. "/" .. segment
+        local ok_call, rc = pcall(function() return tonumber(ffi.C.mkdir(cursor, 493)) end)
+        if not (ok_call and (rc == 0 or ffi.errno() == 17)) then
+            ngx.log(ngx.WARN, "authz: cannot create S3 staging dir ", cursor, " (",
+                tostring(ok_call and ffi.errno() or rc), ")")
+            return false
+        end
+    end
+    return true
+end
+
 -- 从 Content-Disposition 取文件名，优先 RFC 5987 的 filename*=UTF-8''。
 local function part_filename(value)
     if type(value) ~= "string" then return nil end
@@ -51,6 +77,7 @@ function _M.upload(cfg, bucket, prefix, overwrite)
     local file_count, conflicts = 0, 0
 
     local function open_sink(name)
+        ensure_tmp_dir()
         -- 唯一暂存名：并发上传互不覆盖，中断的流留下 .s3-upload-* 而不是半成品。
         local path = tmp_dir() .. "/.s3-upload-" .. ngx.worker.pid() .. "-" ..
             tostring(ngx.now()):gsub("%.", "-") .. "-" .. tostring(math.random(100000, 999999))

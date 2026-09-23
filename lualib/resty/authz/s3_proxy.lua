@@ -126,7 +126,12 @@ function _M.serve()
     elseif preview then
         ngx.header["Content-Disposition"] = "inline"
     end
-    for _, name in ipairs({ "Content-Length", "Content-Range", "ETag", "Last-Modified" }) do
+    -- 有意不转发 ETag / Last-Modified：nginx 的 not-modified 头过滤器会拿它们对
+    -- 客户端的 If-None-Match / If-Modified-Since 自动改写出 304，而 content_by_lua
+    -- 已经在流式输出 body，ngx.print 因此失败并触发「set status 500 after 304」的
+    -- error.log 噪音（241 实测）。条件请求语义上 200+完整体永远合法；缓存命中靠
+    -- 上面的 max-age。Content-Length/Range 必须照抄（播放器拖进度条依赖 206）。
+    for _, name in ipairs({ "Content-Length", "Content-Range" }) do
         local value = res.headers[string.lower(name)]
         if value then ngx.header[name] = value end
     end
@@ -170,12 +175,14 @@ function _M.serve()
         if #chunk > 0 then
             if not ngx.print(chunk) then
                 httpc:close()
-                return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+                -- 多半是客户端断开：响应头早已发出，再 ngx.exit(500) 只会往
+                -- error.log 里塞「after sending out」噪音。直接 return 收尾。
+                return
             end
             local ok, flush_err = ngx.flush(true)
             if not ok and tostring(flush_err):find("closed", 1, true) then
                 httpc:close()
-                return ngx.exit(ngx.HTTP_OK)
+                return
             end
         end
     end

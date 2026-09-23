@@ -3351,6 +3351,16 @@ RANGE_STATUS=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H 'Range: 
     -H "Cookie: $(cookie_header "$S3_COOKIE")" \
     "$S3_URL/_authz/s3/$S3_B/$S3_P/hello.txt")
 assert_eq "live Range returns 206" "$RANGE_STATUS" "206"
+s3req GET "/_authz/s3/$S3_B/$S3_P/hello.txt" "$S3_COOKIE"
+assert_contains_none "live bytes omit validators (no nginx 304 rewrite)" "$(cat "$TMP_DIR/headers")" \
+    'ETag:' 'Last-Modified:'
+# 暂存目录自愈：运行期删掉 /data/s3tmp（模拟 entrypoint 未建目录的旧镜像），
+# 上传必须仍然 201，并由 s3_upload 的 ensure_tmp_dir 重建目录。
+docker exec "$S3_LIVE_CONTAINER" rm -rf /data/s3tmp
+printf 'staging-heal-%s' "$$" > "$TMP_DIR/s3-heal.txt"
+s3put "$S3_P" "heal.txt" "$TMP_DIR/s3-heal.txt"
+assert_eq "live upload recreates missing staging dir" "$STATUS" "201"
+assert_contains "live staging dir exists again" "$(docker exec "$S3_LIVE_CONTAINER" ls -d /data/s3tmp)" "/data/s3tmp"
 DISP_HEADERS=$(curl -sS -D - --max-time 10 -o /dev/null \
     -H "Cookie: $(cookie_header "$S3_COOKIE")" \
     "$S3_URL/_authz/s3/$S3_B/$S3_P/hello.txt?download=1")
@@ -3389,6 +3399,9 @@ assert_json "live recursive delete counted" '.data.removed >= 2 | tostring' "tru
 s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
     "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"hello2.txt\",\"recursive\":true}"
 assert_eq "live cleanup removes the last object" "$STATUS" "200"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"heal.txt\",\"recursive\":true}"
+assert_eq "live cleanup removes the heal object" "$STATUS" "200"
 s3req GET "/_authz/api/s3?bucket=$S3_B&path=$S3_P" "$S3_COOKIE"
 assert_json "live prefix empty after cleanup" '.data.items | length' "0"
 s3req POST /_authz/api/api-keys "$S3_COOKIE" "$S3_CSRF" '{"name":"s3-live-key","role":"admin"}'

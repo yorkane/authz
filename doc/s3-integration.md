@@ -67,12 +67,18 @@ AKID/SECRET），`signatureVersion="s3"`、`endpointPrefix="s3"`。
 | `AUTHZ_S3_ACCESS_KEY_ID` | 空 | endpoint 已设时必填（不得含空白/控制字符） |
 | `AUTHZ_S3_SECRET_ACCESS_KEY` | 空 | endpoint 已设时必填（不得含空白/控制字符） |
 | `AUTHZ_S3_ALLOW_HTTP` | `false` | endpoint 为明文 `http` 时必须显式置 `true`，否则**启动报错**（防止误以为在走 TLS） |
-| `AUTHZ_S3_TMP_DIR` | `/data/s3tmp` | 上传中转暂存目录（容器内路径，需可写；与 `/data` 同卷最省 IO）。`docker-entrypoint.sh` 在 endpoint 已设时自动 `mkdir -p` |
+| `AUTHZ_S3_TMP_DIR` | `/data/s3tmp` | 上传中转暂存目录（容器内路径，需可写；与 `/data` 同卷最省 IO）。`docker-entrypoint.sh` 在 endpoint 已设时自动 `mkdir -p`；即使 entrypoint 是旧版或目录运行期被清掉，上传路径每次也会先逐级自建（见 §6.k） |
 | `AUTHZ_S3_SHARE_TTL` | `3600` | 分享 presigned URL 有效期（秒），钳制在 **60–604800** |
 | `AUTHZ_S3_CONNECT_TIMEOUT_MS` | `2000` | 建连超时（毫秒，下限 50） |
 | `AUTHZ_S3_SEND_TIMEOUT_MS` | `30000` | 发送超时（毫秒，下限 200） |
 | `AUTHZ_S3_READ_TIMEOUT_MS` | `30000` | 读取超时（毫秒，下限 200）；同时作为签名器 `config.timeout` |
 | `AUTHZ_S3_KEEPALIVE_MS` | `30000` | 连接池空闲超时（毫秒，下限 1000），池大小 30 |
+
+部署另有两点（`docker-compose.yml`）：仓库的 `docker-entrypoint.sh` 以只读卷
+挂进容器（`${ENTRYPOINT_FILE:-./docker-entrypoint.sh}`），否则老镜像里的
+entrypoint 不认识 S3 初始化；容器名走 `${AUTHZ_CONTAINER_NAME:-authz}`，
+测试实例在 `.env` 里设成自己的名字（如 `authz-test`），避免整仓 rsync 后
+recreate 时改名顶掉现有实例。
 
 compose 与 `.env.example` 已列出全部超时项；`config.lua` 对每个数值都设了
 下限钳制，非法值回落默认。`AUTHZ_S3_ENDPOINT` 会回显给
@@ -247,6 +253,24 @@ j. **CSP 只在 Lua 里下发**：`/_authz/s3/` 的 location 里不能再
    `add_header` CSP/nosniff，nginx 会叠加出重复头（且 reject() 分支
    也需要这些头）；`server.conf.template` 里有注释标注。
 
+k. **上传 422「没有找到上传文件」= 暂存目录缺失**：镜像 entrypoint 只在
+   容器启动时 `mkdir -p` 一次；如果实例用的镜像 entrypoint 早于该特性
+   （典型：只读挂载仓库 lualib 但不挂 entrypoint 的测试实例），或运行期
+   目录被清掉，`open_sink` 全部失败 → `written=0 && conflicts=0` → 整批
+   422，skipped 理由「暂存目录不可写 /data/s3tmp」——mkdir 不经暂存目录
+   所以照常成功，症状就是「能建目录、不能传文件」。修复：`s3_upload.lua`
+   的 `ensure_tmp_dir()` 用 FFI `mkdir(2)` 逐级自建（EEXIST 视为成功），
+   每次上传都检查、不缓存成功，目录再被删仍自愈；回归里有「删目录后
+   上传仍 201 且目录被重建」的断言。
+
+l. **不支持条件请求，网关不得转发 ETag/Last-Modified**：该服务对带
+   `If-None-Match`/`If-Modified-Since` 的 GET 一律回 200 全量体。但如果
+   网关把上游的 ETag/Last-Modified 抄进响应，nginx 的 not-modified
+   过滤器会拿它们对客户端把 200 自动改写成 304——而 `content_by_lua`
+   此刻已在流式输出，后续 `ngx.print` 全部失败（error.log 刷
+   「attempt to set status 500 via ngx.exit after sending out 304」）。
+   现在字节流响应只抄 `Content-Length`/`Content-Range`，写失败即收尾。
+
 ## 7. 活体测试（`test/test_authz_gateway.sh`）
 
 - `section s3`（**始终运行**，18 项断言）：未配置降级语义
@@ -254,17 +278,18 @@ j. **CSP 只在 Lua 里下发**：`/_authz/s3/` 的 location 里不能再
   未登录 401/302、无 CSRF 403、机器 Key 拒绝写接口 403、
   菜单 seed（builtin=s3、label=对象存储）、s3.html 与 files.html
   都挂载共享组件。
-- `section s3-live`（32 项断言，需真实服务）：临时起一个带 S3 env 的
+- `section s3-live`（36 项断言，需真实服务）：临时起一个带 S3 env 的
   网关容器，跑完整生命周期——info/桶列表、上传 201、列表命中、字节回读
   （含 Content-Type 与 sandbox CSP）、Range 206、`?download=1` 的
   Content-Disposition、路径穿越 404、presign 链接可直取 200、同名 409、
   覆盖 201、rename、mkdir 显示为目录、子目录上传、非空目录删 409、
-  递归删除、清理后前缀为空、机器 Key 403。
+  递归删除、清理后前缀为空、机器 Key 403、字节响应不带 ETag/Last-Modified
+  （防 nginx 伪造 304）、`rm -rf` 暂存目录后上传仍 201 且目录被重建（自愈）。
   凭据只从环境注入（绝不进仓库）：
   `AUTHZ_S3_TEST_ENDPOINT` / `AUTHZ_S3_TEST_BUCKET` / `AUTHZ_S3_TEST_KEY` /
   `AUTHZ_S3_TEST_SECRET` / 可选 `AUTHZ_S3_TEST_REGION`；缺任一即跳过（计 1 pass）。
 
-跑法（当前全量 **1111 项**检查通过，日志 `/data/tmp/s3-test/full-run4.log`）：
+跑法（当前全量 **1115 项**检查通过，日志 `/data/tmp/s3-test/full-run5.log`）：
 
 ```bash
 export OPENRESTY_TEST_IMAGE=authz:latest

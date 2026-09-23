@@ -27,7 +27,9 @@ services:
         https_proxy: ""
         all_proxy: ""
     image: ghcr.io/yorkane/authz:latest
-    container_name: authz
+    # 容器名可覆盖：同一份 compose 被 rsync 到测试实例（如 241）时，写死 authz
+    # 会顶掉实例自己的名字；测试实例在 .env 里设 AUTHZ_CONTAINER_NAME=authz-test。
+    container_name: ${AUTHZ_CONTAINER_NAME:-authz}
     restart: unless-stopped
     network_mode: host
     environment:
@@ -138,6 +140,9 @@ services:
       - ${ADMIN_UI_DIR:-./admin}:/usr/local/openresty/nginx/html/admin:ro
       - ${LUALIB_DIR:-./lualib}:/usr/local/openresty/site/lualib:ro
       - ${NGINX_TEMPLATE_DIR:-./conf}:/etc/openresty/templates:ro
+      # entrypoint 也跟随仓库：镜像里烘的那份在旧版本上不会为 S3 暂存目录 mkdir，
+      # 挂载后启动脚本与测试套件用的是同一份代码（只读，行为可预期）。
+      - ${ENTRYPOINT_FILE:-./docker-entrypoint.sh}:/docker-entrypoint.sh:ro
       # 文件浏览内容目录：宿主 FILES_DIR -> 容器 /files。
       # 默认只读（files 界面仅浏览/预览）；要启用上传/重命名/删除，
       # 去掉 :ro 挂成可写卷（写操作仍限 admin+CSRF+会话，且锁在本目录内）。
