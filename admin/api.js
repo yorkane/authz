@@ -151,12 +151,13 @@ function s3List (bucket, path, token) {
   return request('/s3?' + query)
 }
 
-async function uploadS3 (bucket, path, files, overwrite) {
+async function uploadS3 (bucket, path, files, overwrite, opts) {
   const session = await request('/session')
   const form = new FormData()
   for (const file of files) form.append('file', file, file.name)
   const query = new URLSearchParams({ bucket: bucket, path: path || '' })
   if (overwrite) query.set('overwrite', '1')
+  if (opts && opts.mkdir) query.set('mkdir', '1')
   const response = await fetch(`${API_BASE}/s3/upload?${query}`, {
     method: 'POST',
     credentials: 'same-origin',

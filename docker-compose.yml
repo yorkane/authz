@@ -135,8 +135,12 @@ services:
       AUTHZ_S3_READ_TIMEOUT_MS: ${AUTHZ_S3_READ_TIMEOUT_MS:-30000}
       AUTHZ_S3_SEND_TIMEOUT_MS: ${AUTHZ_S3_SEND_TIMEOUT_MS:-30000}
       AUTHZ_S3_KEEPALIVE_MS: ${AUTHZ_S3_KEEPALIVE_MS:-30000}
-      # S3 可写范围：逗号分隔多个；空 = 默认本机局域网 IP 前缀；"/" 或 "*" = 全部可写；范围外只读
+      # S3 可写范围：逗号分隔多个；空 = 默认 share/<本机局域网 IP> 前缀；"/" 或 "*" = 全部可写；范围外只读
       AUTHZ_S3_WRITABLE_PATHS: ${AUTHZ_S3_WRITABLE_PATHS:-}
+      # 默认 share 挂载根（对象存储内路径，归一化去首尾 /）；默认场景可写前缀 = <share 根去斜杠>/<本机 LAN IP>
+      AUTHZ_S3_SHARE_ROOT: ${AUTHZ_S3_SHARE_ROOT:-/share/}
+      # 非空时 share 前缀只在该桶生效；空 = 任意桶
+      AUTHZ_S3_SHARE_BUCKET: ${AUTHZ_S3_SHARE_BUCKET:-}
       # 显式覆盖本机局域网 IP（默认自动探测；测试或非 host 网络模式用）
       AUTHZ_HOST_LAN_IP: ${AUTHZ_HOST_LAN_IP:-}
     volumes:

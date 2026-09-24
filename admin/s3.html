@@ -40,7 +40,7 @@
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
   <script src="./i18n.js?v=47"></script>
-  <script src="./api.js?v=21"></script>
+  <script src="./api.js?v=22"></script>
   <script src="./browser.js?v=4"></script>
   <script>
     const { computed, onMounted, ref, watch } = Vue
@@ -82,10 +82,12 @@
         })
       },
       upload (path, files, overwrite) {
-        return window.adminApi.uploadS3(bucket.value, path, files, overwrite)
+        // 写操作统一带 auto-mkdir：目标在默认 share 条目内而挂载祖先
+        // 目录标记尚缺时，后端先补建祖先再执行；范围外仍 403，不会越权。
+        return window.adminApi.uploadS3(bucket.value, path, files, overwrite, { mkdir: true })
       },
       mkdir (path, name) {
-        return window.adminApi.mkdirS3({ _csrf: csrfRef.value, bucket: bucket.value, path, name })
+        return window.adminApi.mkdirS3({ _csrf: csrfRef.value, bucket: bucket.value, path, name, mkdir: 1 })
       },
       rename (path, name, new_name) {
         return window.adminApi.renameS3({ _csrf: csrfRef.value, bucket: bucket.value, path, name, new_name })
@@ -128,6 +130,19 @@
         const list = (data.buckets || []).map(b => b.name)
         // 记住的上次桶仍在列表里就用它，否则回落到第一个桶。
         bucket.value = list.includes(saved) ? saved : (list[0] || '')
+        // share 挂载默认值预置：默认可写根 = share/<本机LAN IP>（info.share_prefix）。
+        // 当前桶命中 share 条目（share_bucket 空=任意桶；非空须等于当前桶）且
+        // 用户还没有浏览路径记录（组件初始路径取自 localStorage 的
+        // <storagePrefix>_path，即 authz-s3_path）时，把初始路径预置为
+        // share_prefix，az-browser 挂载（info 就位后才创建）后直接落在默认
+        // 可写目录而不是只读桶根。share_bucket 为空时 share_prefix 就是纯
+        // 路径前缀；非空且等于当前桶时同样直接使用（前缀不含桶名）。
+        const sharePrefix = typeof data.share_prefix === 'string' ? data.share_prefix : ''
+        const shareBucket = typeof data.share_bucket === 'string' ? data.share_bucket : ''
+        if (sharePrefix && bucket.value && (!shareBucket || shareBucket === bucket.value)
+            && !localStorage.getItem('authz-s3_path')) {
+          localStorage.setItem('authz-s3_path', sharePrefix)
+        }
       } catch (err) {
         // 带 bucket 未配置会 423，无 bucket 未配置是 enabled:false；两种都落到未配置卡片。
         info.value = { enabled: false, buckets: [] }

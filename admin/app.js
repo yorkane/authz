@@ -6,7 +6,7 @@ const builtInApps = {
   authorization: 'authorization.html?v=16',
   menuEditor: 'menu-editor.html?v=11',
   files: 'files.html?v=19',
-  s3: 's3.html?v=3',
+  s3: 's3.html?v=4',
   nginxConf: 'nginx_conf.html?v=2'
 }
 

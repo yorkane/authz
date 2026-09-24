@@ -68,7 +68,9 @@ AKID/SECRET），`signatureVersion="s3"`、`endpointPrefix="s3"`。
 | `AUTHZ_S3_SECRET_ACCESS_KEY` | 空 | endpoint 已设时必填（不得含空白/控制字符） |
 | `AUTHZ_S3_ALLOW_HTTP` | `false` | endpoint 为明文 `http` 时必须显式置 `true`，否则**启动报错**（防止误以为在走 TLS） |
 | `AUTHZ_S3_TMP_DIR` | `/data/s3tmp` | 上传中转暂存目录（容器内路径，需可写；与 `/data` 同卷最省 IO）。`docker-entrypoint.sh` 在 endpoint 已设时自动 `mkdir -p`；即使 entrypoint 是旧版或目录运行期被清掉，上传路径每次也会先逐级自建（见 §6.k） |
-| `AUTHZ_S3_WRITABLE_PATHS` | 空（= 默认本机局域网 IP） | **可写范围白名单**（逗号分隔）。上传/建目录/重命名/删除只允许落在范围内；范围外一律只读（仍可浏览、预览、下载、分享）。条目语义：`noco`=整桶、`noco/rpa`=该桶内前缀、`*/docs`=任意桶内前缀、无分隔符条目（如 LAN IP）=同名整桶或任意桶内该路径前缀。`/` 或 `*` = 全部可写；条目含 `..`/控制字符/`?`/`#` 启动报错 |
+| `AUTHZ_S3_WRITABLE_PATHS` | 空（= 默认 `share/<本机局域网 IP>`，见 `AUTHZ_S3_SHARE_ROOT`） | **可写范围白名单**（逗号分隔）。上传/建目录/重命名/删除只允许落在范围内；范围外一律只读（仍可浏览、预览、下载、分享）。条目语义：`noco`=整桶、`noco/rpa`=该桶内前缀、`*/docs`=任意桶内前缀、无分隔符条目（如 LAN IP）=同名整桶或任意桶内该路径前缀。`/` 或 `*` = 全部可写；条目含 `..`/控制字符/`?`/`#` 启动报错 |
+| `AUTHZ_S3_SHARE_ROOT` | `/share/` | 对象存储内的**挂载根**（归一化去首尾 `/`）。默认场景的可写前缀 = `<share 根去斜杠>/<本机 LAN IP>`（如 `share/10.252.25.241`）：桶根与挂载祖先只读，该前缀及其子目录可写。LAN IP 探测失败（且 `AUTHZ_HOST_LAN_IP` 未设）时默认场景整体降级只读，该前缀不出现在 `writable_roots`，`GET /api/s3` 的 `share_prefix` 回显 `null` |
+| `AUTHZ_S3_SHARE_BUCKET` | 空（= 任意桶） | 非空时 share 前缀**只在该桶**生效，其他桶不存在默认可写前缀；info 的 `share_bucket` 原样回显 |
 | `AUTHZ_HOST_LAN_IP` | 空（= 自动探测） | 覆盖「本机局域网 IP」的探测值（非 host 网络或测试用）。探测用 FFI UDP connect 到保留地址选路由源地址，不发包；探测失败且未设本变量时**整体降级为只读**并告警 |
 
 | `AUTHZ_S3_SHARE_TTL` | `3600` | 分享 presigned URL 有效期（秒），钳制在 **60–604800** |
@@ -97,6 +99,19 @@ compose 与 `.env.example` 已列出全部超时项；`config.lua` 对每个数�
 父目录下首次创建范围内的目录）；rename 源与目标都要可写，
 remove 看目标条目（item 语义）。只读接口（列表/share/字节流）不受影响。
 
+**auto-mkdir（默认 share 挂载祖先的自动补建）**：默认场景下可写前缀是
+`share/<本机 LAN IP>`（`AUTHZ_S3_SHARE_ROOT` + `AUTHZ_HOST_LAN_IP` 拼出），挂载
+祖先目录标记（`share/`、`share/<IP>/`）在首次写入前可能尚不存在。upload 带
+query `mkdir=1`、`POST /api/s3/mkdir` 带 body 字段 "mkdir": 1 时，若请求路径位于
+默认 share 条目之下、但缺失的挂载祖先目录标记尚未创建，后端先逐级补建
+祖先再执行本次写。auto-mkdir **只补目标之上的祖先、不扩大可写范围**：范围外
+请求（含带 `mkdir=1`）仍然 `403 s3_read_only`；**桶根（空 path）永不放行**——
+`ensure_parents` 对空 dirpath 返回的是「根之下的全部条目」而不是「根的祖先」，
+若不显式拒绝，带 `mkdir=1` 的上传会先补建 `share/` 标记再把对象写进只读桶根
+（该绕过由断言 `live upload at bucket root with auto-mkdir rejected` 把守）；
+`share/<IP>` 首次创建走「目标==条目自身」的 mkdir 请求，不需要根放行。
+`AUTHZ_S3_WRITABLE_PATHS` 显式设置时默认 share 条目不存在，auto-mkdir 没有作用对象。
+
 ### `GET /api/s3`（info / 列表，只读）
 
 - 查询参数：`bucket`（可选）、`path`（可选，目录前缀）、`token`（可选，翻页）。
@@ -109,7 +124,7 @@ remove 看目标条目（item 语义）。只读接口（列表/share/字节流�
 ### `POST /api/s3/upload`（admin + 会话 + CSRF）
 
 - multipart/form-data，表单字段 `file`（可多个，单次 ≤64 个文件，单文件 ≤2GB）；
-  查询参数 `bucket`、`path`、可选 `overwrite=1`。
+  查询参数 `bucket`、`path`、可选 `overwrite=1`、可选 `mkdir=1`（auto-mkdir，见上）。
 - 201：`data = { uploaded: [{name, size}], skipped: [{name, reason}], path, bucket }`；
   同名冲突（未带 `overwrite`）的文件进 `skipped` 并计一次冲突；
   **全部文件都冲突 → 409**（前端据此弹覆盖确认，带 `overwrite=1` 重传）；
@@ -130,7 +145,7 @@ remove 看目标条目（item 语义）。只读接口（列表/share/字节流�
 
 ### `POST /api/s3/mkdir`（admin + 会话 + CSRF）
 
-- 请求体 `{ bucket, path, name }`；写一个 `key/` 结尾的 0 字节**目录标记对象**
+- 请求体 `{ bucket, path, name, mkdir? }`（`mkdir: 1` = auto-mkdir，见上）；写一个 `key/` 结尾的 0 字节**目录标记对象**
   （S3 没有真目录）；201：`data = { path: <key/>, bucket }`。
   显式标记让空目录对其他人也可见（服务端的幻影标记只在它自己的列表里出现）。
 
@@ -199,10 +214,19 @@ remove 看目标条目（item 语义）。只读接口（列表/share/字节流�
   （每个条目）隐藏上传/新建目录/重命名/删除入口，只留下载/分享/预览；
   范围外条目名旁显示 `mdi-lock`，目录只读时顶部一条 banner。files 页不声明
   该属性 → 恒可写，行为不变。后端仍独立 403（`s3_read_only`），前端只是省点击。
+- **share 挂载默认值**：info（不带 bucket 的 `GET /api/s3`）回显 `share_prefix`
+  （默认可写前缀，如 `share/10.252.25.241`；LAN IP 探测失败时为 `null`）与
+  `share_bucket`（空串 = 任意桶）。s3 页在 info 返回后：当前桶命中 share 条目
+  （`share_bucket` 为空或等于当前桶）且用户还没有浏览路径记录（`localStorage`
+  无 `authz-s3_path`，az-browser 挂载时读到的初始路径）时，把初始路径预置为
+  `share_prefix`，页面直接落在默认可写目录而不是只读的桶根。写操作统一带
+  auto-mkdir 标记：adapter `upload` 传 `{ mkdir: true }`（query `mkdir=1`）、
+  `mkdir` body 带 `mkdir: 1`，挂载祖先缺失时由后端补建（§4）。
 - **回归测试断言迁移**：「手势处理」相关断言已从 `files.html` 改指
   `/_authz/apps/browser.js`（逻辑移进了共享组件），`section s3` 同时断言
   s3 页与 files 页都挂载 `window.authzBrowser`。
-- 静态资源版本号（`?v=`）：`api.js` **v21**、`i18n.js` **v45**、`app.js` **v27**、
+- 静态资源版本号（`?v=`）：`api.js` **v22**、`i18n.js` **v45**、`app.js` **v27**、
+  `s3.html` 页自身版本 **v4**（`admin/app.js` builtin 映射引用）、
   `app-page.css` **v16**、`files.css` **v10**、`files.html` **v17**；新增
   `browser.js` / `browser.css` / `s3.html` / `s3.css` 均为 **v1**。
 
@@ -292,18 +316,18 @@ l. **不支持条件请求，网关不得转发 ETag/Last-Modified**：该服务
   未登录 401/302、无 CSRF 403、机器 Key 拒绝写接口 403、
   菜单 seed（builtin=s3、label=对象存储）、s3.html 与 files.html
   都挂载共享组件。
-- `section s3-live`（52 项断言，需真实服务）：临时起一个带 S3 env 的
+- `section s3-live`（63 项断言，需真实服务）：临时起一个带 S3 env 的
   网关容器，跑完整生命周期——info/桶列表、上传 201、列表命中、字节回读
   （含 Content-Type 与 sandbox CSP）、Range 206、`?download=1` 的
   Content-Disposition、路径穿越 404、presign 链接可直取 200、同名 409、
   覆盖 201、rename、mkdir 显示为目录、子目录上传、非空目录删 409、
   递归删除、清理后前缀为空（空前缀列表必须 200：array_data 把空 items 换成 cjson.empty_array 后不能再 ipairs，否则整个请求 500）、机器 Key 403、字节响应不带 ETag/Last-Modified
-  （防 nginx 伪造 304）、`rm -rf` 暂存目录后上传仍 201 且目录被重建（自愈）。（默认可写范围=容器内 AUTHZ_HOST_LAN_IP 前缀：范围外写 403 s3_read_only、列表/桶/info 的 writable 标记与 writable_roots 回显）
+  （防 nginx 伪造 304）、`rm -rf` 暂存目录后上传仍 201 且目录被重建（自愈）。（默认可写范围=share/<AUTHZ_HOST_LAN_IP>：share 根 mkdir 403（含带 `mkdir:1`）、范围内首建 201、范围外写 403 s3_read_only、**桶根带 mkdir=1 的上传仍 403（防 auto-mkdir 绕过）**、列表/桶/info 的 writable 标记与 writable_roots 回显、info 的 share_prefix/share_bucket 回显、auto-mkdir：upload `mkdir=1` 补建缺失挂载祖先 201 且目录可列可写、范围外带 `mkdir=1` 仍 403、mkdir 接口 `mkdir` 字段被接受）
   凭据只从环境注入（绝不进仓库）：
   `AUTHZ_S3_TEST_ENDPOINT` / `AUTHZ_S3_TEST_BUCKET` / `AUTHZ_S3_TEST_KEY` /
   `AUTHZ_S3_TEST_SECRET` / 可选 `AUTHZ_S3_TEST_REGION`；缺任一即跳过（计 1 pass）。
 
-跑法（当前全量 **1131 项**检查通过，日志 `/data/tmp/s3-wr/full-run9.log`）：
+跑法（当前全量 **1146 项**检查通过，日志 `/data/tmp/s3-wr/full-run11.log`）：
 
 ```bash
 export OPENRESTY_TEST_IMAGE=authz:latest

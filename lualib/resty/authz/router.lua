@@ -267,9 +267,47 @@ end
 
 -- 可写范围外的统一 403（upload/mkdir/rename/remove 共用）：两值返回，不碰 klib.router
 -- “只取前两个返回值”的坑。
-local function s3_read_only()
-    return { error = { code = "s3_read_only",
-        message = "该路径不在可写范围内（AUTHZ_S3_WRITABLE_PATHS）" } }, 403
+local function s3_read_only(cfg)
+    local hint = cfg and cfg.share_prefix
+    local msg = "该路径不在可写范围内（AUTHZ_S3_WRITABLE_PATHS"
+    if hint then msg = msg .. ", 默认可写前缀 " .. hint end
+    msg = msg .. "）"
+    return { error = { code = "s3_read_only", message = msg } }, 403
+end
+
+-- 写操作的「首建放行」：范围外目标 + 调用方显式请求 mkdir（upload 走 query
+-- mkdir=1；POST /api/s3/mkdir 走 body mkdir=true；rename/remove 不支持）时，
+-- 用 ensure_parents 拿到严格位于目标之上的可写条目（长度升序），逐个补建为
+-- 0 字节目录标记对象（key 尾缀 /），全部成功才放行本次写。放行理由：
+--   * 祖先条目必然在可写范围内（ensure_parents 只返回 scope 内条目，范围外的
+--     目标不可能出现在结果里），补建不越权；
+--   * 目标本身必须落在某条目内——dir_writable 或 ensure_parents 非空二者必居
+--     其一（目标==条目本身时祖先链非空；目标在条目之下时 dir_writable 为真）；
+--   * 典型场景：首建 share/<IP> 目录，其父 share 只读，靠本机制补建 share/<IP>。
+-- 返回 (true, nil, nil) 或 (false, 原因, 状态)。
+local function s3_auto_mkdir(cfg, bucket, dirpath, want_mkdir)
+    if not want_mkdir or cfg.writable_all then
+        return false, "not requested or all-writable", 403
+    end
+    if dirpath == "" then
+        -- 桶根永不在任何前缀条目内；ensure_parents 对空 dirpath 返回全部条目（语义是「根之下的全部条目」而不是「根的祖先」），直接放行会让带 mkdir=1 的上传绕过只读桶根。share/<IP> 首建走目标==条目自身的 mkdir 请求，根永不需要放行。
+        return false, "bucket root is never auto-creatable", 403
+    end
+    local ancestors = s3_scope.ensure_parents(cfg.writable, bucket, dirpath)
+    if #ancestors == 0 then
+        -- 目标不在任何可写条目内（含目标==条目本身但未在范围的情形）：不放行。
+        if not s3_scope.dir_writable(cfg.writable, bucket, dirpath) then
+            return false, "outside writable scope", 403
+        end
+        return true, nil, nil
+    end
+    for _, entry in ipairs(ancestors) do
+        local ok, err, status = s3.put(cfg, bucket, entry .. "/", { body = "" })
+        if not ok then
+            return false, err, status or 502
+        end
+    end
+    return true, nil, nil
 end
 
 -- 统一的“未配置/参数非法”前置校验。返回 (cfg, bucket, path) 或 (nil, payload, status)。
@@ -327,6 +365,9 @@ register("GET", "/api/s3", guard.wrap(function(_, env)
             -- 可写范围回显（空时必须是 cjson.empty_array，否则前端拿到 null）。
             writable_roots = array_data(cfg.writable_roots),
             writable_all = cfg.writable_all,
+            -- 默认场景的挂载根前缀（share/<IP>）；显式可写范围或探测失败时为 null。
+            share_prefix = cfg.share_prefix or cjson.null,
+            share_bucket = cfg.share_bucket,
         } }
     end
     local token = args.token and tostring(args.token) or nil
@@ -373,8 +414,15 @@ register("POST", "/api/s3/upload", guard.wrap(function(params, env)
     local cfg, bucket, path = s3_context(args, true)
     if not cfg then return bucket, path end
     -- 可写范围拦截（dir 语义：对象落在当前目录 path 下）。
+    -- query mkdir=1（前端 URL 可带 query）：范围外时按 ensure_parents 补建
+    -- 尚未存在的祖先目录后再放行，见 ensure_parents 注释。
+    local want_mkdir = args.mkdir == "1"
     if not s3_scope.dir_writable(cfg.writable, bucket, path) then
-        return s3_read_only()
+        local ok_mkdir, merr, mstatus =
+            s3_auto_mkdir(cfg, bucket, path, want_mkdir)
+        if not ok_mkdir then
+            return s3_read_only(cfg)
+        end
     end
     local overwrite = args.overwrite == "1" or args.overwrite == "true"
     local payload, err, status = s3_upload.upload(cfg, bucket, path, overwrite)
@@ -397,7 +445,7 @@ register("PUT", "/api/s3/rename", guard.wrap(function(params, env, req)
     -- 可写范围拦截（item 语义：源与目标对象 key 都必须在范围内）。
     if not s3_scope.item_writable(cfg.writable, bucket, s3.join(path, name)) or
         not s3_scope.item_writable(cfg.writable, bucket, s3.join(path, new_name)) then
-        return s3_read_only()
+        return s3_read_only(cfg)
     end
     return guard.result(s3.rename(cfg, bucket, path, name, new_name))
 end, { admin = true, csrf = true, session_only = true }))
@@ -414,7 +462,7 @@ register("DELETE", "/api/s3/remove", guard.wrap(function(params, env, req)
     local key = s3.join(path, name)
     -- 可写范围拦截（item 语义；递归删除同此判定，整个前缀下任一对象越界即拒绝）。
     if not s3_scope.item_writable(cfg.writable, bucket, key) then
-        return s3_read_only()
+        return s3_read_only(cfg)
     end
     if data.recursive == true then
         -- 三值返回必须过 guard.result：klib.router 只取前两个返回值，
@@ -449,11 +497,17 @@ register("POST", "/api/s3/mkdir", guard.wrap(function(params, env, req)
     end
     -- 可写范围拦截按【目标目录自身】判定：若父目录可写，目标必然在范围内
     --（前缀语义）；父目录只读但目标本身落在可写范围内时也必须放行——否则
-    -- 默认场景（范围=LAN IP 前缀）下该前缀目录永远无法被首次创建。
-    if not s3_scope.dir_writable(cfg.writable, bucket, s3.join(path, name)) then
-        return s3_read_only()
+    -- 默认场景（范围=share/<LAN IP> 前缀）下该前缀目录永远无法被首次创建。
+    -- body mkdir=true：范围外时先按 ensure_parents 补建祖先目录再放行。
+    local target = s3.join(path, name)
+    if not s3_scope.dir_writable(cfg.writable, bucket, target) then
+        local ok_mkdir, merr, mstatus =
+            s3_auto_mkdir(cfg, bucket, target, data.mkdir == true)
+        if not ok_mkdir then
+            return s3_read_only(cfg)
+        end
     end
-    local key = s3.join(path, name) .. "/"
+    local key = target .. "/"
     local ok, err, err_status = s3.put(cfg, bucket, key, { body = "" })
     if not ok then
         return { error = { code = "mkdir_failed", message = err } }, err_status or 500

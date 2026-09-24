@@ -1,21 +1,9 @@
 -- 对象存储可写范围判定（纯字符串逻辑 + LAN IP 探测）。
 --
 -- 环境变量 AUTHZ_S3_WRITABLE_PATHS（逗号分隔）决定哪些前缀可写：
---   `/` 或 `*`      → 全部可写（所有桶所有路径）
---   空/未设          → 默认：本机局域网 IP 作为一个前缀
---   `a, b/c`        → 多范围；每项按下面三条规则匹配
--- 范围外一律只读（可浏览/预览/下载/分享，禁上传/删除/重命名/建目录）。
---
--- 条目匹配语义（对 bucket 与 key 判定，item==精确命中也算命中）：
---   1. 条目 == bucket                → 整个桶
---   2. 条目以 bucket.."/" 开头        → 桶内前缀 p（key==p 或以 p.."/" 开头）
---   3. 否则条目当作任意桶内的路径前缀（key==条目 或以 条目.."/" 开头）
--- dir 可写 = 目录路径本身落在某条目内（整桶条目 p="" 时任意目录可写）。
--- 对象存储可写范围判定（纯字符串逻辑 + LAN IP 探测）。
---
--- 环境变量 AUTHZ_S3_WRITABLE_PATHS（逗号分隔）决定哪些前缀可写：
 --   `/` 或 `*`       → 全部可写（所有桶所有路径）
---   空/未设           → 默认：本机局域网 IP 作为一个条目
+--   空/未设           → 默认：挂载根条目 share_root/LAN IP（例 share/10.252.25.241）；
+--                       share_root 默认 "share"（AUTHZ_S3_SHARE_ROOT 可改），未绑定桶
 --   `a, b/c, */docs` → 多范围，逗号分隔
 -- 范围外一律只读（可浏览/预览/下载/分享，禁上传/删除/重命名/建目录）。
 --
@@ -24,14 +12,29 @@
 --   1. 条目 == bucket           → 整个桶
 --   2. `<桶名>/<前缀>`          → 仅该桶内该前缀
 --   3. `*/<前缀>`               → 任意桶内该前缀
---   4. 无分隔符条目（如 LAN IP） → 整桶（规则 1）或任意桶内同名路径前缀
+--   4. 无分隔符条目             → 整桶（规则 1）或任意桶内同名路径前缀
 -- dir 可写 = 目录路径落在某条目内（整桶条目时桶内任意目录可写，桶根亦可）。
+-- 默认 share 条目内部存成 `*/share/<IP>`（任意桶，规则 3）或 `<桶>/share/<IP>`
+-- （绑定 share 桶时，规则 2）；回显 root 是逻辑条目本身（share/<IP>）。
 local _M = {} 
 
-function _M.parse(spec, lan_ip)
+function _M.parse(spec, lan_ip, share_root, share_bucket)
     spec = tostring(spec or ""):gsub("%s+$", ""):gsub("^%s+", "")
-    if spec == "" then spec = tostring(lan_ip or ""):gsub("%s+$", ""):gsub("^%s+", "") end
-    if spec == "" then return { all = false, entries = {} }, {}, false end
+    if spec == "" then
+        local ip = tostring(lan_ip or ""):gsub("%s+$", ""):gsub("^%s+", "")
+        if ip ~= "" then
+            -- 默认：挂载根 share_root/<本机 LAN IP>（例 share/10.252.25.241）。
+            -- 未绑定 share 桶时按「任意桶内该前缀」匹配（规则 3），故条目存为
+            -- "*/share/<IP>"；绑定时存 "<桶>/share/<IP>"（仅该桶，规则 2）。
+            -- 回显 root 用逻辑条目本身，不带 "*/"。
+            local root = tostring(share_root or "share"):gsub("^/+", ""):gsub("/+$", "")
+            local display = root .. "/" .. ip
+            local b = tostring(share_bucket or "")
+            local entry = b ~= "" and (b .. "/" .. display) or ("*/" .. display)
+            return { all = false, entries = { entry } }, { display }, false
+        end
+        return { all = false, entries = {} }, {}, false
+    end
     local entries, roots = {}, {}
     for raw in (spec .. ","):gmatch("([^,]*)") do
         local e = raw:gsub("^%s+", ""):gsub("%s+$", "")
@@ -98,6 +101,36 @@ function _M.dir_writable(scope, bucket, dirpath)
         end
     end
     return false
+end
+
+-- 补建祖先目录清单：返回 scope 内「严格位于 dirpath 之上」的条目（路径形态：
+-- 剥掉 <桶>/ 或 */ 前缀后的部分），按长度升序；dirpath=="" 返回全部桶内条目。
+-- 用途：首次向 share/<IP>/... 写入时，按序补 PUT 尚未存在的祖先标记对象。
+-- 桶亲和沿用 matches 语义：含分隔符条目只在桶段为 * 或目标桶时计入；
+-- 无分隔符条目视为任意桶内前缀。范围外的目标其祖先永远不在结果里，
+-- 所以「清单非空」即「目标严格落在某个可写条目内」。all 范围无需补建。
+function _M.ensure_parents(scope, bucket, dirpath)
+    if scope.all then return {} end
+    local out = {}
+    for _, entry in ipairs(scope.entries) do
+        local first, rest = entry:match("^([^/]+)/(.*)$")
+        local path_form
+        if first then
+            if first == "*" or first == bucket then path_form = rest end
+        else
+            path_form = entry
+        end
+        if path_form then
+            if dirpath == "" then
+                out[#out + 1] = path_form
+            elseif dirpath:sub(1, #path_form + 1) == path_form .. "/" then
+                -- 严格在目标之上（目标==条目本身不算：它由本次写入自己创建）。
+                out[#out + 1] = path_form
+            end
+        end
+    end
+    table.sort(out, function(a, b) return #a < #b end)
+    return out
 end
 
 -- 整桶可写 = 存在条目==bucket（规则 1）或全写。桶内前缀条目不算整桶可写。

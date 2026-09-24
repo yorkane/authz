@@ -167,9 +167,27 @@ function _M.load()
         if akid == "" or secret == "" or akid:find("[%c%s]") or secret:find("[%c%s]") then
             error("AUTHZ_S3_ENDPOINT requires AUTHZ_S3_ACCESS_KEY_ID / AUTHZ_S3_SECRET_ACCESS_KEY")
         end
-        -- 可写范围（写操作白名单）：AUTHZ_S3_WRITABLE_PATHS 留空 = 默认本机局域网
-        -- IP 前缀；"/" 或 "*" = 全部可写；逗号分隔多个范围；条目含 .. / 控制字符直接报错。
+        -- 可写范围（写操作白名单）：AUTHZ_S3_WRITABLE_PATHS 留空 = 默认挂载根条目
+        -- share/<本机 LAN IP>（例 share/10.252.25.241，/share 是对象存储里的挂载根）；
+        -- "/" 或 "*" = 全部可写；逗号分隔多个范围；条目含 .. / 控制字符直接报错。
         local s3_spec = tostring(os.getenv("AUTHZ_S3_WRITABLE_PATHS") or "")
+        -- 挂载根目录名：默认 share；归一化去首尾 /，禁止 .. 与控制字符（同条目校验风格）。
+        local share_root = tostring(os.getenv("AUTHZ_S3_SHARE_ROOT") or "/share/")
+            :gsub("^%s+", ""):gsub("%s+$", "")
+            :gsub("^/+", ""):gsub("/+$", "")
+        if share_root == "" then
+            error("AUTHZ_S3_SHARE_ROOT must not be empty")
+        end
+        if share_root:find("..", 1, true) or share_root:find("[%%c\\?#]") then
+            error("AUTHZ_S3_SHARE_ROOT is illegal (no '..'/control/?/#): " .. share_root)
+        end
+        -- 可选地把默认 share/<IP> 前缀绑定到指定桶；空 = 不绑定（任意桶内该前缀可写）。
+        -- 桶名校验与 s3.normalize_bucket 同一字符集（不 require s3 避免循环依赖）。
+        local share_bucket = tostring(os.getenv("AUTHZ_S3_SHARE_BUCKET") or "")
+            :gsub("^%s+", ""):gsub("%s+$", "")
+        if share_bucket ~= "" and not share_bucket:match("^[a-z0-9][a-z0-9.-]{1,61}$") then
+            error("AUTHZ_S3_SHARE_BUCKET is an invalid bucket name: " .. share_bucket)
+        end
         -- 条目校验（fail-fast，与 AUTHZ_S3_ENDPOINT 等现有风格一致）：
         -- 出现 ".."、控制字符、反斜杠、?、# 直接启动失败，不静默降级。
         for raw in (s3_spec .. ","):gmatch("([^,]*)") do
@@ -182,9 +200,12 @@ function _M.load()
         end
         local lan_override = tostring(os.getenv("AUTHZ_HOST_LAN_IP") or ""):gsub("^%s+", ""):gsub("%s+$", "")
         local lan_ip = lan_override ~= "" and lan_override or s3_scope.detect_lan_ip()
-        local writable, writable_roots, writable_all = s3_scope.parse(s3_spec, lan_ip)
+        local writable, writable_roots, writable_all =
+            s3_scope.parse(s3_spec, lan_ip, share_root, share_bucket)
+        -- 默认场景的完整可写前缀（回显 + auto-mkdir 放行判定用）；未探测到 IP 时 nil。
+        local share_prefix = lan_ip ~= nil and (share_root .. "/" .. lan_ip) or nil
         if s3_spec == "" and not lan_ip then
-            ngx.log(ngx.WARN, "authz: cannot detect LAN IP; S3 browser is read-only")
+            ngx.log(ngx.WARN, "authz: cannot detect LAN IP; default share/<LAN IP> writable prefix unavailable, S3 browser is read-only")
         end
         c.s3 = {
             enabled = true,
@@ -198,6 +219,10 @@ function _M.load()
             writable = writable,
             writable_all = writable_all,
             writable_roots = writable_roots,
+            -- 默认场景：挂载根条目 share/<IP> 的完整前缀（auto-mkdir 放行判定），
+            -- 显式 AUTHZ_S3_WRITABLE_PATHS 或探测失败时为 nil；share_bucket 可为 ""。
+            share_prefix = share_prefix,
+            share_bucket = share_bucket,
             -- 给签名器（vendored 上游读 config.timeout）与自设超时两侧共用的值。
             timeout = math.max(200, tonumber(os.getenv("AUTHZ_S3_READ_TIMEOUT_MS")) or 30000),
             connect_timeout = math.max(50, tonumber(os.getenv("AUTHZ_S3_CONNECT_TIMEOUT_MS")) or 2000),
