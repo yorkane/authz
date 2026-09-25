@@ -624,7 +624,7 @@ assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "retired viewer role folded into guest everywhere" "$(report_get viewer_retired)" "yes"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new|21:menu_entry_s3_browser"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new|21:menu_entry_s3_browser|22:menu_entry_nginx_conf_hidden"
 
 cookie_header() {
     awk '
@@ -2818,7 +2818,9 @@ request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
 assert_eq "menu tree loads" "$STATUS" "200"
 assert_json "menu tree seeds three groups" '.data.groups | length' "3"
 assert_json "first seeded group is system apps" '.data.groups[0].label' "系统应用"
-assert_json "system group carries six built-in pages" '.data.groups[0].children | length' "6"
+# nginxConf 是隐藏入口（迁移 v22 置 enabled=0，不在菜单渲染），系统应用剩 5 个
+assert_json "system group carries five built-in pages" '.data.groups[0].children | length' "5"
+assert_json "hidden nginx-conf entry is not rendered" '[.data.groups[0].children[] | select(.builtin == "nginxConf")] | length' "0"
 assert_json "file browser built-in is seeded" '[.data.groups[0].children[] | select(.builtin == "files")] | length' "1"
 assert_json "built-in item maps to internal page" '.data.groups[0].children[0].builtin' "users"
 assert_json "second seeded group is domain services" '.data.groups[1].builtin' "domains"
@@ -2827,6 +2829,8 @@ assert_json "discovered services land in domain or local groups" '(.data.groups[
 
 request GET "$ADMIN_HOST" /_authz/api/menu-entries "$ADMIN_COOKIE"
 assert_eq "menu entries list" "$STATUS" "200"
+assert_json "hidden nginx-conf entry stays manageable in the editor" \
+    '[.data[] | select(.builtin == "nginxConf") | .enabled] | .[0]' "0"
 assert_json "menu entries expose kind and parent" '.data[0] | has("kind") and has("sort_order") | tostring' "true"
 MENU_GROUP_ID=$(jq -er '.data[] | select(.kind == "group" and .label == "系统应用") | .id' "$TMP_DIR/body")
 assert_json "menu entries expose parent linkage" '[.data[] | select(.kind == "item")] | map(has("parent_id")) | all | tostring' "true"

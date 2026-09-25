@@ -485,7 +485,10 @@ PKCE、resource、回调 issuer、state 一次性、角色映射、同名来源�
 `docker exec <容器> openresty -t` 验证语法，再重启容器生效；语法错误会导致 Nginx 无法启动。
 默认 `server_inc.conf` 提供 `favicon.ico`（204）与 `noc.gif`（200，SLB 健康检查）两个示例 location。
 
-管理壳的“Nginx配置(危险)”应用（`nginx_conf.html`，仅 admin）可在线编辑这三个文件：
+管理壳的“Nginx配置(危险)”应用（`nginx_conf.html`，仅 admin）可在线编辑这三个文件。
+它是隐藏入口（迁移 v22 起内置条目 enabled=0）：左侧菜单不显示，直接访问
+`/_authz/apps/nginx_conf.html` 打开；菜单编辑器的平铺列表仍能看到它，
+重新启用即可回到“系统应用”：
 保存前在临时前缀副本上跑 `openresty -t`（不触碰线上文件），失败时回显 nginx 原始错误；
 校验通过并二次确认后才写入（保留一个 `.bak`），模板目录可写时同步镜像以便重启后保留；
 “nginx 重启”按钮执行 `openresty -s reload`。对应 API 为 `/_authz/api/nginx-conf*`，

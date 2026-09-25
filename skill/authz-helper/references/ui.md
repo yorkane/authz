@@ -61,7 +61,12 @@ Cookie 会话或 `x-api-key` 头（Playwright setExtraHTTPHeaders）均可认证
 | 列表 | 列 AUTHZ_FILES_ROOT 目录 + 行操作菜单（下载/重命名/删除；目录非空需 recursive）；沙箱预览依赖 SameSite=None Cookie | `PUT /api/files/rename`、`DELETE /api/files/remove` |
 | 写权限 | 三项写操作 admin + CSRF + 浏览器会话专用（API Key 一律 403）；写路径锁死在 files_root 内，符号链接/越界名一律拒绝 | — |
 
-## 5. nginx_conf.html — Nginx include 编辑
+## 5. nginx_conf.html — Nginx include 编辑（隐藏入口）
+
+不在左侧菜单显示（内置条目 enabled=0，迁移 v22）；直接打开
+`/_authz/apps/nginx_conf.html`（仅 admin）。需要挂回菜单：
+`GET /api/menu-entries` 找到 builtin=nginxConf 的 id，
+`PATCH /api/menu-entries/:id` 传 `{"enabled":1}`。
 
 | 区块 | 功能 | API |
 |---|---|---|

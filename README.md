@@ -77,7 +77,7 @@
 
 ### Nginx 配置编辑（危险）
 
-管理壳内置“Nginx配置(危险)”应用（左侧菜单 → 系统应用 → Nginx配置(危险)，即 `/_authz/apps/` 下的 `nginx_conf.html`，仅 admin 可见）：
+管理壳内置“Nginx配置(危险)”应用（隐藏入口：不在左侧菜单显示，直接访问 `/_authz/apps/nginx_conf.html` 即可，仅 admin 可打开；如需常驻菜单，可在菜单编辑器里取消它的“停用”）：
 
 - 三个 Tab 分别编辑运行时配置目录里的 `http_inc.conf`（http{} 层）、`server_inc.conf`（server{} 层，只允许 location 级指令）与 `stream_inc.conf`（stream{} 层）；
 - “校验 (nginx -t)”把整个运行时配置目录复制到临时前缀、替换被编辑文件后执行 `openresty -t`，绝不触碰线上文件；失败时页面显示 nginx 的原始错误输出；

@@ -498,6 +498,18 @@ _M.list = {
                 sys_id, now, now))
         end,
     },
+    {
+        version = 22,
+        name = "menu_entry_nginx_conf_hidden",
+        up = function(db)
+            -- “Nginx配置(危险)”降级为隐藏入口：菜单树只渲染 enabled=1 的条目，
+            -- 置 0 后即从“系统应用”消失，但行仍留在表里 —— 菜单编辑器的平铺
+            -- 接口（/menu-entries）能看到并随时重新启用它。页面本身不删，
+            -- 直接访问 /_authz/apps/nginx_conf.html 仍受 admin 门禁保护。
+            must(db.exec([[UPDATE menu_entries SET enabled = 0, updated_at = ?
+                WHERE builtin = 'nginxConf' AND enabled = 1]], os.time()))
+        end,
+    },
 }
 
 function _M.run(db)
