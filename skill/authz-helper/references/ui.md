@@ -41,7 +41,7 @@ Cookie 会话或 `x-api-key` 头（Playwright setExtraHTTPHeaders）均可认证
 | 请求改写子对话框 | request_rewrite 结构化编辑（headers/remove/body/rewrites） | `PATCH /api/applications/:id` |
 | 响应改写子对话框 | response_rewrite 编辑（status/headers/body/rewrites，安全头禁改） | 同上 |
 | 策略表（带搜索） | 主体/对象/方法/eft，deny 红色标记 | `GET /api/authorization` |
-| 新增/编辑策略对话框 | 主体（role:xxx 或用户名）、对象 /<port><path>、方法、deny 开关 | `POST/PATCH/DELETE /api/policies` |
+| 新增/编辑策略对话框 | 主体（role:xxx 或用户名）、对象（下拉选本机服务或绑定，也可输入 host:端口 / 端口 / 域名前缀）+ 独立端口输入框（选中服务自动回填端口，改端口即换目标；端口与所选绑定不一致时不再提交 binding_id，落成 /<port><path> 的 unbound 对象）+ 访问路径、方法、deny 开关 | `POST/PATCH/DELETE /api/policies` |
 
 ## 3. menu-editor.html — 左侧菜单编辑
 

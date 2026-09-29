@@ -337,8 +337,9 @@ Keep-Alive）、网关凭据头（X-Authz-Key、X-API-Key、X-Role-Key）、其�
 表中 admin 用户执行修改时仍需 CSRF，admin Key 不需要。`DELETE /session` 和 `PUT /me/password` 是
 浏览器用户会话专用接口；admin Key 可通过 `/users/:id/password` 管理本地用户密码。
 
-策略对象格式为 `/<port><path-pattern>`，例如 `/2077/*` 或 `/2077/api/*`；管理端先选择绑定端口，
-再单独编辑路径并组合成该对象。动作支持标准 HTTP 方法或 `*`。`p.v0` 可为
+策略对象格式为 `/<port><path-pattern>`，例如 `/2077/*` 或 `/2077/api/*`；管理端从下拉选择绑定或本机 HTTP 服务
+（也可输入 host:端口 / 端口 / 域名前缀），端口框自动回填选中服务的端口且可改写——改端口即换目标，
+端口与所选绑定不一致时不再提交 `binding_id`，落成 unbound 端口对象；路径单独编辑后组合成该对象。动作支持标准 HTTP 方法或 `*`。`p.v0` 可为
 `user:<source>:<username>` 或 `role:<role>`。`deny` 优先于 `allow`。
 
 管理端从绑定创建策略时还会提交 `binding_id`。服务端验证该绑定存在且端口与 `v1` 一致，但 Casbin

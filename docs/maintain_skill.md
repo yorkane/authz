@@ -79,7 +79,8 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
 - 策略新增和编辑表单只管理 `p` 访问策略，不提供 `g` 角色分配切换；历史 `g` 规则仅列出和删除。
 - 绑定级 header 覆盖（多行 `Header-Name: value`）只允许覆盖透传类请求头；Host、Cookie、Origin、X-Authz-*、X-Forwarded-*、X-Real-IP、hop-by-hop 与分帧头必须在 validation 层拒绝，cache 层二次过滤，不得扩大可覆盖范围。
   表单按 binding ID 选择目标并由服务端统一校验 binding 与 Casbin 对象端口一致；
-  绑定对象使用纯下拉选择，选中值不挤入详情；效果使用允许/拒绝 Radio；
+  绑定对象下拉选择（含本机 HTTP 服务）或输入 host:端口 / 端口，选中值不挤入详情；端口为独立可编辑输入框，
+  改端口即改目标且不再提交 binding_id；效果使用允许/拒绝 Radio；
   编辑使用 `PATCH /policies/:id` 并回填完整策略，校验失败不得覆盖旧值。策略列表通过 `binding_matches`
   展示菜单名、域名、目标 IP:端口和路径，并明确标记未绑定或同端口共享策略。
 - 绑定级响应改写（`bindings.response_rewrite`，APISIX `response-rewrite` 子集）由 `gateway/rewrite.lua` 在
