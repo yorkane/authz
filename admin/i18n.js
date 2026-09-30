@@ -25,6 +25,7 @@
         openInTab: '新窗口打开', download: '下载', close: '关闭', retry: '重试',
         copyPath: '复制文件路径', copied: '已复制路径', copyFailed: '复制失败，路径：',
         textTooLarge: '文件过大，不适合在线预览',
+        fullscreenFailed: '全屏失败',
         collapsePreview: '收起预览', expandPreview: '展开预览',
         prevFile: '上一个文件', nextFile: '下一个文件',
         playPause: '点击画面播放 / 暂停，左右滑动切换文件',
@@ -40,7 +41,15 @@
         deleteDirCopy: '删除后不可恢复。目录非空时需要勾选递归删除。',
         deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
         overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
-        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览',
+        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级（焦点回到来源目录）· 单击/Ctrl+单击/Shift+单击/Shift+方向键 多选 · Ctrl+A 全选 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · Esc 取消选择 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 f 视频全屏 · ←/→ 切换文件 · Esc 关闭预览',
+        clearSelection: '取消选择', selectedCount: '已选 {n} 项', move: '移动',
+        batchDeleteTitle: '批量删除', batchDeleteCopy: '将删除选中的 {n} 项，删除后不可恢复。',
+        moveTitle: '移动到', moveCopy: '将移动选中的 {n} 项到目标目录。',
+        moveTarget: '目标目录', moveTargetHint: '当前目录下的子目录名；以 / 开头则从内容根算起（如 /reports/2026）。留空或等于当前目录不会被提交',
+        moveResolved: '将移动到：{p}', movePlaceholderSub: '子目录名，如 2026', movePlaceholderRoot: '新建一级目录名',
+        batchDeleted: '已删除 {n} 项', batchMoved: '已移动 {n} 项',
+        batchPartial: '成功 {ok} 项，失败 {fail} 项', moveBadTarget: '目标目录不能包含 ..', moveSameDir: '目标目录就是当前目录',
+        downloadNoFiles: '选中项里没有可下载的文件', downloadTooMany: '一次最多下载 20 个文件，当前选中 {n} 个',
         loadMore: '加载下一页'
       },
       files: {
@@ -53,6 +62,7 @@
         openInTab: '新窗口打开', download: '下载', close: '关闭', retry: '重试',
         copyPath: '复制文件路径', copied: '已复制路径', copyFailed: '复制失败，路径：',
         textTooLarge: '文件过大，不适合在线预览',
+        fullscreenFailed: '全屏失败',
         collapsePreview: '收起预览', expandPreview: '展开预览',
         prevFile: '上一个文件', nextFile: '下一个文件',
         playPause: '点击画面播放 / 暂停，左右滑动切换文件',
@@ -67,7 +77,7 @@
         deleteDirCopy: '删除后不可恢复。目录非空时需要勾选递归删除。',
         deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
         overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
-        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 ←/→ 切换文件 · Esc 关闭预览'
+        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级（焦点回到来源目录）· 单击/Ctrl+单击/Shift+单击/Shift+方向键 多选 · Ctrl+A 全选 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · Esc 取消选择 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 f 视频全屏 · ←/→ 切换文件 · Esc 关闭预览'
       },
       // S3 页特有部分：页面外壳（未配置卡片/桶选择器）与分享按钮；共享交互文案由 browser 块提供。
       s3: {
@@ -257,6 +267,7 @@
         openInTab: 'Open in tab', download: 'Download', close: 'Close', retry: 'Retry',
         copyPath: 'Copy path', copied: 'Path copied', copyFailed: 'Copy failed; path:',
         textTooLarge: 'File too large for inline preview',
+        fullscreenFailed: 'Fullscreen failed',
         collapsePreview: 'Collapse preview', expandPreview: 'Expand preview',
         prevFile: 'Previous file', nextFile: 'Next file',
         playPause: 'Tap to play / pause, swipe left or right for the previous or next file',
@@ -272,7 +283,15 @@
         deleteDirCopy: 'This is not recoverable. Removing a non-empty folder needs the recursive switch.',
         deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
         overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
-        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · Delete removes selection (Enter confirms, Esc cancels) · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview',
+        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up (focus returns to the folder you left) · click / Ctrl+click / Shift+click / Shift+arrows multi-select · Ctrl+A all · Delete removes selection (Enter confirms, Esc cancels) · Esc clears selection · g/l switch view · p toggle preview panel · f search · in preview f toggles fullscreen · arrows switch file · Esc closes preview',
+        clearSelection: 'Clear selection', selectedCount: '{n} selected', move: 'Move',
+        batchDeleteTitle: 'Batch delete', batchDeleteCopy: 'Delete the {n} selected items? This is not recoverable.',
+        moveTitle: 'Move to', moveCopy: 'Move the {n} selected items to the target directory.',
+        moveTarget: 'Target directory', moveTargetHint: 'A subdirectory of the current directory; a leading / resolves from the content or bucket root (e.g. /reports/2026). Blank or the current directory is not submitted',
+        moveResolved: 'Will move to: {p}', movePlaceholderSub: 'subdirectory name, e.g. 2026', movePlaceholderRoot: 'new top-level directory name',
+        batchDeleted: 'Deleted {n} items', batchMoved: 'Moved {n} items',
+        batchPartial: '{ok} succeeded, {fail} failed', moveBadTarget: 'Target directory cannot contain ..', moveSameDir: 'Target directory is the current directory',
+        downloadNoFiles: 'No downloadable file in the selection', downloadTooMany: 'Up to 20 files per download; {n} selected',
         loadMore: 'Load next page'
       },
       files: {
@@ -285,6 +304,7 @@
         openInTab: 'Open in tab', download: 'Download', close: 'Close', retry: 'Retry',
         copyPath: 'Copy path', copied: 'Path copied', copyFailed: 'Copy failed; path:',
         textTooLarge: 'File too large for inline preview',
+        fullscreenFailed: 'Fullscreen failed',
         collapsePreview: 'Collapse preview', expandPreview: 'Expand preview',
         prevFile: 'Previous file', nextFile: 'Next file',
         playPause: 'Tap to play / pause, swipe left or right for the previous or next file',
@@ -299,7 +319,7 @@
         deleteDirCopy: 'This is not recoverable. Removing a non-empty folder needs the recursive switch.',
         deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
         overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
-        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up · Delete removes selection (Enter confirms, Esc cancels) · g/l switch view · p toggle preview panel · f search · arrows switch file in preview · Esc closes preview'
+        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up (focus returns to the folder you left) · click / Ctrl+click / Shift+click / Shift+arrows multi-select · Ctrl+A all · Delete removes selection (Enter confirms, Esc cancels) · Esc clears selection · g/l switch view · p toggle preview panel · f search · in preview f toggles fullscreen · arrows switch file · Esc closes preview'
       },
       // S3 page specifics: page shell (not-configured card / bucket picker) and share buttons.
       s3: {
