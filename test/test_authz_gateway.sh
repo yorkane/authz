@@ -846,6 +846,27 @@ assert_contains_all "delete dialog confirms on Enter and swallows other keys" "$
     "if (removeOpen.value) {" \
     "if (event.key === 'Enter' && !mutating.value) {" \
     "confirmRemove()"
+request GET "$ADMIN_HOST" '/_authz/apps/browser.js' "$ADMIN_COOKIE"
+assert_contains_all "preview f toggles media fullscreen; Esc exits fullscreen first" "$BODY" \
+    "} else if (event.key === 'f' || event.key === 'F') {" \
+    "toggleMediaFullscreen()" \
+    "if (el.webkitEnterFullscreen) return el.webkitEnterFullscreen()" \
+    "function onPreviewEscCapture (event) {" \
+    "document.addEventListener('keydown', onPreviewEscCapture, true)" \
+    "document.removeEventListener('keydown', onPreviewEscCapture, true)"
+request GET "$ADMIN_HOST" '/_authz/apps/browser.js' "$ADMIN_COOKIE"
+assert_contains_all "backspace-up returns focus to the folder just left" "$BODY" \
+    "let pendingFocusName = ''" \
+    "pendingFocusName = parts[parts.length - 1]" \
+    "function applyPendingFocus ()" \
+    "const listIndex = filtered.value.findIndex(item => item.name === name)" \
+    "applyPendingFocus()"
+request GET "$ADMIN_HOST" '/_authz/apps/i18n.js?v=53' "$ADMIN_COOKIE"
+assert_contains_all "kbd hints document fullscreen and focus-back" "$BODY" \
+    "预览中 f 视频全屏" \
+    "焦点回到来源目录" \
+    "in preview f toggles fullscreen" \
+    "focus returns to the folder you left"
 request GET "$ADMIN_HOST" '/_authz/apps/menu-editor.html' "$ADMIN_COOKIE"
 assert_contains_all "menu editor renders service entries with edit and reset" "$BODY" \
     "window.adminApi.menuServices()" \
@@ -3144,6 +3165,99 @@ assert_eq "rename a directory succeeds" "$STATUS" "200"
 [[ ! -e "$FM_DIR/new-dir" && -d "$FM_DIR/renamed-dir" ]] \
     && pass "renamed directory kept on disk" || fail "directory rename lost the folder"
 
+# ── 跨目录移动（可选 new_path）──────────────────────────────────────────────
+# 目标目录与 path 同语义（相对内容根），两端各自走 resolve_dir：
+# 纯移动（名字不变）、移动+改名、移动到不存在的目录、越界 new_path、
+# 目录移进自己的子树、目标同名冲突，逐个把守。
+mkdir -p "$FM_DIR/move-src" "$FM_DIR/move-dst" "$FM_DIR/move-dst/inner"
+printf 'move me\n' > "$FM_DIR/move-src/move.txt"
+printf 'dir payload\n' > "$FM_DIR/move-src/payload.txt"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test/move-src","name":"move.txt","new_name":"move.txt","new_path":"fm-test/move-dst"}'
+assert_eq "pure move to another directory succeeds" "$STATUS" "200"
+assert_json "move reports moved true" '.data.moved | tostring' "true"
+assert_json "move echoes the target directory" '.data.new_path' "fm-test/move-dst"
+assert_json "move reports the name" '.data.name' "move.txt"
+[[ ! -e "$FM_DIR/move-src/move.txt" ]] \
+    && pass "moved file left the source directory" || fail "source file still present after move"
+[[ "$(cat "$FM_DIR/move-dst/move.txt" 2>/dev/null)" == "move me" ]] \
+    && pass "moved file landed in the target directory" || fail "target file missing or altered"
+
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test/move-dst","name":"move.txt","new_name":"moved.txt","new_path":"fm-test/move-dst/inner"}'
+assert_eq "move with rename in one call succeeds" "$STATUS" "200"
+[[ ! -e "$FM_DIR/move-dst/move.txt" && "$(cat "$FM_DIR/move-dst/inner/moved.txt" 2>/dev/null)" == "move me" ]] \
+    && pass "move and rename both applied" || fail "move-with-rename did not apply both changes"
+
+# 目录整体移动：子树内容随目录一起搬走。
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"move-src","new_name":"move-src","new_path":"fm-test/move-dst/inner"}'
+assert_eq "directory move succeeds" "$STATUS" "200"
+[[ ! -e "$FM_DIR/move-src" && -f "$FM_DIR/move-dst/inner/move-src/payload.txt" ]] \
+    && pass "directory moved with its contents" || fail "directory move lost the subtree"
+
+# 移动到不存在的目录：与源 path 同口径（resolve_dir 逐级判定）→ 404。
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test/move-dst/inner/move-src","name":"payload.txt","new_name":"payload.txt","new_path":"fm-test/nope"}'
+assert_eq "move into a missing directory 404" "$STATUS" "404"
+[[ -f "$FM_DIR/move-dst/inner/move-src/payload.txt" ]] \
+    && pass "rejected move left the file in place" || fail "rejected move relocated the file"
+
+# new_path 越界：与 path 同一条 normalize 规则（含 .. 一律 400）。
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test/move-dst/inner/move-src","name":"payload.txt","new_name":"payload.txt","new_path":"../../etc"}'
+assert_eq "move rejects traversal in new_path" "$STATUS" "400"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"move-dst","new_name":"move-dst","new_path":"fm-test/move-dst/inner/move-src"}'
+assert_eq "directory cannot move into its own subtree" "$STATUS" "422"
+[[ -d "$FM_DIR/move-dst/inner/move-src" && -d "$FM_DIR/move-dst" ]] \
+    && pass "refused self-nested move kept the tree" || fail "self-nested move damaged the tree"
+
+# 目标同名冲突：源与目标都在 move-dst/inner 下，同名文件已存在 → 409。
+printf 'occupied\n' > "$FM_DIR/move-dst/inner/payload.txt"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test/move-dst/inner/move-src","name":"payload.txt","new_name":"payload.txt","new_path":"fm-test/move-dst/inner"}'
+assert_eq "move onto an existing name conflicts" "$STATUS" "409"
+[[ "$(cat "$FM_DIR/move-dst/inner/payload.txt")" == "occupied" \
+    && -f "$FM_DIR/move-dst/inner/move-src/payload.txt" ]] \
+    && pass "conflicting move overwrote nothing" || fail "conflicting move overwrote the target"
+
+# 回归：不带 new_path 的旧调用逐条不变（响应形状不含 moved/new_path）。
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"renamed.txt","new_name":"renamed-again.txt"}'
+assert_eq "rename without new_path still succeeds" "$STATUS" "200"
+assert_json "plain rename reports the old message" '.data.message' "已重命名"
+assert_json "plain rename adds no moved flag" '.data | has("moved") | tostring' "false"
+assert_json "plain rename adds no new_path field" '.data | has("new_path") | tostring' "false"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"renamed-again.txt","new_name":"renamed-again.txt"}'
+assert_eq "same-name rename in place is still rejected" "$STATUS" "422"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"renamed-again.txt","new_name":"renamed-again.txt","new_path":"fm-test"}'
+assert_eq "same directory plus same name is rejected too" "$STATUS" "422"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"renamed-again.txt","new_name":"renamed-again.txt","new_path":"../etc"}'
+assert_eq "new_path is validated before the same-name check" "$STATUS" "400"
+
+# 移动到内容根（new_path 空串 = root）。
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"renamed-again.txt","new_name":"renamed-again.txt","new_path":""}'
+assert_eq "move to the content root with empty new_path succeeds" "$STATUS" "200"
+[[ -f "$TMP_DIR/files/renamed-again.txt" ]] \
+    && pass "empty new_path moved the file to the root" || fail "move to root did not land"
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"","name":"renamed-again.txt"}'
+assert_eq "cleanup removes the root-moved file" "$STATUS" "200"
+
+# 符号链接目标目录同样拒绝（new_path 指向 symlink 目录）。
+ln -s "$FM_DIR/move-dst" "$TMP_DIR/files/aliendst"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"fm-test","name":"hello.txt","new_name":"hello.txt","new_path":"aliendst"}'
+assert_eq "move through a symlinked target directory is refused" "$STATUS" "400"
+[[ -f "$FM_DIR/hello.txt" ]] \
+    && pass "refused symlink-target move kept the file" || fail "symlink-target move wrote through the link"
+rm -f "$TMP_DIR/files/aliendst"
+
 # 符号链接防护：链接本身既不删、不改名、也不覆盖（否则等于把写/删能力送出 root）。
 ln -s /etc/passwd "$TMP_DIR/files/evil-link"
 request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
@@ -3167,7 +3281,8 @@ request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
 assert_eq "write through a symlinked directory is refused" "$STATUS" "400"
 rm -f "$TMP_DIR/files/aliendir"
 
-# 机器 Key 即使带着合法 CSRF 值也进不了写接口（session_only 先拒绝）。
+# 机器 Key（x-api-key）免登录直连文件写接口：写端点的能力边界是 admin 角色 +
+# Key 的来源约束，不再要求浏览器会话（session_only 已去掉），CSRF 只约束会话请求。
 # Key 由本段自建自删：TEST_ONLY 单跑时前序段不会创建共享 Key。
 request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" \
     '{"name":"fm-manage-test","role":"admin"}'
@@ -3177,8 +3292,9 @@ FM_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
 fm_upload_with_key() {
     local csrf_token=$1; shift
     local call=(-sS --max-time 20 -X POST --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1"
-        -H "X-CSRF-Token: $csrf_token" -H "x-api-key: $FM_KEY_TOKEN"
+        -H "x-api-key: $FM_KEY_TOKEN"
         -o "$TMP_DIR/body" -w '%{http_code}')
+    [[ -n "$csrf_token" ]] && call+=(-H "X-CSRF-Token: $csrf_token")
     local spec form=() n=0
     for spec in "$@"; do
         local fname=${spec%%:*} body=${spec#*:}
@@ -3189,13 +3305,55 @@ fm_upload_with_key() {
     STATUS=$(curl "${call[@]}" "${form[@]}" \
         "http://$ADMIN_HOST:$HTTP_PORT/_authz/api/files/upload?path=fm-test")
 }
-fm_upload_with_key "$CSRF" "key-only.txt:x"
-assert_eq "upload requires a browser session" "$STATUS" "403"
-[[ ! -e "$FM_DIR/key-only.txt" ]] \
-    && pass "no file written by the rejected key upload" || fail "key upload wrote a file"
+# admin Key 免会话、免 CSRF 完成 upload → mkdir → 跨目录 rename → remove 全链路。
+fm_upload_with_key "" "key-only.txt:by key"
+assert_eq "admin machine key uploads without a session or CSRF" "$STATUS" "201"
+[[ "$(cat "$FM_DIR/key-only.txt" 2>/dev/null)" == "by key" ]] \
+    && pass "admin key upload wrote the file through" || fail "admin key upload did not land"
+request POST "$ADMIN_HOST" /_authz/api/files/mkdir "" "" \
+    '{"path":"fm-test","name":"key-dir"}' "$FM_KEY_TOKEN"
+assert_eq "admin machine key can mkdir" "$STATUS" "201"
+[[ -d "$FM_DIR/key-dir" ]] \
+    && pass "key mkdir created the directory on disk" || fail "key mkdir missing on disk"
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "" "" \
+    '{"path":"fm-test","name":"key-only.txt","new_name":"moved-by-key.txt","new_path":"fm-test/key-dir"}' "$FM_KEY_TOKEN"
+assert_eq "admin machine key can move across directories" "$STATUS" "200"
+[[ -f "$FM_DIR/key-dir/moved-by-key.txt" && ! -e "$FM_DIR/key-only.txt" ]] \
+    && pass "key-driven move landed on disk" || fail "key-driven move did not apply"
 request DELETE "$ADMIN_HOST" /_authz/api/files/remove "" "" \
-    "{\"path\":\"fm-test\",\"name\":\"hello.txt\"}" "$FM_KEY_TOKEN"
-assert_eq "api key cannot delete files" "$STATUS" "403"
+    '{"path":"fm-test/key-dir","name":"moved-by-key.txt"}' "$FM_KEY_TOKEN"
+assert_eq "admin machine key can delete files" "$STATUS" "200"
+[[ ! -e "$FM_DIR/key-dir/moved-by-key.txt" ]] \
+    && pass "key-driven delete removed the file" || fail "key-driven delete left the file"
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "" "" \
+    '{"path":"fm-test","name":"key-dir"}' "$FM_KEY_TOKEN"
+assert_eq "admin machine key can remove the empty directory" "$STATUS" "200"
+# 非 admin 角色 Key 一律 403（角色门禁，而不是 session_only）：guest 与 staff 各验一把。
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" \
+    '{"name":"fm-guest-key","role":"guest"}'
+assert_eq "section creates its own guest key" "$STATUS" "201"
+FM_GUEST_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+FM_GUEST_KEY=$(jq -er '.data.token' "$TMP_DIR/body")
+request PUT "$ADMIN_HOST" /_authz/api/files/rename "" "" \
+    '{"path":"fm-test","name":"hello.txt","new_name":"stolen.txt"}' "$FM_GUEST_KEY"
+assert_eq "guest machine key cannot rename files" "$STATUS" "403"
+request POST "$ADMIN_HOST" /_authz/api/files/mkdir "" "" \
+    '{"path":"fm-test","name":"guest-dir"}' "$FM_GUEST_KEY"
+assert_eq "guest machine key cannot mkdir" "$STATUS" "403"
+[[ ! -e "$FM_DIR/guest-dir" ]] \
+    && pass "guest key mkdir wrote nothing" || fail "guest key created a directory"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$FM_GUEST_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "section removes its guest key" "$STATUS" "200"
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" \
+    '{"name":"fm-staff-key","role":"staff"}'
+assert_eq "section creates its own staff key" "$STATUS" "201"
+FM_STAFF_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+FM_STAFF_KEY=$(jq -er '.data.token' "$TMP_DIR/body")
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "" "" \
+    '{"path":"fm-test","name":"b.txt"}' "$FM_STAFF_KEY"
+assert_eq "non-admin machine key cannot delete files" "$STATUS" "403"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$FM_STAFF_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "section removes its staff key" "$STATUS" "200"
 request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$FM_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "section removes its own admin key" "$STATUS" "200"
 
@@ -3250,8 +3408,13 @@ request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name"
 assert_eq "S3 section creates its own admin key" "$STATUS" "201"
 S3_ONLY_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
 S3_ONLY_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+# 写端点不再要求浏览器会话：admin Key 直接进到业务层，未配置 S3 时给出 423
+# （而不是过去 session_only 的先发 403）。
 request POST "$ADMIN_HOST" /_authz/api/s3/mkdir "" "" '{"bucket":"any","path":"","name":"x"}' "$S3_ONLY_KEY_TOKEN"
-assert_eq "S3 mkdir requires a browser session" "$STATUS" "403"
+assert_eq "admin machine key reaches the S3 write handler" "$STATUS" "423"
+request PUT "$ADMIN_HOST" /_authz/api/s3/rename "" "" \
+    '{"bucket":"any","path":"","name":"a","new_name":"b"}' "$S3_ONLY_KEY_TOKEN"
+assert_eq "admin machine key reaches S3 rename without a session" "$STATUS" "423"
 request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$S3_ONLY_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
 assert_eq "S3 section removes its admin key" "$STATUS" "200"
 request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
@@ -3408,6 +3571,84 @@ s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
     "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"subdir\",\"recursive\":true}"
 assert_eq "live recursive delete 200" "$STATUS" "200"
 assert_json "live recursive delete counted" '.data.removed >= 2 | tostring' "true"
+
+# ── 跨目录移动（可选 new_path，桶内相对前缀，与 path 同语义）────────────────
+s3req POST /_authz/api/s3/mkdir "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"mv-a\"}"
+assert_eq "live move: mkdir mv-a 201" "$STATUS" "201"
+s3req POST /_authz/api/s3/mkdir "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"mv-b\"}"
+assert_eq "live move: mkdir mv-b 201" "$STATUS" "201"
+s3put "$S3_P/mv-a" "mv.txt" "$TMP_DIR/s3-hello.txt"
+assert_eq "live move: upload source object 201" "$STATUS" "201"
+# 纯移动：new_name 与 name 相同、只换目录。旧口径在这里会被「新旧名称相同」误杀。
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P/mv-a\",\"name\":\"mv.txt\",\"new_name\":\"mv.txt\",\"new_path\":\"$S3_P/mv-b\"}"
+assert_eq "live pure move 200" "$STATUS" "200"
+assert_json "live pure move reports moved" '.data.moved | tostring' "true"
+assert_json "live pure move echoes new_path" '.data.new_path' "$S3_P/mv-b"
+s3req GET "/_authz/s3/$S3_B/$S3_P/mv-a/mv.txt" "$S3_COOKIE"
+assert_eq "live moved object gone from source" "$STATUS" "404"
+s3req GET "/_authz/s3/$S3_B/$S3_P/mv-b/mv.txt" "$S3_COOKIE"
+assert_eq "live moved object readable at target" "$STATUS" "200"
+# 移动 + 改名一次调用同时生效
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P/mv-b\",\"name\":\"mv.txt\",\"new_name\":\"mv2.txt\",\"new_path\":\"$S3_P\"}"
+assert_eq "live move with rename 200" "$STATUS" "200"
+s3req GET "/_authz/s3/$S3_B/$S3_P/mv2.txt" "$S3_COOKIE"
+assert_eq "live move-with-rename object readable" "$STATUS" "200"
+# 目标落在可写范围外（桶根）：目标 key 必须单独再判一次 item_writable → 403。
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"mv2.txt\",\"new_name\":\"out.txt\",\"new_path\":\"\"}"
+assert_eq "live move to out-of-scope target rejected" "$STATUS" "403"
+assert_json "live out-of-scope move carries s3_read_only" '.error.code' "s3_read_only"
+s3req GET "/_authz/s3/$S3_B/$S3_P/mv2.txt" "$S3_COOKIE"
+assert_eq "live rejected move left the object in place" "$STATUS" "200"
+# 目录移动到自身子目录内：copy_prefix 会把前缀复制进自己的子树（数据翻倍），必须拒。
+s3put "$S3_P/mv-a" "kid.txt" "$TMP_DIR/s3-hello.txt"
+assert_eq "live self-nesting setup upload 201" "$STATUS" "201"
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"mv-a\",\"new_name\":\"mv-a\",\"new_path\":\"$S3_P/mv-a\"}"
+assert_eq "live directory move into own subtree rejected" "$STATUS" "422"
+s3req GET "/_authz/api/s3?bucket=$S3_B&path=$S3_P/mv-a" "$S3_COOKIE"
+assert_json "live rejected self-nesting kept no extra copy" '[.data.items[] | select(.name == "mv-a")] | length' "0"
+# new_path 越界：与 path 共用 normalize_prefix（含 .. → 400 invalid_path）
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"mv2.txt\",\"new_name\":\"mv2.txt\",\"new_path\":\"../../etc\"}"
+assert_eq "live move rejects traversal in new_path" "$STATUS" "400"
+assert_json "live traversal new_path reports invalid_path" '.error.code' "invalid_path"
+# 目标同名冲突 → 409，源对象原样保留
+s3put "$S3_P/mv-b" "dup.txt" "$TMP_DIR/s3-hello.txt"
+assert_eq "live conflict setup upload into mv-b 201" "$STATUS" "201"
+s3put "$S3_P/mv-a" "dup.txt" "$TMP_DIR/s3-hello.txt"
+assert_eq "live conflict setup upload into mv-a 201" "$STATUS" "201"
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P/mv-b\",\"name\":\"dup.txt\",\"new_name\":\"dup.txt\",\"new_path\":\"$S3_P/mv-a\"}"
+assert_eq "live move onto an existing object conflicts" "$STATUS" "409"
+s3req GET "/_authz/s3/$S3_B/$S3_P/mv-b/dup.txt" "$S3_COOKIE"
+assert_eq "live conflicting move kept the source object" "$STATUS" "200"
+# 回归：不带 new_path 的旧调用形状不变（响应不含 moved/new_path）
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P/mv-b\",\"name\":\"dup.txt\",\"new_name\":\"dup2.txt\"}"
+assert_eq "live rename without new_path still 200" "$STATUS" "200"
+assert_json "live plain rename adds no moved flag" '.data | has("moved") | tostring' "false"
+assert_json "live plain rename adds no new_path field" '.data | has("new_path") | tostring' "false"
+# 显式传 null 必须等同「不传」：cjson 把 JSON null 解成 cjson.null（userdata），
+# 不当成 nil 处理的话会被拼成一个名为 "null" 的目录段。
+s3req PUT /_authz/api/s3/rename "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P/mv-b\",\"name\":\"dup2.txt\",\"new_name\":\"dup2.txt\",\"new_path\":null}"
+assert_eq "live null new_path behaves as in-place rename" "$STATUS" "400"
+assert_json "live null new_path reports the same-name error" '.error.message' "新旧名称相同"
+# 清理本块产物
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"mv-a\",\"recursive\":true}"
+assert_eq "live cleanup of move source dir" "$STATUS" "200"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"mv-b\",\"recursive\":true}"
+assert_eq "live cleanup of move target dir" "$STATUS" "200"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"mv2.txt\",\"recursive\":true}"
+assert_eq "live cleanup of moved object" "$STATUS" "200"
 s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
     "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"hello2.txt\",\"recursive\":true}"
 assert_eq "live cleanup removes the last object" "$STATUS" "200"
@@ -3497,11 +3738,34 @@ s3req POST /_authz/api/api-keys "$S3_COOKIE" "$S3_CSRF" '{"name":"s3-live-key","
 assert_eq "live section creates an admin key" "$STATUS" "201"
 S3_LIVE_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
 S3_LIVE_KEY=$(jq -er '.data.token' "$TMP_DIR/body")
-assert_eq "live rename rejects machine keys" \
-    "$(curl -sS --max-time 10 -X PUT -H "x-api-key: $S3_LIVE_KEY" -H "X-CSRF-Token: $S3_CSRF" \
+# 写端点去掉 session_only 后：admin Key 免会话、免 CSRF 即可完成跨目录移动；
+# 非 admin（guest）Key 与匿名请求仍被角色/会话门禁挡在门外。
+s3put "$S3_P" "keymove.txt" "$TMP_DIR/s3-hello.txt"
+assert_eq "live key-chain setup upload 201" "$STATUS" "201"
+assert_eq "live admin machine key can move objects" \
+    "$(curl -sS --max-time 10 -X PUT -H "x-api-key: $S3_LIVE_KEY" \
         -H 'Content-Type: application/json' \
-        -d '{\"bucket\":\"'$S3_B'\",\"path\":\"\",\"name\":\"a\",\"new_name\":\"b\"}' \
+        -d "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"keymove.txt\",\"new_name\":\"keymove.txt\",\"new_path\":\"$S3_P\"}" \
+        -o "$TMP_DIR/body" -w '%{http_code}' "$S3_URL/_authz/api/s3/rename")" "400"
+assert_eq "live machine-key rename without a session answers same-name" \
+    "$(jq -er '.error.message' "$TMP_DIR/body")" "新旧名称相同"
+s3req PUT /_authz/api/s3/rename "" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"keymove.txt\",\"new_name\":\"keymove.txt\",\"new_path\":\"$S3_P/newdir\"}"
+assert_eq "live rename still needs a credential without a key" "$STATUS" "401"
+s3req POST /_authz/api/api-keys "$S3_COOKIE" "$S3_CSRF" '{"name":"s3-live-guest","role":"guest"}'
+assert_eq "live section creates a guest key" "$STATUS" "201"
+S3_LIVE_GUEST_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+S3_LIVE_GUEST_KEY=$(jq -er '.data.token' "$TMP_DIR/body")
+assert_eq "live guest machine key cannot rename" \
+    "$(curl -sS --max-time 10 -X PUT -H "x-api-key: $S3_LIVE_GUEST_KEY" \
+        -H 'Content-Type: application/json' \
+        -d "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"keymove.txt\",\"new_name\":\"stolen.txt\"}" \
         -o /dev/null -w '%{http_code}' "$S3_URL/_authz/api/s3/rename")" "403"
+s3req DELETE "/_authz/api/api-keys/$S3_LIVE_GUEST_ID" "$S3_COOKIE" "$S3_CSRF"
+assert_eq "live section removes its guest key" "$STATUS" "200"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"keymove.txt\",\"recursive\":true}"
+assert_eq "live cleanup of the key-chain object" "$STATUS" "200"
 s3req DELETE "/_authz/api/api-keys/$S3_LIVE_KEY_ID" "$S3_COOKIE" "$S3_CSRF"
 assert_eq "live section removes its key" "$STATUS" "200"
 docker exec "$S3_LIVE_CONTAINER" chmod -R a+rwx /data >/dev/null 2>&1 || true
