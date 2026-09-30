@@ -53,7 +53,7 @@
 .sort-caret { margin-left: 4px; vertical-align: middle; }
 .preview-expand-btn { position: absolute; top: 6px; right: 8px; z-index: 2; }
 .files-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) 90px 140px 36px; gap: 8px;
+  display: grid; grid-template-columns: 34px minmax(0, 1fr) 90px 140px 36px; gap: 8px;
   padding: 6px 12px; cursor: pointer; font-size: 13px; align-items: center; outline: none;
 }
 .files-row .col-action { display: flex; justify-content: flex-end; }
@@ -130,6 +130,11 @@
    退回等比居中），避免两侧留黑浪费空间。 */
 .preview-image { width: 100%; max-height: 100%; object-fit: contain; }
 .preview-media { width: min(100%, 1100px); max-height: 100%; }
+/* f 键全屏：进入全屏后抛弃预览区内的宽度/高度上限，铺满整屏（含 iOS 前缀写法）。 */
+.preview-media:fullscreen, .preview-media:-webkit-full-screen,
+.preview-audio-wrap:fullscreen, .files-preview-card:fullscreen {
+  width: 100%; height: 100%; max-height: 100%; max-width: 100%; background: #000;
+}
 /* 预览媒体可点击（图片关闭 / 媒体播放暂停），给出可点反馈。 */
 .preview-image, .preview-media, .preview-audio-wrap { cursor: pointer; }
 .preview-audio-wrap { display: flex; flex-direction: column; align-items: center; gap: 18px; width: 80%; min-width: min(320px, 92%);
@@ -178,3 +183,25 @@
   background: rgba(255, 255, 255, 0.06); border-radius: 6px; color: rgba(255, 255, 255, 0.7);
 }
 .files-dialog-copy { margin: 0 0 8px; font-size: 13px; color: rgba(255, 255, 255, 0.72); }
+
+/* 多选（批量删除 / 批量移动）：选中时工具栏整条换成操作条。
+   .files-selected 用 primary 低透明度描边，与键盘焦点态 .files-focused 互不遮蔽。 */
+.files-selection-bar {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 10px; padding: 2px 6px 2px 2px;
+  border: 1px solid rgba(111, 165, 255, 0.45); border-radius: 8px; background: rgba(111, 165, 255, 0.1);
+}
+.selection-count { font-size: 13px; color: rgba(255, 255, 255, 0.85); }
+.files-row .col-select, .files-row-head .col-select { display: flex; align-items: center; }
+.files-row .col-select .q-checkbox, .files-row-head .col-select .q-checkbox { opacity: 0; transition: opacity .12s; }
+.files-row:hover .col-select .q-checkbox, .files-row.files-focused .col-select .q-checkbox,
+.files-row.files-selected .col-select .q-checkbox, .files-row-head .col-select .q-checkbox { opacity: .9; }
+.files-row.files-selected, .files-card.files-selected {
+  background: rgba(111, 165, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(111, 165, 255, 0.5);
+}
+.files-card .card-select { position: absolute; top: 2px; left: 2px; z-index: 2; opacity: 0; transition: opacity .15s ease; }
+.files-card:hover .card-select, .files-card.files-focused .card-select, .files-card.files-selected .card-select { opacity: .95; }
+.files-card .card-select .q-checkbox { background: rgba(0, 0, 0, .55); border-radius: 4px; }
+/* 触屏没有 hover：复选框常驻可见 */
+@media (pointer: coarse) {
+  .files-card .card-select, .files-row .col-select .q-checkbox { opacity: .95; }
+}
