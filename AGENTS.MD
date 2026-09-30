@@ -84,3 +84,6 @@ playwright-cli run-code "async page => {
 5. 发布后验证：登录页 200、session API、受保护代理、（若涉及）x-api-key 免登录三个入口；
 6. 本地构建细节与排障见 deploy.md §8.1（builder 代理坑、多核参数在 Dockerfile `RESTY_J`）。
 
+## 部署
+本机 235.t 是生产环境
+生产环境的部署要求脚本一次性部署完, 在部署过程中 agent 会被中断要考虑无法后继操作的风险
