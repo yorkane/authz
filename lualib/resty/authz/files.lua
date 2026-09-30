@@ -174,24 +174,47 @@ function _M.resolve_dir(root, rel)
     return current, nil, nil, clean
 end
 
-function _M.rename(root, rel, old_name, new_name)
+--- 重命名，或「跨目录移动」。
+-- new_rel 可选：目标目录（相对内容根，语义与 rel 完全一致）。缺省（nil）= 原地改名，
+-- 行为与旧版逐条相同；空串 = 内容根。源与目标各自独立走 resolve_dir，因此 symlink
+-- 逐级防护与 .. 拒绝在两端同样生效。
+function _M.rename(root, rel, old_name, new_name, new_rel)
     local dir, err, status = _M.resolve_dir(root, rel)
     if not dir then return nil, err, status end
+    -- 目标目录单独解析：非法（含 ..）400、不存在 404，判定与 rel 完全一致。
+    local to_dir, to_rel = dir, nil
+    if new_rel ~= nil then
+        local resolved, dir_err, dir_status, clean = _M.resolve_dir(root, new_rel)
+        if not resolved then return nil, dir_err, dir_status end
+        to_dir, to_rel = resolved, clean
+    end
     local old = _M.validate_name(old_name)
     local new = _M.validate_name(new_name)
     if not old or not new then
         return nil, "名称不能为空且不能包含路径分隔符或控制字符", 422
     end
-    if old == new then return nil, "新旧名称相同", 422 end
+    local moved = to_dir ~= dir
+    -- 只有「同目录且同名」才是空操作：名字不变、只换目录是合法的纯移动。
+    if not moved and old == new then return nil, "新旧名称相同", 422 end
     local lfs = lfs_mod()
     local from = dir .. "/" .. old
-    local to = dir .. "/" .. new
+    local to = to_dir .. "/" .. new
     local attr = lfs.symlinkattributes(from)
     if not attr then return nil, "文件或目录不存在", 404 end
     if attr.mode == "link" then return nil, "拒绝操作符号链接", 400 end
-    if lfs.symlinkattributes(to) then return nil, "目标名称已存在", 409 end
+    -- 目录不能移动进自己的子树：那会造出自嵌套的循环路径，而 os.rename 对此只回
+    -- 一个裸 EINVAL（没有任何可展示的说明），必须在调用前显式拒绝。
+    if attr.mode == "directory"
+        and (to_dir == from or to_dir:sub(1, #from + 1) == from .. "/") then
+        return nil, "不能把目录移动到它自己的子目录下", 422
+    end
+    if to ~= from and lfs.symlinkattributes(to) then return nil, "目标名称已存在", 409 end
     local ok, rename_err = os.rename(from, to)
     if not ok then return nil, "重命名失败: " .. tostring(rename_err), 500 end
+    -- 跨目录时额外回 moved/new_path；纯改名保持旧响应形状，不新增字段。
+    if moved then
+        return { message = "已移动", name = new, moved = true, new_path = to_rel }
+    end
     return { message = "已重命名", name = new }
 end
 

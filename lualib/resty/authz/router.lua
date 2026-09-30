@@ -43,6 +43,13 @@ local function array_data(rows)
     return cjson.empty_array
 end
 
+-- JSON 里的 null 会被 cjson 解成 cjson.null（light userdata），不是 Lua 的 nil。
+-- 可选字符串字段必须先过这一层，否则 "字段传 null" 会被当成名为 "userdata" 的路径段。
+local function optional_text(value)
+    if value == nil or value == cjson.null then return nil end
+    return value
+end
+
 -- ── Auth pages ──────────────────────────────────────────────────────────────
 register("GET", "/", function()
     ngx.header["Cache-Control"] = "no-store"
@@ -72,7 +79,9 @@ register("GET", "/guest", guest.handle)
 -- API-key calls have no session token, so they stay untouched.
 -- self_service：guest 的能力面之一就是「知道自己是谁」：该端点只回显调用者自身，
 -- 没有侦察价值，所以浏览器会话与 guest Key 都放行。它不含写操作；退出登录另外标了
--- session_only，机器 Key 依然进不去。其余控制面端点对 guest 按各自角色门禁放行。
+-- session_only（它必须有真实会话可销毁，机器 Key 没有会话，故仍拒绝）。
+-- 文件/对象存储的写端点不带 session_only：admin Key 免登录直连即可（CSRF 只对
+-- 浏览器会话生效，见 api/guard.lua）。其余控制面端点对 guest 按各自角色门禁放行。
 register("GET", "/api/session", guard.wrap(function(_, _, _, current, token)
     if token then session.set_cookie(token) end
     return { data = service.session_payload(current) }
@@ -218,9 +227,10 @@ register("GET", "/api/files", guard.wrap(function(_, env)
     return { data = listing }
 end))
 
--- 文件管理写操作（上传 / 重命名 / 删除）：仅 admin，浏览器会话必须带 CSRF。
+-- 文件管理写操作（上传 / 重命名 / 移动 / 删除）：仅 admin。浏览器会话必须带 CSRF
+-- 头；机器 Key（x-api-key，角色需 admin，受来源白名单约束）天然免 CSRF，可直接调用。
 -- 上传走 multipart 流式落盘（resty.authz.files_upload），不读 body、不驻留内存，
--- 因此它在 guard 里只认证与鉴权；CSRF 头由 handler 自己比对（见下）。
+-- 因此它在 guard 里只认证与鉴权；CSRF 由 guard 读头完成，不 consume body。
 register("POST", "/api/files/upload", guard.wrap(function()
     -- guard 的 CSRF 校验只读请求头，不会 consume body，流式上传仍然完整可读。
     local payload, err, status = files_upload.upload()
@@ -229,12 +239,15 @@ register("POST", "/api/files/upload", guard.wrap(function()
     end
     -- 第二个返回值是 HTTP 状态码（201 新建 / 409 全量同名冲突由 handler 内部给出）。
     return payload, status
-end, { admin = true, csrf = true, session_only = true }))
+end, { admin = true, csrf = true }))
 
 register("PUT", "/api/files/rename", guard.wrap(with_body(function(_, data)
+    -- 可选 new_path：移动到其它目录（目标目录，语义与 path 完全一致）。其合法性由
+    -- files.rename 内部对新目录走的 resolve_dir 判定（含 .. → 400、目录不存在 → 404），
+    -- 与源 path 同一套规则，因此这里不重复校验。
     return files.rename(require("resty.authz").config.files_root or files.default_root,
-        data.path, data.name, data.new_name)
-end), { admin = true, csrf = true, session_only = true }))
+        data.path, data.name, data.new_name, optional_text(data.new_path))
+end), { admin = true, csrf = true }))
 
 -- with_body 会把 handler 的第二返回值喂给 guard.result 的 err 位，拿不到 201；
 -- 这里手写 body 解析，资源创建成功显式返回 201（与上传一致）。
@@ -245,12 +258,12 @@ register("POST", "/api/files/mkdir", guard.wrap(function(params, env, req, curre
         require("resty.authz").config.files_root or files.default_root, data.path, data.name)
     if not created then return guard.result(nil, err, err_status) end
     return { data = created }, 201
-end, { admin = true, csrf = true, session_only = true }))
+end, { admin = true, csrf = true }))
 
 register("DELETE", "/api/files/remove", guard.wrap(with_body(function(_, data)
     return files.remove(require("resty.authz").config.files_root or files.default_root,
         data.path, data.name, data.recursive == true)
-end), { admin = true, csrf = true, session_only = true }))
+end), { admin = true, csrf = true }))
 
 -- ── Object storage browser (S3-compatible private endpoint) ─────────────────
 -- 全部走 config.s3：未配置时 GET /api/s3 返回 enabled=false（前端显示未配置卡片），
@@ -430,7 +443,7 @@ register("POST", "/api/s3/upload", guard.wrap(function(params, env)
         return { error = { code = "upload_failed", message = err or "上传失败" } }, status or 400
     end
     return payload, status
-end, { admin = true, csrf = true, session_only = true }))
+end, { admin = true, csrf = true }))
 
 register("PUT", "/api/s3/rename", guard.wrap(function(params, env, req)
     local data, payload, status = body_or_error(env, req)
@@ -442,13 +455,27 @@ register("PUT", "/api/s3/rename", guard.wrap(function(params, env, req)
     if not name or not new_name then
         return { error = { code = "invalid_name", message = "缺少或非法的 name/new_name" } }, 400
     end
-    -- 可写范围拦截（item 语义：源与目标对象 key 都必须在范围内）。
+    -- 可选 new_path：移动到其它目录（桶内相对前缀）。校验与 path 完全同源：
+    -- 同一个 normalize_prefix，越界（含 ..）/控制字符一律 400 invalid_path。
+    -- 缺省（字段不传或为 null）= 原地改名，语义与旧版逐条一致。
+    local new_path_arg = optional_text(data.new_path)
+    local new_path
+    if new_path_arg ~= nil then
+        new_path = s3.normalize_prefix(new_path_arg)
+        if new_path == nil then
+            return { error = { code = "invalid_path", message = "路径非法" } }, 400
+        end
+    end
+    -- 可写范围拦截（item 语义）：源 key 与目标 key 都要单独判一次，任一越界即 403。
+    -- 目标 key 必须按 new_path 拼：移动目录时整棵子树跟着搬到目标前缀下，
+    -- 若只判源前缀，就能把范围内的目录挪出范围（或反向写进只读前缀）。
+    local target_key = s3.join(new_path or path, new_name)
     if not s3_scope.item_writable(cfg.writable, bucket, s3.join(path, name)) or
-        not s3_scope.item_writable(cfg.writable, bucket, s3.join(path, new_name)) then
+        not s3_scope.item_writable(cfg.writable, bucket, target_key) then
         return s3_read_only(cfg)
     end
-    return guard.result(s3.rename(cfg, bucket, path, name, new_name))
-end, { admin = true, csrf = true, session_only = true }))
+    return guard.result(s3.rename(cfg, bucket, path, name, new_name, new_path))
+end, { admin = true, csrf = true }))
 
 register("DELETE", "/api/s3/remove", guard.wrap(function(params, env, req)
     local data, payload, status = body_or_error(env, req)
@@ -482,7 +509,7 @@ register("DELETE", "/api/s3/remove", guard.wrap(function(params, env, req)
         return guard.result(nil, err, status or 500)
     end
     return { data = { removed = 1, bucket = bucket, path = path, name = name } }
-end, { admin = true, csrf = true, session_only = true }))
+end, { admin = true, csrf = true }))
 
 -- 新建目录：S3 没有真目录，写一个以 / 结尾的 0 字节标记对象。该服务会自动生成这种
 -- “幻影”条目（列表里过滤掉），但显式写一个能让空目录在别人也看得见。
@@ -513,7 +540,7 @@ register("POST", "/api/s3/mkdir", guard.wrap(function(params, env, req)
         return { error = { code = "mkdir_failed", message = err } }, err_status or 500
     end
     return { data = { path = key, bucket = bucket } }, 201
-end, { admin = true, csrf = true, session_only = true }))
+end, { admin = true, csrf = true }))
 
 register("POST", "/api/menu-entries", guard.wrap(with_body(function(_, data)
     return service.create_menu_entry(data)

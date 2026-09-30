@@ -710,10 +710,19 @@ end
 
 --- 重命名 = Copy + Delete。目标已存在先拒绝，避免静默留两份。
 --- name 指向“目录”时（对象不存在但前缀有内容）走前缀改名。
-function _M.rename(cfg, bucket, path, name, new_name)
+--- new_path 可选：目标目录（与 path 同语义，均已 normalize_prefix）。缺省（nil）=
+--- 原地改名，行为与旧版逐条相同；空串 = 桶根。跨目录即「移动」。
+function _M.rename(cfg, bucket, path, name, new_name, new_path)
     local key = _M.join(path, name)
-    local target = _M.join(path, new_name)
+    local target = _M.join(new_path or path, new_name)
+    local moved = new_path ~= nil and (new_path or "") ~= (path or "")
+    -- 源 key 与目标 key 完全相同才是空操作（名字不变、只换目录是合法的纯移动）。
     if key == target then return nil, "新旧名称相同", 400 end
+    -- 目录形态（key 视作前缀）下的自嵌套：目标落在源子树内时 copy_prefix 会把前缀
+    -- 复制进自己的子目录里，产生翻倍的重复数据，必须在复制前拒绝。
+    if target == key or target:sub(1, #key + 1) == key .. "/" then
+        return nil, "不能把目录移动到它自己的子目录下", 422
+    end
     if _M.head(cfg, bucket, target) then
         return nil, "目标名称已存在: " .. new_name, 409
     end
@@ -728,11 +737,13 @@ function _M.rename(cfg, bucket, path, name, new_name)
         if not is_dir then return nil, "对象不存在", 404 end
     end
     if is_dir then
-        local moved, copy_err, copy_status = _M.copy_prefix(cfg, bucket, key, target)
-        if not moved then return nil, copy_err, copy_status end
+        local count, copy_err, copy_status = _M.copy_prefix(cfg, bucket, key, target)
+        if not count then return nil, copy_err, copy_status end
         local _, del_err, del_status = _M.delete_prefix(cfg, bucket, key)
         if del_err then return nil, del_err, del_status end
-        return { renamed = name, new_name = new_name, objects = moved }
+        local result = { renamed = name, new_name = new_name, objects = count }
+        if moved then result.moved = true result.new_path = new_path or "" end
+        return result
     end
     local _, err, status = _M.copy(cfg, bucket, key, target)
     if err then return nil, err, status or 502 end
@@ -741,6 +752,9 @@ function _M.rename(cfg, bucket, path, name, new_name)
         -- 复制成功但原对象没删掉：目标已经存在，必须说清楚现在有两份，
         -- 不能谎报成功（否则用户以为改完了，实际多了一份副本）。
         return nil, "已复制为 " .. new_name .. "，但原对象删除失败：" .. del_err, 502
+    end
+    if moved then
+        return { renamed = name, new_name = new_name, moved = true, new_path = new_path or "" }
     end
     return { renamed = name, new_name = new_name }
 end

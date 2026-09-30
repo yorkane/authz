@@ -20,6 +20,9 @@ function _M.wrap(handler, options)
             if not current then
                 return error_payload("invalid_api_key", "API Key 无效或已禁用"), 401
             end
+            -- session_only 只留给「必须有真实会话才有意义」的端点（退出登录、改自己
+            -- 密码）：机器 Key 没有会话可销毁或归属。文件与对象存储的写端点不带该
+            -- 标记 —— 它们的能力边界是 admin 角色 + Key 的来源白名单，与是否登录无关。
             if options.session_only then
                 return error_payload("forbidden", "此接口仅适用于浏览器会话"), 403
             end
@@ -38,7 +41,8 @@ function _M.wrap(handler, options)
         --
         -- options.self_service 标出的就是「只回显调用者自身」的端点：它不含任何
         -- 侦察价值，却是确认身份与在管理界面退出登录的前提，所以浏览器会话与
-        -- guest Key 都放行。写操作（例如注销）另外带 session_only，机器 Key 仍进不去。
+        -- guest Key 都放行。写操作按角色门禁（admin 会话或 admin Key）放行，
+        -- 其中必须有会话才成立的（例如注销）另外带 session_only，机器 Key 进不去。
         if not options.self_service and service.is_guest(current) then
             return error_payload("forbidden",
                 "guest 角色仅可访问 /_authz/guest 探针与自身的会话身份"), 403
