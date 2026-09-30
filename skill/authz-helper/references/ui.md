@@ -59,7 +59,26 @@ Cookie 会话或 `x-api-key` 头（Playwright setExtraHTTPHeaders）均可认证
 |---|---|---|
 | 工具栏 | 路径导航、刷新、上传（按钮或拖拽；同名 409 可确认后 overwrite 重传） | `GET /api/files?path=`、`POST /api/files/upload?path=&overwrite=1` |
 | 列表 | 列 AUTHZ_FILES_ROOT 目录 + 行操作菜单（下载/重命名/删除；目录非空需 recursive）；沙箱预览依赖 SameSite=None Cookie | `PUT /api/files/rename`、`DELETE /api/files/remove` |
-| 写权限 | 三项写操作 admin + CSRF + 浏览器会话专用（API Key 一律 403）；写路径锁死在 files_root 内，符号链接/越界名一律拒绝 | — |
+| 多选 | 单击=只移动焦点；Ctrl/Cmd+单击=切换单项；Shift+单击=从锚点连选（锚点不移动）；Shift+方向键=键盘扩选；Ctrl+A=全选「已加载」条目；表头复选框三态（半选点一下=全选）；Esc 清空选择 | — |
+| 预览全屏 | 预览浮层内按 `f` 切换全屏：视频/音频元素（没有媒体元素时是预览卡片）进入/退出全屏，标准浏览器走 `requestFullscreen`，iOS Safari 的 video 走 `webkitEnterFullscreen`；非预览状态 `f` 仍是聚焦搜索框。预览中按 `Esc`：若处于全屏，第一次只退全屏（组件在 document 捕获阶段接管，避免同一次按键被 QDialog 当成关浮层），第二次才关闭预览 | — |
+| 返回定位 | `Backspace` 返回上级目录后，焦点落在「刚刚离开的那个目录」条目上（自动换算分页并滚动到可见位置），不回到列表第一行；普通刷新/翻页不受影响 | — |
+| 选择条 | 选中数 >0 时出现在面包屑上方：取消选择 / 已选 n 项 / 下载（≤20 项、跳过目录）/ 移动 / 删除；后三项按「选中且可写」数量置灰 | — |
+| 批量移动 | 目标目录输入框：**默认按「当前目录的子目录」解析**（S3 的 `path` 是深前缀时，按桶根解析会掉出可写范围导致整批 403）；以 `/` 开头才从内容根/桶根算起；对话框实时回显解析后的完整目标路径；留空或等于当前目录不提交，含 `..` 直接拒；服务端逐条校验（目录不得移入自身子目录 422、目标同名 409、目标目录不存在 404） | `PUT /api/files/rename` 带 `new_path`（`new_name` 传原名 = 纯移动） |
+| 批量删除 | 串行逐条删除；成功项就地从列表移除（不整页刷新，可原地连续删），失败项留在原地；选中含目录时出现「递归删除」开关 | `DELETE /api/files/remove`（recursive 需严格 JSON `true`） |
+| 部分失败 | 汇总提示「成功 n 项，失败 m 项 · 前 3 条原因」**常驻不自动消失**（原因多为 403/409，需要读完再手动关），其余进 console；files 端 error.code 只有 not_found/request_failed，判定要靠 HTTP 状态 | — |
+| 写权限 | 写操作 admin；浏览器会话必须带 CSRF 头，`x-api-key`（角色需 admin、受来源 IP 白名单约束）免登录直连即可，无需 Cookie 与 CSRF；写路径锁死在 files_root 内，符号链接/越界名一律拒绝 | — |
+
+## 4b. s3.html — 对象存储（复用同一个 az-browser 组件）
+
+s3.html 与 files.html 共用 `admin/browser.js` 的 `az-browser` 组件，因此**多选、
+选择条、批量移动/删除、键盘行为与上表逐条一致**，差异只有：
+
+| 差异 | 说明 |
+|---|---|
+| 跨目录移动 | 同样走 `PUT /api/s3/rename` + `new_path`，实现是 CopyObject + DeleteObject（目录 = 整棵前缀复制后批量删旧），大目录成本高于本地文件 |
+| 可写范围 | 逐条按 `AUTHZ_S3_WRITABLE_PATHS` 判定，**源 key 与目标 key 各判一次**，任一越界该条 403 `s3_read_only`（不会整批回滚）；列表项带 `writable`，不可写项在选择条里自动跳过 |
+| 全选范围 | `items` 是翻页累积集合，Ctrl+A 只覆盖已加载部分（每页 1000） |
+| 目录非空 | 未勾递归且前缀下有对象 → 该条 409，进部分失败清单 |
 
 ## 5. nginx_conf.html — Nginx include 编辑（隐藏入口）
 

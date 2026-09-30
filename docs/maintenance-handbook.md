@@ -553,6 +553,10 @@ bash scripts/restart_gateway.sh --build  # 按当前 Docker 架构重建镜像�
 - 40px mini drawer 下，菜单、收缩按钮、Logout、语言按钮必须分别验证“可见”和“可点击”。
 - `klib.router` JSON Content-Type、默认错误请求头脱敏、`merge()` 返回/原子性均有真实回归，不能退回旧行为。
 - 整体挂载 `lualib`，避免镜像内有 `klib`、挂载后却缺失的差异。
+  注意：这个挂载会**遮蔽镜像内的 lfs.so**。lfs.so 只烘在镜像里，开发部署靠 test/support_lualib.sh 从镜像抽出来补进宿主挂载目录。
+  resty.authz.files.preload() 只在 init_by_lua 跑一次并缓存结论，所以**先起容器、后补 lfs.so 不会自动生效**，
+  files 界面会持续 503「lfs 模块不可用」，必须重启进程重新执行 init。补文件与重启要当成同一次操作。
+
 - 数据库缓存查询键包含 `authz_cache:db_rev`；service 的事务成功提交后自动发布数据库及授权 revision，
   回滚不失效缓存。直接改 SQLite 不会触发 revision，必须走 service/API，或重启进程。
 - 反向代理终止 TLS 时正确传递 `X-Forwarded-Proto`，或设置 `AUTHZ_COOKIE_SECURE=true`。
@@ -888,10 +892,12 @@ lualib/tracker/
   （`response_rewrite` 字段配置绑定级响应改写，字段与限制见 `docs/core-api.md`）
 - 策略：`GET /_authz/api/authorization`、`POST /_authz/api/policies`、`PATCH|DELETE /_authz/api/policies/:id`
 - API Key：`GET|POST /_authz/api/api-keys`、`PATCH|DELETE /_authz/api/api-keys/:id`
-- 文件管理（admin + 浏览器会话 + CSRF；机器 Key 一律拒绝）：
+- 文件管理（admin 角色：浏览器会话需 CSRF，`admin` 机器 Key 免登录免 CSRF 直连）：
   `GET /_authz/api/files`（列表）、`POST /_authz/api/files/upload`（multipart，
   `?path=&overwrite=1`，成功 201）、`POST /_authz/api/files/mkdir`（新建单层目录，成功 201）、
-  `PUT /_authz/api/files/rename`（文件与目录通用）、`DELETE /_authz/api/files/remove`
+  `PUT /_authz/api/files/rename`（文件与目录通用；可选 `new_path` = 目标目录，
+  一次调用完成跨目录移动或「移动 + 改名」，详见 `docs/core-api.md` §6.1）、
+  `DELETE /_authz/api/files/remove`
   （目录非空需 `recursive:true`）。写路径锁定 `AUTHZ_FILES_ROOT`：逐级真实目录、
   符号链接一律拒绝；部署需可写 `FILES_DIR` 卷
 - Guest 诊断页：`GET /_authz/guest`（匿名即可访问；guest/admin 的 Key 与会话同样可用；加 `?json=1` 返回 JSON）

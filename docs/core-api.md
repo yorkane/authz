@@ -348,6 +348,68 @@ Keep-Alive）、网关凭据头（X-Authz-Key、X-API-Key、X-Role-Key）、其�
 未绑定/同端口多绑定状态。`binding_matches` 多于一条意味着该策略会同时作用于这些同端口绑定。
 `PATCH /policies/:id` 使用与新建相同的完整字段和校验规则；校验失败不会覆盖原策略。
 
+### 6.1 文件管理与对象存储的写接口（`/api/files*`、`/api/s3*`）
+
+两端写接口（upload / mkdir / rename / remove）的身份要求相同：
+**admin 浏览器会话（修改请求需 `X-CSRF-Token`）或 `admin` 角色机器 Key**
+（`x-api-key`，也可用 `x-role-key`；机器 Key 天然免 CSRF，见 `api/guard.lua`）。
+机器 Key 的来源边界不变：实例级 Key 受 `AUTHZ_API_KEY_ALLOWED_IPS` 约束，
+数据库 Key 受自身 `loopback_only` 约束；非 admin 角色的 Key 一律 403。
+这两个端点组**不要求会话**，Agent 可以免登录直连。
+
+#### 重命名与跨目录移动（可选 `new_path`）
+
+`PUT /_authz/api/files/rename` 与 `PUT /_authz/api/s3/rename` 支持可选的 `new_path`：
+**目标目录**，语义与该接口的 `path` 完全一致（files 端相对内容根 `AUTHZ_FILES_ROOT`，
+s3 端相对桶根）。**字段不传或传 JSON `null` = 原地改名，行为与旧版本逐条相同**；
+空串 = 内容根 / 桶根。跨目录移动与重命名共用同一端点，没有新增路由。
+
+```json
+{ "path": "src/dir", "name": "a.txt", "new_name": "b.txt", "new_path": "dst/dir" }
+```
+
+- `new_name` 仍然是单段叶子名，禁止任何路径分隔符（校验未放松）：换目录只能靠 `new_path`。
+- 改名与移动可以在一次调用里同时生效。
+- `new_name` 与 `name` 相同、`new_path` 指向另一个目录 = 合法的**纯移动**，
+  不再判「新旧名称相同」（只保留「同目录且同名」这一种空操作拒绝）。
+
+成功响应的 `data`：
+
+| 端 | 原地改名（不带 `new_path`） | 跨目录（带 `new_path`） |
+|---|---|---|
+| files | `{ "message": "已重命名", "name": "<new_name>" }` | `{ "message": "已移动", "name": "<new_name>", "moved": true, "new_path": "<规范化后的目标目录>" }` |
+| s3 | `{ "renamed": "<name>", "new_name": "<new_name>" }`（目录另带 `objects` = 移动的对象数） | 上述字段外加 `"moved": true, "new_path": "<new_path>"`（目录仍带 `objects`） |
+
+不带 `new_path` 时响应形状与旧版完全一致（不会多出 `moved` / `new_path`），
+调用方可用 `moved` 字段是否存在区分「移动」与「纯改名」。
+
+#### 错误码矩阵
+
+| 状态码 | files 端 | s3 端 |
+|---|---|---|
+`400` | `new_path` 非法（含 `..`、控制字符）；路径段不是目录；源条目是符号链接 | `new_path` 非法 → `invalid_path`；`name`/`new_name` 非法 → `invalid_name`；源 key 与目标 key 完全相同 → 「新旧名称相同」 |
+`403` | 非 admin 身份 → `forbidden` | 非 admin → `forbidden`；**源 key 与目标 key 任一不在 `AUTHZ_S3_WRITABLE_PATHS` 范围内 → `s3_read_only`** |
+`404` | 源目录或 `new_path` 目录不存在；源条目不存在 | 源对象与同名前缀都不存在 |
+`409` | 目标名称已存在 | 目标 key 已存在 |
+`422` | `name`/`new_name` 含路径分隔符等非法；同目录且同名（空操作）；**把目录移动到它自己的子目录下** | **把前缀移动到它自己的子树下**（目标 key 等于源 key 的目录形态，或以 `key + "/"` 开头） |
+`500` | `os.rename` 失败；`FILES_DIR` 只读挂载 | — |
+`502` | — | CopyObject 成功但 DeleteObject 失败：消息明确说明当前存在两份 |
+
+两条「自嵌套」限制都是必要的：files 端 `os.rename` 把目录移动进自身子树只会返回裸
+`EINVAL`（没有可展示的说明）；s3 端 `copy_prefix` 会把前缀整棵复制进自己的子目录、
+造成数据翻倍后才删源。两者都在真正执行前显式拒绝。
+
+#### 越界防护与校验顺序
+
+files 端：源目录与目标目录**各自独立**走 `resolve_dir`（逐级要求真实目录、符号链接一律拒绝、
+`..` 直接 400），所以符号链接防护与越界防护在两端同等生效——`new_path` 指向符号链接目录
+同样 400。校验顺序：源目录解析 → 目标目录解析 → 名称校验 → 空操作判定 → 源存在性/符号链接 →
+自嵌套 → 目标冲突 → `os.rename`。
+
+s3 端：`new_path` 复用与 `path` 同源的 `normalize_prefix`（含 `..`/控制字符 →
+`400 invalid_path`），并对**目标 key**（`join(new_path or path, new_name)`）单独再判一次
+`item_writable`：只判源 key 就能把范围内的整棵目录挪出范围，或反向写入只读前缀。
+
 ## 7. Agent 安全要求
 
 - 不在日志、终端输出、任务结果或错误信息中打印 API Key。

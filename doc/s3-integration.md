@@ -18,12 +18,16 @@ S3 兼容服务变成管理界面里的一个浏览器应用。行为细节与�
     永远是 200，降级语义只由它表达；
   - 其余桶级接口（`share`/`upload`/`rename`/`remove`/`mkdir`）与字节流
     `/_authz/s3/...` 返回 `423`（`code=s3_disabled`）。写接口的
-    认证/CSRF/会话门禁先于 423 生效（403/401 优先）。
+    认证/角色/CSRF 门禁先于 423 生效（403/401 优先）。
 - **权限模型**：只读的 `GET /api/s3`（info/list）对任何已登录非 guest 会话或
   合法 API Key 开放；`GET /api/s3/share`（生成 presigned 链接）同样只读开放；
-  `upload`/`rename`/`remove`/`mkdir` 要求 `admin + 浏览器会话 + X-CSRF-Token`
-  （`session_only=true`，机器 Key 一律 403，与 nginx 配置编辑器同级，
-  迁移注释里写明「不给 staff 看到」）；字节流 `/_authz/s3/` 的 access 门与
+  `upload`/`rename`/`remove`/`mkdir` 要求 `admin`：浏览器会话（写请求带
+  `X-CSRF-Token`）**或** `admin` 角色机器 Key（`x-api-key`/`x-role-key`，
+  guard 的 CSRF 判定只在「未呈现凭证头」时生效，机器 Key 天然免 CSRF）。
+  这些端点不再标 `session_only`，所以 Agent 可以免登录直连；能力边界仍是
+  admin 角色 + Key 的来源白名单（实例级 Key 走 `AUTHZ_API_KEY_ALLOWED_IPS`，
+  数据库 Key 走 `loopback_only`），非 admin 角色 Key 一律 403。
+  仍未开放给 staff。字节流 `/_authz/s3/` 的 access 门与
   `/_authz/files/` 完全同款（会话或合法非 guest API Key 放行，guest 引导到
   诊断页，匿名跳登录）。
 
@@ -96,7 +100,8 @@ compose 与 `.env.example` 已列出全部超时项；`config.lua` 对每个数�
 写接口（upload/mkdir/rename/remove）先过 `s3_scope` 可写范围白名单（见 §3
 `AUTHZ_S3_WRITABLE_PATHS`）：范围外一律 `403` + `code=s3_read_only`。
 判定口径：upload 看当前目录（dir 语义）；mkdir 看目标目录自身（允许在只读
-父目录下首次创建范围内的目录）；rename 源与目标都要可写，
+父目录下首次创建范围内的目录）；rename **源 key 与目标 key 都要单独判一次**
+（跨目录移动时目标 key 按 `new_path` 拼，见下），
 remove 看目标条目（item 语义）。只读接口（列表/share/字节流）不受影响。
 
 **auto-mkdir（默认 share 挂载祖先的自动补建）**：默认场景下可写前缀是
@@ -121,7 +126,7 @@ query `mkdir=1`、`POST /api/s3/mkdir` 带 body 字段 "mkdir": 1 时，若请�
   （目录在前、`type=dir` 且 `size=0/mtime=null`；`next_token` 无下一页时为 `null`）。
 - 权限：任意非 guest 会话或 API Key；未配置时 200 + `enabled=false`。
 
-### `POST /api/s3/upload`（admin + 会话 + CSRF）
+### `POST /api/s3/upload`（admin 会话 + CSRF，或 admin 机器 Key）
 
 - multipart/form-data，表单字段 `file`（可多个，单次 ≤64 个文件，单文件 ≤2GB）；
   查询参数 `bucket`、`path`、可选 `overwrite=1`、可选 `mkdir=1`（auto-mkdir，见上）。
@@ -134,22 +139,34 @@ query `mkdir=1`、`POST /api/s3/mkdir` 带 body 字段 "mkdir": 1 时，若请�
   S3 的 PUT 一旦发出就锁死 Content-Length，multipart 分段边界没法在
   「目标已存在」时给出与 files 一致的 409。
 
-### `PUT /api/s3/rename`（admin + 会话 + CSRF）
+### `PUT /api/s3/rename`（admin 会话 + CSRF，或 admin 机器 Key）
 
-- 请求体 `{ bucket, path, name, new_name }`；200：`data = { renamed, new_name }`
-  （目录改名另带 `objects` = 移动的对象数）。目标已存在 → 409；
-  新旧同名 → 400；对象与同名目录都不存在 → 404；
+- 请求体 `{ bucket, path, name, new_name, new_path? }`；200：
+  `data = { renamed, new_name }`（目录改名另带 `objects` = 移动的对象数）。
+  目标已存在 → 409；源 key 与目标 key 完全相同 → 400「新旧名称相同」；
+  对象与同名目录都不存在 → 404；
   复制成功但原对象删除失败时明确报 502 并说明现在有两份。
 - 普通对象 = CopyObject + DeleteObject；目录 = 逐对象 COPY 到新前缀 +
   整批删旧前缀（`walk_prefix` 翻页）。
+- **可选 `new_path`（跨目录移动）**：目标目录，与 `path` 同语义（桶内相对前缀，
+  已 `normalize_prefix`）。字段不传或为 JSON `null` = 原地改名，行为与旧版逐条相同；
+  空串 = 桶根。`target = join(new_path or path, new_name)`，因此改名与移动可以在
+  一次调用里同时生效；`new_name` 仍是单段叶子名（禁止 `/`），换目录只能靠 `new_path`。
+  跨目录时成功响应额外带 `moved: true` 与 `new_path`（纯改名不带，保持旧形状）。
+  新增的两条拒绝：
+  - `new_path` 非法（含 `..`、控制字符、段过长）→ `400 invalid_path`，与 `path` 同一判定；
+  - **前缀自嵌套** → `422`：目标 key 等于源 key 的目录形态或以 `key + "/"` 开头时，
+    `copy_prefix` 会把整棵前缀复制进自己的子目录、数据先翻倍再删源，必须在复制前拒绝。
+  写白名单是**双端点**判定（源 key + 目标 key），任一越界 → `403 s3_read_only`：
+  只判源 key 就能把范围内的目录整棵挪出范围，或反向写进只读前缀。
 
-### `POST /api/s3/mkdir`（admin + 会话 + CSRF）
+### `POST /api/s3/mkdir`（admin 会话 + CSRF，或 admin 机器 Key）
 
 - 请求体 `{ bucket, path, name, mkdir? }`（`mkdir: 1` = auto-mkdir，见上）；写一个 `key/` 结尾的 0 字节**目录标记对象**
   （S3 没有真目录）；201：`data = { path: <key/>, bucket }`。
   显式标记让空目录对其他人也可见（服务端的幻影标记只在它自己的列表里出现）。
 
-### `DELETE /api/s3/remove`（admin + 会话 + CSRF）
+### `DELETE /api/s3/remove`（admin 会话 + CSRF，或 admin 机器 Key）
 
 - 请求体 `{ bucket, path, name, recursive? }`。
 - 非递归：前缀下还有对象 → 409「目录非空，需勾选递归删除」（与 files 对齐）；
@@ -194,7 +211,8 @@ query `mkdir=1`、`POST /api/s3/mkdir` 带 body 字段 "mkdir": 1 时，若请�
 - `admin/browser.js`（1061 行）+ `admin/browser.css` 是从 files 页面抽出的
   **共享浏览器组件**（挂载为 `window.authzBrowser`，模板 `<az-browser :adapter>`）：
   网格/列表视图、排序搜索、分页/加载下一页、图片/音频/视频/HTML/文本预览、
-  键盘导航、预览区手势、拖拽上传、重命名、删除、mkdir、分享等交互逻辑全在组件内；
+  键盘导航（预览浮层内 `f` 切全屏、`Backspace` 返回后焦点落在刚离开的目录上）、
+  预览区手势、拖拽上传、重命名、删除、mkdir、分享等交互逻辑全在组件内；
   组件不引入任何新依赖，复用页面已加载的 Vue/Quasar/adminApi/adminI18n。
 - 宿主页只提供 **adapter**（`list/upload/mkdir/rename/remove/itemUrl/itemPath/shareUrl`
   + `storagePrefix`/`i18nRoot`/`supportsMkdir`/`rootLabel`）与页面外壳：
@@ -225,10 +243,13 @@ query `mkdir=1`、`POST /api/s3/mkdir` 带 body 字段 "mkdir": 1 时，若请�
 - **回归测试断言迁移**：「手势处理」相关断言已从 `files.html` 改指
   `/_authz/apps/browser.js`（逻辑移进了共享组件），`section s3` 同时断言
   s3 页与 files 页都挂载 `window.authzBrowser`。
-- 静态资源版本号（`?v=`）：`api.js` **v22**、`i18n.js` **v45**、`app.js` **v27**、
-  `s3.html` 页自身版本 **v4**（`admin/app.js` builtin 映射引用）、
-  `app-page.css` **v16**、`files.css` **v10**、`files.html` **v17**；新增
-  `browser.js` / `browser.css` / `s3.html` / `s3.css` 均为 **v1**。
+- 静态资源版本号（`?v=`，改动即递增；回归按当前版本号拉文件做断言）：
+  `api.js` **v22**、`i18n.js` **v53**、`app.js` **v27**、`app.css` **v13**、
+  `app-page.css` **v16**、`files.css` **v10**、`s3.css` / `nginx-conf.css` /
+  `mdi-names.js` **v1**、`browser.js` **v13**、`browser.css` **v4**；页面自身版本
+  由 `admin/app.js` 的 builtin 映射引用：`files.html` **v19**、`s3.html` **v4**、
+  `authorization.html` **v16**、`menu-editor.html` **v11**、`users.html` **v7**、
+  `nginx_conf.html` **v2**。
 
 ## 6. 私有 S3 服务实测坑清单（本集成落实的全部非标准行为）
 
@@ -311,23 +332,34 @@ l. **不支持条件请求，网关不得转发 ETag/Last-Modified**：该服务
 
 ## 7. 活体测试（`test/test_authz_gateway.sh`）
 
-- `section s3`（**始终运行**，18 项断言）：未配置降级语义
+- `section s3`（**始终运行**）：未配置降级语义
   （info 200+enabled=false、带 bucket 同样降级、share/字节流 423）、
-  未登录 401/302、无 CSRF 403、机器 Key 拒绝写接口 403、
+  未登录 401/302、无 CSRF 403、**admin 机器 Key 免会话抵达写接口**（未配置时
+  表现为 423 s3_disabled，证明门禁放行）、**非 admin 角色 Key 仍 403**、
   菜单 seed（builtin=s3、label=对象存储）、s3.html 与 files.html
   都挂载共享组件。
-- `section s3-live`（63 项断言，需真实服务）：临时起一个带 S3 env 的
+- `section s3-live`（需真实服务）：临时起一个带 S3 env 的
   网关容器，跑完整生命周期——info/桶列表、上传 201、列表命中、字节回读
   （含 Content-Type 与 sandbox CSP）、Range 206、`?download=1` 的
   Content-Disposition、路径穿越 404、presign 链接可直取 200、同名 409、
   覆盖 201、rename、mkdir 显示为目录、子目录上传、非空目录删 409、
-  递归删除、清理后前缀为空（空前缀列表必须 200：array_data 把空 items 换成 cjson.empty_array 后不能再 ipairs，否则整个请求 500）、机器 Key 403、字节响应不带 ETag/Last-Modified
+  递归删除、清理后前缀为空（空前缀列表必须 200：array_data 把空 items 换成 cjson.empty_array 后不能再 ipairs，否则整个请求 500）、字节响应不带 ETag/Last-Modified
+  - **跨目录移动（`new_path`）**：纯移动（`new_name`=`name`）与「移动 + 改名」各自
+    200 并回读校验（源 404、目标 200）；**目标 key 越出可写范围（桶根）→
+    `403 s3_read_only`，且源对象仍在原地**（证明目标 key 单独判了 item_writable）；
+    前缀移入自身子树 → 422 且没有留下翻倍副本；`new_path` 含 `..` →
+    `400 invalid_path`；目标同名 → 409 且不覆盖；不带 `new_path` 的旧改名调用
+    响应形状不变（无 `moved`/`new_path`）；`new_path: null` 等价于不传
+    （否则会被拼成名为 `null` 的目录段）。
+  - **机器 Key 免登录链路**：admin Key 无 Cookie 无 CSRF 直接完成移动；无凭证 → 401；
+    guest 角色 Key → 403。
   （防 nginx 伪造 304）、`rm -rf` 暂存目录后上传仍 201 且目录被重建（自愈）。（默认可写范围=share/<AUTHZ_HOST_LAN_IP>：share 根 mkdir 403（含带 `mkdir:1`）、范围内首建 201、范围外写 403 s3_read_only、**桶根带 mkdir=1 的上传仍 403（防 auto-mkdir 绕过）**、列表/桶/info 的 writable 标记与 writable_roots 回显、info 的 share_prefix/share_bucket 回显、auto-mkdir：upload `mkdir=1` 补建缺失挂载祖先 201 且目录可列可写、范围外带 `mkdir=1` 仍 403、mkdir 接口 `mkdir` 字段被接受）
   凭据只从环境注入（绝不进仓库）：
   `AUTHZ_S3_TEST_ENDPOINT` / `AUTHZ_S3_TEST_BUCKET` / `AUTHZ_S3_TEST_KEY` /
   `AUTHZ_S3_TEST_SECRET` / 可选 `AUTHZ_S3_TEST_REGION`；缺任一即跳过（计 1 pass）。
 
-跑法（当前全量 **1146 项**检查通过，日志 `/data/tmp/s3-wr/full-run11.log`）：
+跑法（全量含 s3-live 一次通过；实测计数见仓库回归记录，日志
+`/data/tmp/move_gw2.log` 在 241.t）：
 
 ```bash
 export OPENRESTY_TEST_IMAGE=authz:latest
