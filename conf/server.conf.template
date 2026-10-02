@@ -21,6 +21,12 @@ location = /_authz/apps/ {
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
+        -- 内置应用保留前缀入口（file-<节点>.<域> / s3-<节点>.<域>）：
+        -- 入口页本身由网关层认证 + Casbin 后 internal redirect 过来（凭
+        -- authz_app_entry 标记直放）；页面引用的 js/css 是独立请求，按同一
+        -- 端口对象 /<app 端口><uri> 复用同一套策略（gateway/app_entry.lua），
+        -- 被策略放行的 guest 也能把页面连资源一起加载。其余请求走原有鉴权。
+        if require("resty.authz.gateway.app_entry").handle_request(authz.config) then return end
         -- 免登录放行：合法 API Key（x-api-key）直接取页面与资源，
         -- 不签发会话 Cookie。Agent 给每个请求带上 x-api-key 即可打开管理页面。
         if require("resty.authz.api_key").authorize_request() then return end
@@ -50,6 +56,12 @@ location = /_authz/apps/index.html {
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
+        -- 内置应用保留前缀入口（file-<节点>.<域> / s3-<节点>.<域>）：
+        -- 入口页本身由网关层认证 + Casbin 后 internal redirect 过来（凭
+        -- authz_app_entry 标记直放）；页面引用的 js/css 是独立请求，按同一
+        -- 端口对象 /<app 端口><uri> 复用同一套策略（gateway/app_entry.lua），
+        -- 被策略放行的 guest 也能把页面连资源一起加载。其余请求走原有鉴权。
+        if require("resty.authz.gateway.app_entry").handle_request(authz.config) then return end
         -- 免登录放行：合法 API Key（x-api-key）直接取页面与资源，
         -- 不签发会话 Cookie。Agent 给每个请求带上 x-api-key 即可打开管理页面。
         if require("resty.authz.api_key").authorize_request() then return end
@@ -87,6 +99,12 @@ location ^~ /_authz/apps/ {
     access_by_lua_block {
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
+        -- 内置应用保留前缀入口（file-<节点>.<域> / s3-<节点>.<域>）：
+        -- 入口页本身由网关层认证 + Casbin 后 internal redirect 过来（凭
+        -- authz_app_entry 标记直放）；页面引用的 js/css 是独立请求，按同一
+        -- 端口对象 /<app 端口><uri> 复用同一套策略（gateway/app_entry.lua），
+        -- 被策略放行的 guest 也能把页面连资源一起加载。其余请求走原有鉴权。
+        if require("resty.authz.gateway.app_entry").handle_request(authz.config) then return end
         -- 免登录放行：合法 API Key（x-api-key）直接取页面与资源，
         -- 不签发会话 Cookie。Agent 给每个请求带上 x-api-key 即可打开管理页面。
         if require("resty.authz.api_key").authorize_request() then return end
@@ -204,6 +222,65 @@ location ^~ /_authz/s3/ {
     }
 }
 
+# ── 本机临时保存区（agent 落盘 → 直接取回）────────────────────────
+# 写入走 /_authz/api/store（router，见上），这里只按路径吐出保存区里的文件字节。
+# 内容根是容器内 AUTHZ_STORE_DIR（默认 /data/store，宿主映射到部署目录的
+# data/store；compose 把部署目录的 data 整体挂到容器 /data，无需额外 volume）。
+#
+# 为什么也用 content_by_lua 而不是像 /_authz/files/ 那样静态 alias：
+#   ① store 的根目录由 env 决定，静态 alias 只能写死路径（模板里 envsubst 白名单
+#      不含 AUTHZ_STORE_DIR，写变量占位符会原样落进配置并让 nginx 起不来）；
+#   ② 必须对「含符号链接的路径」单独判一次并统一回 404（静态 alias 越界防护的
+#      粒度是 nginx 的 $uri 归一化，覆盖不到 symlink），resty.authz.store_proxy 里
+#      用 lstat 逐级拒绝；
+#   ③ ?download / ?authz_preview / Range 三件事与 /_authz/s3/ 完全同款，复用同一
+#      套写法（含「不下发 ETag / Last-Modified」的理由，见 s3_proxy 头部注释）。
+# 认证门与 /_authz/files/、/_authz/s3/ 逐字相同：合法 API Key 免登录直取，
+# 无会话引导到登录页，guest 引导到诊断页。
+location = /_authz/store {
+    return 301 /_authz/store/;
+}
+
+location ^~ /_authz/store/ {
+    # 本 location 只读（GET/HEAD）：content_by_lua 从不读请求体，nginx 也就永远不会
+    # 因为 body 上限回 413。这里显式写一个很小的值当 fence —— 将来若有人给这个
+    # location 加写方法，第一道硬闸就已在 nginx 层生效，而不是默默依赖 Lua 里的
+    # MAX_BYTES。与 /_authz/s3/ 的 `client_max_body_size 0`（彻底不设上限，因为对象
+    # 可能任意大、且网关只做只读代理）区别就在这里：store 是**本机磁盘**的临时区，
+    # 上限必须与磁盘和 TTL 策略一起考虑，不该出现「不设上限」。
+    # 真正的写入体积闸门在写入侧：router 所在的 `location ^~ /_authz/` 已是
+    # client_max_body_size 2048m（≥ 本 API 的 MAX_BYTES 512MB），nginx 先放行、
+    # api/services/store.lua 再按 512MB 回带中文说明的 413。
+    client_max_body_size 1m;
+    access_by_lua_block {
+local authz = require "resty.authz"
+require("resty.authz.db").open(authz.config.db_path)
+-- 取回侧收口（安全审查 P2）：写入侧是 admin-only（router 的 guard admin=true），
+-- 读回也一致。files/s3 是给人浏览的共享内容，store 是 agent 的中转暂存（正文常
+-- 是原始报告/日志），取回 URL 又能按路径推算，所以不向普通登录用户开放。
+-- 凭证优先级与 API 侧一致：先机器 Key（任意角色都会先落到它的身份上），后会话。
+local common = require "resty.authz.api.common"
+local _, identity = require("resty.authz.api_key").authenticate_request()
+if not identity then
+    local session = require "resty.authz.session"
+    local token = session.get_request_token()
+    identity = token and session.get(token)
+end
+if not identity then
+    return ngx.redirect("/_authz/login?next=" .. ngx.escape_uri(ngx.var.request_uri))
+end
+if common.is_guest(identity) then
+    return ngx.redirect("/_authz/guest")
+end
+if not common.is_admin(identity) then
+    return ngx.exit(403)
+end
+    }
+    content_by_lua_block {
+        require("resty.authz.store_proxy").serve()
+    }
+}
+
 location / {
     set $authz_target "";
     set $authz_user   "";
@@ -222,6 +299,9 @@ location / {
     set $authz_forwarded "";
     set $authz_upstream_ssl_name "";
     set $authz_upstream_cookie "";
+    # 内置应用保留前缀入口标记（files/s3）：只有 Lua 能写（gateway/access.lua），
+    # /_authz/apps/ 的三个 location 据此认出"网关层已完成认证授权"的入口页请求。
+    set $authz_app_entry "";
     # 发给上游的 Accept-Encoding 独立成变量：正文改写需要上游返回未压缩字节，
     # 但若用 ngx.req.set_header 直接改请求头表，nginx 的 gzip 模块会按同一个
     # 值判定「客户端不要压缩」，于是配了改写的绑定整体丢掉网关压缩。变量只影响

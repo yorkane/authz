@@ -85,7 +85,10 @@ function _M.parse_policy_object(value)
     local port_value, path = object:match("^/(%d+)(/.*)$")
     local port = tonumber(port_value)
     local current = config()
-    if not port or port < current.port_min or port > current.port_max then
+    -- 内置应用保留端口（file/s3 虚拟入口的 100/101）在 port_min 之下，但同样
+    -- 要能在策略里点名授权，否则保留入口只能靠 role:admin 的 /* 兜底。
+    if not port or (port < current.port_min or port > current.port_max)
+        and not (current.app_ports and current.app_ports[port]) then
         return nil, "对象必须使用 /<端口><路径> 格式，且端口在允许范围内"
     end
     return { value = "/" .. tostring(port) .. path, kind = "port", port = port, path = path }
@@ -915,6 +918,99 @@ function _M.normalize_policy(data)
         v2 = "-"
     end
     return { ptype = ptype, v0 = v0, v1 = v1, v2 = v2 }
+end
+
+-- ── 存储配置（s3_configs）字段校验 ───────────────────────────────────────────
+-- 与 valid_api_key_name 同一风格：成功返回 (value, nil)，失败返回 (nil, 消息, 422)。
+-- 这里只放「本字段自身」的规则（名字/整数区间/桶名）；endpoint / region / 凭证 /
+-- writable_paths 条目 **一律交给 config.build_s3**（env 与表行共用的唯一一份
+-- 校验与派生入口），禁止在这里再抄一份正则或字符集判定。
+
+--- 配置名：小写字母/数字开头，后续可带 - 与 _，总长 1..32。
+--- 之所以限制小写：name 会进 URL query（?cfg=<name>）与错误消息，大小写混写在
+--- 不同浏览器/代理下容易撞 UNIQUE 判定（SQLite 的 TEXT 默认大小写不敏感比较）。
+function _M.valid_s3_config_name(value)
+    local name = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+    if name == "" then return nil, "配置名称不能为空", 422 end
+    if not ngx.re.match(name, [[^[a-z0-9][a-z0-9_-]{0,31}$]], "jo") then
+        return nil, "配置名称需为 1-32 位小写字母或数字开头，其后可用字母、数字、下划线与连字符", 422
+    end
+    return name, nil
+end
+
+--- 整数区间校验（数值字段统一走这里，避免各处手写 tonumber + 上下限）。
+--- 空值取 default；非整数或越界 → 422。
+function _M.valid_int_range(value, min, max, default, label)
+    if value == nil or value == cjson.null or value == "" then return default, nil end
+    local num = tonumber(value)
+    if not num or math.floor(num) ~= num then
+        return nil, label .. " 必须是整数", 422
+    end
+    if num < min or num > max then
+        return nil, label .. " 需在 " .. tostring(min) .. "-" .. tostring(max) .. " 之间", 422
+    end
+    return num, nil
+end
+
+--- 桶名字段（share_bucket / default_bucket）：允许空串（= 不绑定 / 不预选）。
+--- 判据直接复用 config.valid_bucket_name —— 与 build_s3 内部是同一个函数，
+--- 这里提前判一遍只为给出中文 422，不引入第二套规则。
+function _M.valid_s3_bucket_field(value, label)
+    local bucket = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if bucket == "" then return "", nil end
+    -- 注意取的是 resty.authz.config **模块**上的纯函数（运行时配置表 c 上没有它）。
+    local ok_cfg, config_loader = pcall(require, "resty.authz.config")
+    if ok_cfg and config_loader and config_loader.valid_bucket_name
+        and not config_loader.valid_bucket_name(bucket) then
+        return nil, label .. " 不是合法的桶名（3-63 位小写字母、数字、点或连字符，首尾须为字母或数字）", 422
+    end
+    return bucket, nil
+end
+
+--- 备注：仅挡控制字符与长度，允许为空。
+function _M.valid_s3_note(value)
+    local note = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if #note > 512 then return nil, "备注不能超过 512 字节", 422 end
+    if note:find("[%c]") then return nil, "备注不能包含控制字符", 422 end
+    return note, nil
+end
+
+--- 上传流水的状态过滤值。空串与 "all" = 不加过滤（全部状态）。
+--- 前端的下拉里有 expired / pending_delete 两项，而库里从没写过这两个 state
+--- （清理器的取值只有 active/deleted/failed/skipped）：一并**放行**，让它落到
+--- `WHERE state = ?` 上自然匹配 0 行 —— 安静显示空列表，比抛 422 让页面弹
+--- 「加载失败」更合理。其它未知取值仍按非法拦下（挡住 state=xxx 这类拼错）。
+local UPLOAD_STATE_SET = {
+    active = true, deleted = true, failed = true, skipped = true,
+    expired = true, pending_delete = true,
+}
+
+function _M.valid_upload_state(value)
+    local state = tostring(value or "")
+    if state == "" or state == "all" then return "", nil end
+    if not UPLOAD_STATE_SET[state] then
+        return nil, "state 仅支持 active、deleted、failed、skipped、expired、pending_delete", 422
+    end
+    return state, nil
+end
+
+--- 本地写入根（s3_configs.local_root）：允许空（= 用全局保存区）。非空时必须是
+--- 绝对路径、无 . / .. 段、无控制字符与反斜杠。这是**删除侧**的根（maintenance 的
+--- remove_local 以它为根删文件），所以按字面路径判：不跟随符号链接、不做规范化
+--- （`a/../b` 一律拒，即使 /a 是符号链接）。留空时永远退回全局 store 目录。
+function _M.valid_local_root(value)
+    local text = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if text == "" then return "", nil end
+    if #text > 256 then return nil, "本地写入根不能超过 256 字节", 422 end
+    if text:find("[%c\\]") or text:sub(1, 1) ~= "/" then
+        return nil, "本地写入根必须是不含控制字符的绝对路径", 422
+    end
+    for segment in text:gmatch("[^/]+") do
+        if segment == "." or segment == ".." then
+            return nil, "本地写入根不能包含 . 或 .. 段", 422
+        end
+    end
+    return text, nil
 end
 
 return _M

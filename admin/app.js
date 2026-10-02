@@ -4,9 +4,11 @@ const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref, watch } 
 const builtInApps = {
   users: 'users.html?v=7',
   authorization: 'authorization.html?v=16',
-  menuEditor: 'menu-editor.html?v=11',
-  files: 'files.html?v=19',
-  s3: 's3.html?v=4',
+  menuEditor: 'menu-editor.html?v=12',
+  files: 'files.html?v=20',
+  s3: 's3.html?v=6',
+  // S3 服务配置管理页（多套存储服务 + 上传记录清理）。
+  s3Configs: 's3-configs.html?v=1',
   nginxConf: 'nginx_conf.html?v=2'
 }
 
@@ -32,6 +34,9 @@ function urlBase (url) {
 // 把树节点解析成可导航的 URL。
 function nodeUrl (node) {
   if (node.builtin && builtInApps[node.builtin]) return builtInApps[node.builtin]
+  // 域名前缀保留字（file-/s3-）的虚拟绑定不在 menu_entries 里；后端若把它们
+  // 注入菜单（app 字段指向内置应用），点击要打开内置页而不是拼 <port>-host。
+  if (node.app && builtInApps[node.app]) return builtInApps[node.app]
   if (node.url) return node.url
   // 动态发现/绑定的本机服务：优先用绑定域名，否则 <port>-当前主机名
   if (node.port) {

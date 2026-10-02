@@ -510,6 +510,135 @@ _M.list = {
                 WHERE builtin = 'nginxConf' AND enabled = 1]], os.time()))
         end,
     },
+    {
+        version = 23,
+        name = "s3_configs",
+        up = function(db)
+            -- 「页面可编辑的多套 S3 服务配置」：一行 = 一套 S3 endpoint + 凭证 +
+            -- 可写范围 + 过期策略。环境变量 AUTHZ_S3_* 保留为**回落默认配置**：
+            -- 表内没有任何 enabled=1 的行时，运行时继续用 env 那一套（见
+            -- s3_config_store.get 的默认优先级）。这样老部署零迁移即可升级，
+            -- 新部署在页面上加一行就立刻覆盖 env。
+            --
+            -- 安全说明（本仓库首例明文密钥入库）：既有敏感数据都不落明文
+            -- （api_keys 只存 SHA-256 摘要，见 v19）。这里之所以必须存明文，是因为
+            -- SigV4 要拿原文参与签名（s3.lua 的 credentials(cfg)），摘要无法还原。
+            -- 因此约束是：① 任何管理/前端接口只允许回 has_secret 布尔 + AKID 掩码，
+            -- 严禁回显 secret_access_key 原文；② azops backup 会连带把这些密钥一起
+            -- 复制走，备份介质的保密等级由此抬升，运维需按含密备份处理。
+            -- local_root：这套 S3 服务配套的本地中转/暂存目录（留空 = 用全局
+            -- c.store_dir）。上传先落本地再转 S3 时才需要；不同 S3 服务用不同
+            -- 暂存盘时靠它隔离，清理器按行取值。
+            must(db.exec([[CREATE TABLE IF NOT EXISTS s3_configs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                endpoint TEXT NOT NULL,
+                region TEXT NOT NULL DEFAULT 'us-east-1',
+                allow_http INTEGER NOT NULL DEFAULT 0,
+                access_key_id TEXT NOT NULL DEFAULT '',
+                secret_access_key TEXT NOT NULL DEFAULT '',
+                writable_paths TEXT NOT NULL DEFAULT '',
+                share_root TEXT NOT NULL DEFAULT 'share',
+                share_bucket TEXT NOT NULL DEFAULT '',
+                expires_hours INTEGER NOT NULL DEFAULT 0,
+                use_bucket_lifecycle INTEGER NOT NULL DEFAULT 0,
+                default_bucket TEXT NOT NULL DEFAULT '',
+                local_root TEXT NOT NULL DEFAULT '',
+                is_default INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                note TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )]]))
+        end,
+    },
+    {
+        version = 24,
+        name = "upload_records",
+        up = function(db)
+            -- 上传流水账 + 过期清理队列（maintenance.lua 每小时扫一次）。
+            --   kind       's3' = 对象存储对象（按 cfg_id 找回配置删对象）；
+            --              'local' = files_root 下的本地文件（key 存相对路径）。
+            --   cfg_id     关联 s3_configs.id；NULL = 当时用的是 env 回落配置。
+            --              注意这里**不加外键**：配置行被删掉后流水必须留下（可审计），
+            --              孤儿记录由 cleanup 标 failed + last_error='config removed'。
+            --   expires_at NULL = 永不过期（不入清理队列）；非 NULL 时**必须整点对齐**
+            --              （math.floor(t/3600)*3600 + n*3600），否则索引区间扫会因
+            --              毫秒级散布而退化成大量边界行，且「同一小时一批删」的语义
+            --              也无从成立。
+            --   state      active（待删/已删之外的一切）→ deleted（已删成功）
+            --              → failed（删除报错，见 last_error）
+            --              → skipped（该配置 use_bucket_lifecycle=1：只记账不删，
+            --              由桶生命周期规则负责回收）
+            --   idx_upload_records_expiry 是清理队列的唯一入口：state 等值 +
+            --   expires_at 范围，正好被这个复合索引左前缀覆盖。
+            must(db.exec([[CREATE TABLE IF NOT EXISTS upload_records(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL DEFAULT 's3',
+                cfg_id INTEGER,
+                bucket TEXT NOT NULL DEFAULT '',
+                key TEXT NOT NULL DEFAULT '',
+                size INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'api',
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER,
+                state TEXT NOT NULL DEFAULT 'active',
+                last_error TEXT NOT NULL DEFAULT '',
+                checked_at INTEGER
+            )]]))
+            must(db.exec([[CREATE INDEX IF NOT EXISTS idx_upload_records_expiry
+                ON upload_records(state, expires_at)]]))
+        end,
+    },
+    {
+        version = 25,
+        name = "menu_entry_s3_configs",
+        up = function(db)
+            -- 内置「存储配置」入口（前端 builtin=s3Configs 映射到 s3_configs.html）。
+            -- admin_only=1：这个页面能编辑明文入库的 S3 凭证，与「对象存储」「Nginx配置」
+            -- 同级，不给 staff 看到。
+            -- 幂等形状照 v21：先看条目在不在，再看「系统应用」分组在不在，任一缺失即
+            -- 静默 return（分组可能被运维删过，迁移不许为此报错卡住启动）。
+            local rows = db.query("SELECT id FROM menu_entries WHERE builtin = 's3Configs'")
+            if rows and rows[1] then return end
+            local groups = db.query([[SELECT id FROM menu_entries
+                WHERE kind = 'group' AND label = '系统应用' ORDER BY id LIMIT 1]])
+            local sys_id = groups and groups[1] and groups[1].id
+            if not sys_id then return end
+            local now = os.time()
+            must(db.exec([[INSERT INTO menu_entries(
+                kind, parent_id, label, url, icon, builtin, admin_only, sort_order, enabled, created_at, updated_at)
+                VALUES('item', ?, '存储配置', '', 'mdi-cloud-cog', 's3Configs', 1, 18, 1, ?, ?)]],
+                sys_id, now, now))
+        end,
+    },
+    {
+        version = 26,
+        name = "retire_s3_share_ttl",
+        up = function(db)
+            -- 分享功能（presigned GET）整体下线：s3_configs 里的 share_ttl 列随之删除。
+            -- 全新库在 v23 的建表语句里已经没有这一列，所以这里必须先判存在再删，
+            -- 否则 fresh install 会在启动时炸掉。DROP COLUMN 需要 SQLite >= 3.35；
+            -- 镜像内是 3.53，且不保留旧库回滚路径，故不额外兜表重建。
+            if not has_column(db, 's3_configs', 'share_ttl') then return end
+            must(db.exec('ALTER TABLE s3_configs DROP COLUMN share_ttl'))
+        end,
+    },
+    {
+        version = 27,
+        name = "hide_menu_s3_configs",
+        up = function(db)
+            -- 「存储配置」不再作为独立菜单入口：v25 的插入语义保留（行仍留在
+            -- menu_entries，菜单编辑器的平铺接口能看到并随时重新启用），但入口
+            -- 改由「对象存储」页工具栏的「配置」按钮进入页内配置视图。做法照抄
+            -- v22（隐藏 nginxConf）：菜单树只渲染 enabled=1，置 0 即从「系统应用」
+            -- 消失；/_authz/apps/s3-configs.html 页面本身不删，直接访问仍受
+            -- admin 门禁保护。
+            must(db.exec([[UPDATE menu_entries SET enabled = 0, updated_at = ?
+                WHERE builtin = 's3Configs' AND enabled = 1]], os.time()))
+        end,
+    },
 }
 
 function _M.run(db)

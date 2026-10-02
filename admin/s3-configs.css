@@ -1,0 +1,72 @@
+/* S3 服务配置页特有样式：通用外壳/表格/对话框样式走 app-page.css。 */
+
+/* 内嵌在对象存储页的配置视图：不再需要独立页的整屏高度。 */
+.s3cfg-embedded { min-height: 0; }
+
+/* 表格次要列：移动端整列隐藏（th 与 td 都挂同一个类，见列定义的
+   classes/headerClasses），只保留名称、可写范围、TTL、默认、状态与操作。 */
+.sc-opt { min-width: 120px; }
+
+/* endpoint / AKID 掩码 / 对象 key 用等宽小字，长值省略号收尾。 */
+.sc-mono {
+  display: block;
+  overflow: hidden;
+  max-width: 260px;
+  color: #c7cad9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-caption {
+  display: block;
+  margin-top: 2px;
+  color: #858aa1;
+  font-size: 11px;
+}
+.sc-caption-warn { color: #f2cda1; }
+
+/* 服务名称单元格：名称 + env 回落提示 / 备注两行。 */
+.sc-name-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sc-name-cell strong { color: #f2f3f9; font-size: 13px; font-weight: 560; }
+
+/* 上传面板的工具条：过滤条件与按钮靠两端，窄屏换行。 */
+.sc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  padding: 12px 18px;
+}
+.sc-toolbar-info { color: var(--muted); font-size: 12px; }
+.sc-toolbar-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.sc-filter { width: 170px; }
+
+/* 新建/编辑对话框：解除 Quasar 的 560px 上限并让字段区在窄屏可滚动。
+   注意只作用在卡片上，不要写成 `.xxx-dialog > div`（会命中 .q-dialog__inner
+   全屏容器导致 max-width 失效）。 */
+.q-dialog__inner--minimized > .s3cfg-dialog-card { max-width: min(660px, calc(100vw - 28px)); }
+.s3cfg-dialog-card { width: 100%; max-height: min(880px, calc(100vh - 28px)); }
+.s3cfg-dialog-fields { display: grid; gap: 12px; max-height: calc(100vh - 215px); overflow-y: auto; }
+.s3cfg-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
+.s3cfg-grid-full { grid-column: 1 / -1; }
+.s3cfg-paths textarea { min-height: 82px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.s3cfg-note-field textarea { min-height: 54px; }
+
+/* 明文 http 警示条：与 authorization 页的 warn banner 同一配色。 */
+.s3cfg-warn-banner {
+  border: 1px solid rgba(242, 160, 86, .22);
+  border-radius: 10px;
+  background: rgba(242, 160, 86, .07);
+  color: #f2cda1;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 820px) {
+  .sc-opt { display: none; }
+  .sc-mono { max-width: 160px; }
+  .sc-filter { width: 100%; }
+  .sc-toolbar-actions { margin-left: 0; width: 100%; }
+  .s3cfg-grid { grid-template-columns: 1fr; }
+}

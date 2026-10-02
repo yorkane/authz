@@ -106,6 +106,17 @@
 }
 .files-kbd-hint { margin-top: 14px; font-size: 11px; color: rgba(255, 255, 255, 0.35); }
 
+/* 只读目录页脚提示：淡化的小字说明，贴在列表面板底部。 */
+.az-readonly-footer {
+  margin: 14px 2px 0;
+  padding: 6px 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  background: transparent;
+  font-size: 12px;
+  opacity: 0.55;
+}
+
+
 .files-pager {
   display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap;
   margin-top: 14px;

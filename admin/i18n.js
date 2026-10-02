@@ -12,7 +12,8 @@
         nginxConf: 'Nginx配置(危险)', nginxConfTitle: '编辑 nginx 自定义 include 并热重载',
         systemApps: '系统应用', systemAppsHint: '网关内置的管理与展示页面',
         menuEditor: '菜单编辑', menuEditorTitle: '左侧菜单排序、显示与入口管理',
-        s3: '对象存储', s3Title: '浏览并管理 S3 对象存储'
+        s3: '对象存储', s3Title: '浏览并管理 S3 对象存储',
+        s3ConfigsTitle: '多套存储服务与上传记录清理'
       },
       // 共享浏览器组件（browser.js）的通用文案：打底用，页面各自块（files/s3）覆盖同名键。
       browser: {
@@ -28,6 +29,7 @@
         fullscreenFailed: '全屏失败',
         collapsePreview: '收起预览', expandPreview: '展开预览',
         prevFile: '上一个文件', nextFile: '下一个文件',
+        volume: '音量',
         playPause: '点击画面播放 / 暂停，左右滑动切换文件',
         truncated: '目录条目过多，仅显示前 2000 条',
         upload: '上传', dropHint: '松手上传到当前目录', uploading: '正在上传 {n} 个文件…',
@@ -41,7 +43,7 @@
         deleteDirCopy: '删除后不可恢复。目录非空时需要勾选递归删除。',
         deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
         overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
-        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级（焦点回到来源目录）· 单击/Ctrl+单击/Shift+单击/Shift+方向键 多选 · Ctrl+A 全选 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · Esc 取消选择 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 f 视频全屏 · ←/→ 切换文件 · Esc 关闭预览',
+        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级（焦点回到来源目录）· 单击/Ctrl+单击/Shift+单击/Shift+方向键 多选 · Ctrl+A 全选 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · Esc 取消选择 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 f 视频全屏 · ←/→ 切换文件 · ↑/↓ 音量 ±5% · Esc 退出全屏（再按关闭预览）',
         clearSelection: '取消选择', selectedCount: '已选 {n} 项', move: '移动',
         batchDeleteTitle: '批量删除', batchDeleteCopy: '将删除选中的 {n} 项，删除后不可恢复。',
         moveTitle: '移动到', moveCopy: '将移动选中的 {n} 项到目标目录。',
@@ -65,6 +67,7 @@
         fullscreenFailed: '全屏失败',
         collapsePreview: '收起预览', expandPreview: '展开预览',
         prevFile: '上一个文件', nextFile: '下一个文件',
+        volume: '音量',
         playPause: '点击画面播放 / 暂停，左右滑动切换文件',
         truncated: '目录条目过多，仅显示前 2000 条',
         upload: '上传', dropHint: '松手上传到当前目录', uploading: '正在上传 {n} 个文件…',
@@ -77,16 +80,71 @@
         deleteDirCopy: '删除后不可恢复。目录非空时需要勾选递归删除。',
         deleteRecursive: '连同内部所有内容一起删除', deleted: '已删除',
         overwriteTitle: '同名文件已存在', overwriteCopy: '目标目录里已有同名文件，要用本次上传覆盖它吗？',
-        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级（焦点回到来源目录）· 单击/Ctrl+单击/Shift+单击/Shift+方向键 多选 · Ctrl+A 全选 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · Esc 取消选择 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 f 视频全屏 · ←/→ 切换文件 · Esc 关闭预览'
+        kbdHint: '快捷键：↑ ↓ ← → 移动 · Enter 打开 · Backspace 返回上级（焦点回到来源目录）· 单击/Ctrl+单击/Shift+单击/Shift+方向键 多选 · Ctrl+A 全选 · Delete 删除选中（确认框 Enter 确认 / Esc 取消） · Esc 取消选择 · g/l 切换视图 · p 展开/收起预览 · f 搜索 · 预览中 f 视频全屏 · ←/→ 切换文件 · ↑/↓ 音量 ±5% · Esc 退出全屏（再按关闭预览）'
       },
-      // S3 页特有部分：页面外壳（未配置卡片/桶选择器）与分享按钮；共享交互文案由 browser 块提供。
+      // S3 页特有部分：页面外壳（未配置卡片/桶选择器）；共享交互文案由 browser 块提供。
       s3: {
-        title: '对象存储', description: '浏览 S3 桶，支持预览、下载与分享链接。',
+        title: '对象存储', description: '浏览 S3 桶，支持预览与下载。',
         selectBucket: '选择桶',
+        // 多套存储服务：下拉切换当前生效的配置（记忆在 localStorage 的 authz_s3_cfg）。
+        selectCfg: '存储服务', cfgDefaultSuffix: '默认',
         notConfiguredTitle: '对象存储未配置',
-        notConfigured: 'S3 对象存储未配置：请在网关配置 s3 endpoint / region / 凭证后重试。',
+        notConfigured: 'S3 对象存储未配置：点击「配置」新建存储服务，或配置网关的 AUTHZ_S3_* 环境变量后重试。',
         writableScope: '可写范围：',
-        share: '分享链接', shared: '已生成分享链接', shareFailed: '分享链接生成失败'
+        // 配置视图入口（原「存储配置」独立页收进本页，迁移 v27 隐藏其菜单入口）。
+        configButton: '配置',
+        configTooltip: '管理存储服务配置与上传记录'
+      },
+      // S3 服务配置管理页：上半区是存储服务 CRUD，下半区是上传记录与过期清理。
+      s3Configs: {
+        title: 'S3 服务配置',
+        description: '管理多套 S3 兼容对象存储服务（端点、凭证、可写范围与 TTL），并清理经网关上传的过期对象。',
+        refresh: '刷新', newCfg: '新建服务', search: '搜索名称 / endpoint',
+        back: '返回对象存储',
+        retry: '重试', failed: '操作失败', note: '备注', allStates: '全部',
+        listTitle: '存储服务', listNote: '浏览页工具栏的「存储服务」下拉即取自此列表；默认服务用于未显式指定 cfg 的请求。',
+        colName: '名称', colEndpoint: 'Endpoint', colRegion: 'Region', colAkid: 'AKID', colSecret: 'SECRET',
+        colWritable: '可写范围', colExpires: '默认 TTL', colLifecycle: '回收方式', colDefault: '默认', colStatus: '状态',
+        secretSet: '已设置', secretUnset: '未设置', noValue: '—',
+        writableAll: '不限制（整桶可写）',
+        envBadge: '环境变量', envHint: '由环境变量 AUTHZ_S3_* 提供，不可在此编辑',
+        expiresNever: '永不过期', hoursUnit: '%s 小时',
+        lifecycleOn: '桶生命周期', lifecycleOff: '网关计时',
+        isDefault: '默认服务', setDefault: '设为默认', defaultDone: '已设为默认服务',
+        enabled: '启用', disabled: '停用', enabledDone: '已启用', disabledDone: '已停用',
+        test: '测试连接', testOk: '连接正常', testBuckets: '可见 {n} 个桶', testFailed: '连接测试失败',
+        edit: '编辑', deleteAction: '删除', save: '保存', cancel: '取消',
+        createTitle: '新建存储服务', createCopy: '填写一套 S3 兼容服务的地址与凭证；保存后浏览页即可选择它。',
+        editTitle: '编辑存储服务', editCopy: '凭证只在填写时更新：AKID / SECRET 留空表示保持原值。',
+        cfgName: '名称', cfgNameHint: '小写字母、数字、- 与 _，最多 32 个字符；作为 cfg 参数与浏览页记忆键。',
+        endpoint: 'Endpoint', endpointHint: '协议 + 主机 + 可选端口，不含路径，例：http://10.252.25.70:9000',
+        region: 'Region', regionHint: '留空则使用服务端的默认区域。',
+        akid: 'Access Key ID', secret: 'Secret Access Key',
+        secretKeepHint: '已设置，留空表示不修改', secretNewHint: '必填；只保存在网关内，永不回显',
+        writablePaths: '可写范围', writablePathsHint: '每行一条 <bucket> 或 <bucket>/<前缀>，保存时按换行合并成逗号分隔；留空 = 不做范围限制。',
+        defaultBucket: '默认桶', defaultBucketHint: '留空 = 浏览页必须显式选择桶。',
+        shareBucket: '挂载桶', shareBucketHint: '限定挂载根生效的桶；留空 = 任意桶。',
+        shareRoot: '挂载根', shareRootHint: '例：share/<LAN IP>；留空 = 不预置挂载根。',
+        expiresHours: '上传对象 TTL（小时）', expiresHoursHint: '0 ~ 720 的整数；0 = 永不过期。',
+        useLifecycle: '由桶生命周期回收', useLifecycleHint: '开启后实际删除交给桶生命周期规则，网关只登记到期时间。',
+        allowHttp: '允许明文 http endpoint', allowHttpHint: '仅在受信内网启用：明文 HTTP 下凭证与正文均不加密。',
+        allowHttpWarn: '当前 endpoint 是明文 http：凭证与对象正文在网络中不加密，请确认只在受信网络使用。',
+        cfgEnabled: '启用该服务',
+        required: '必填', nameRule: '名称只能包含小写字母、数字、- 与 _，且不超过 32 个字符',
+        endpointRule: 'endpoint 必须以 http:// 或 https:// 开头，且不能包含路径、? 或 #',
+        akidRule: '新建时必须填写 Access Key ID', secretRule: '新建时必须填写 Secret Access Key',
+        expiresRule: 'TTL 小时数需是 0 ~ 720 的整数',
+        created: '存储服务已创建', updated: '存储服务已保存', loadError: '加载存储服务配置失败',
+        deleteTitle: '删除存储服务', deleteConfirm: '删除后该服务在网关里的上传记录将无法再被管理，确定删除 %s 吗？', deleted: '存储服务已删除',
+        uploadsTitle: '上传记录与过期清理',
+        uploadsNote: '登记经网关写入的对象及其到期时间；可单独删除条目，或立即执行一次清理。',
+        colCreated: '创建时间', colKind: '类型', colCfg: '服务', colBucket: '桶', colKey: '对象', colSize: '大小',
+        colOwner: '上传者', colExpiry: '剩余有效', colState: '状态', colError: '最近错误',
+        remaining: '剩余 %s 小时 %s 分', expiredPending: '已过期待清理',
+        deleteUpload: '立即删除', deleteUploadTitle: '删除上传条目', deleteUploadConfirm: '将同时删除桶内对象（若仍存在），确定删除这个条目吗？', uploadDeleted: '条目已删除',
+        cleanup: '立即执行清理', cleanupRunning: '清理中', cleanupDone: '清理完成：扫描 {scanned} · 删除 {deleted} · 失败 {failed} · 跳过 {skipped}',
+        autoRefresh: '每 5 分钟自动刷新', loadMore: '加载更多',
+        loadedCount: '已加载 {n} / 共 {total}', uploadsLoadError: '加载上传记录失败', noData: '暂无上传记录'
       },
       nginxConf: {
         title: 'Nginx 配置（危险）',
@@ -254,7 +312,8 @@
         nginxConf: 'Nginx Config (danger)', nginxConfTitle: 'Edit nginx include files and hot-reload',
         systemApps: 'System apps', systemAppsHint: 'Built-in management and demo pages',
         menuEditor: 'Menu editor', menuEditorTitle: 'Left-menu ordering, visibility and entries',
-        s3: 'Object Storage', s3Title: 'Browse and manage S3 object storage'
+        s3: 'Object Storage', s3Title: 'Browse and manage S3 object storage',
+        s3ConfigsTitle: 'Storage services and upload cleanup'
       },
       // Shared browser component (browser.js) strings: base layer, overridden per page (files/s3).
       browser: {
@@ -270,6 +329,7 @@
         fullscreenFailed: 'Fullscreen failed',
         collapsePreview: 'Collapse preview', expandPreview: 'Expand preview',
         prevFile: 'Previous file', nextFile: 'Next file',
+        volume: 'Volume',
         playPause: 'Tap to play / pause, swipe left or right for the previous or next file',
         truncated: 'Too many entries; only the first 2000 are listed',
         upload: 'Upload', dropHint: 'Drop to upload into this folder', uploading: 'Uploading {n} file(s)…',
@@ -283,7 +343,7 @@
         deleteDirCopy: 'This is not recoverable. Removing a non-empty folder needs the recursive switch.',
         deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
         overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
-        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up (focus returns to the folder you left) · click / Ctrl+click / Shift+click / Shift+arrows multi-select · Ctrl+A all · Delete removes selection (Enter confirms, Esc cancels) · Esc clears selection · g/l switch view · p toggle preview panel · f search · in preview f toggles fullscreen · arrows switch file · Esc closes preview',
+        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up (focus returns to the folder you left) · click / Ctrl+click / Shift+click / Shift+arrows multi-select · Ctrl+A all · Delete removes selection (Enter confirms, Esc cancels) · Esc clears selection · g/l switch view · p toggle preview panel · f search · in preview f toggles fullscreen · arrows switch file · up/down arrows volume ±5% · Esc exits fullscreen (press again to close preview)',
         clearSelection: 'Clear selection', selectedCount: '{n} selected', move: 'Move',
         batchDeleteTitle: 'Batch delete', batchDeleteCopy: 'Delete the {n} selected items? This is not recoverable.',
         moveTitle: 'Move to', moveCopy: 'Move the {n} selected items to the target directory.',
@@ -307,6 +367,7 @@
         fullscreenFailed: 'Fullscreen failed',
         collapsePreview: 'Collapse preview', expandPreview: 'Expand preview',
         prevFile: 'Previous file', nextFile: 'Next file',
+        volume: 'Volume',
         playPause: 'Tap to play / pause, swipe left or right for the previous or next file',
         truncated: 'Too many entries; only the first 2000 are listed',
         upload: 'Upload', dropHint: 'Drop to upload into this folder', uploading: 'Uploading {n} file(s)…',
@@ -319,16 +380,73 @@
         deleteDirCopy: 'This is not recoverable. Removing a non-empty folder needs the recursive switch.',
         deleteRecursive: 'Delete everything inside as well', deleted: 'Deleted',
         overwriteTitle: 'Name already exists', overwriteCopy: 'The target folder already has that name. Replace it with this upload?',
-        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up (focus returns to the folder you left) · click / Ctrl+click / Shift+click / Shift+arrows multi-select · Ctrl+A all · Delete removes selection (Enter confirms, Esc cancels) · Esc clears selection · g/l switch view · p toggle preview panel · f search · in preview f toggles fullscreen · arrows switch file · Esc closes preview'
+        kbdHint: 'Shortcuts: arrows move · Enter opens · Backspace goes up (focus returns to the folder you left) · click / Ctrl+click / Shift+click / Shift+arrows multi-select · Ctrl+A all · Delete removes selection (Enter confirms, Esc cancels) · Esc clears selection · g/l switch view · p toggle preview panel · f search · in preview f toggles fullscreen · arrows switch file · up/down arrows volume ±5% · Esc exits fullscreen (press again to close preview)'
       },
-      // S3 page specifics: page shell (not-configured card / bucket picker) and share buttons.
+      // S3 page specifics: page shell (not-configured card / bucket picker).
       s3: {
-        title: 'Object Storage', description: 'Browse S3 buckets with preview, download and share links.',
+        title: 'Object Storage', description: 'Browse S3 buckets with preview and download.',
         selectBucket: 'Bucket',
+        // Multiple storage services: the toolbar switcher picks the active config
+        // (remembered under the authz_s3_cfg localStorage key).
+        selectCfg: 'Storage service', cfgDefaultSuffix: 'default',
         notConfiguredTitle: 'Object storage is not configured',
-        notConfigured: 'S3 object storage is not configured: set the s3 endpoint / region / credentials in the gateway and try again.',
+        notConfigured: 'S3 object storage is not configured: open "Configure" to add a service, or set the AUTHZ_S3_* gateway environment variables and try again.',
         writableScope: 'Writable scope: ',
-        share: 'Share link', shared: 'Share link generated', shareFailed: 'Failed to generate share link'
+        // Config view entry (the former standalone config page now lives here;
+        // migration v27 hides its menu entry).
+        configButton: 'Configure',
+        configTooltip: 'Manage storage service configs and upload records'
+      },
+      // S3 service config page: config CRUD on top, upload ledger and expiry cleanup below.
+      s3Configs: {
+        title: 'S3 Service Config',
+        description: 'Manage several S3-compatible object storage services (endpoint, credentials, writable scope, TTL) and clean up expired gateway uploads.',
+        refresh: 'Refresh', newCfg: 'New service', search: 'Search name / endpoint',
+        back: 'Back to object storage',
+        retry: 'Retry', failed: 'Failed', note: 'Note', allStates: 'All',
+        listTitle: 'Storage services', listNote: 'The browser page toolbar switcher is fed by this list; the default config serves requests without an explicit cfg.',
+        colName: 'Name', colEndpoint: 'Endpoint', colRegion: 'Region', colAkid: 'AKID', colSecret: 'SECRET',
+        colWritable: 'Writable scope', colExpires: 'Default TTL', colLifecycle: 'Reclaim', colDefault: 'Default', colStatus: 'Status',
+        secretSet: 'Set', secretUnset: 'Not set', noValue: '—',
+        writableAll: 'Unrestricted (whole bucket writable)',
+        envBadge: 'Environment', envHint: 'Provided by the AUTHZ_S3_* environment variables and read-only here',
+        expiresNever: 'Never expires', hoursUnit: '%s h',
+        lifecycleOn: 'Bucket lifecycle', lifecycleOff: 'Gateway timer',
+        isDefault: 'Default service', setDefault: 'Make default', defaultDone: 'Now the default service',
+        enabled: 'Enabled', disabled: 'Disabled', enabledDone: 'Enabled', disabledDone: 'Disabled',
+        test: 'Test', testOk: 'Connection OK', testBuckets: '{n} buckets visible', testFailed: 'Connection test failed',
+        edit: 'Edit', deleteAction: 'Delete', save: 'Save', cancel: 'Cancel',
+        createTitle: 'New storage service', createCopy: 'Describe an S3-compatible service; it becomes selectable on the browser page once saved.',
+        editTitle: 'Edit storage service', editCopy: 'Credentials are only replaced when filled in: leave AKID / SECRET empty to keep the stored values.',
+        cfgName: 'Name', cfgNameHint: 'Lowercase letters, digits, - and _, at most 32 characters; used as the cfg parameter and browser memory key.',
+        endpoint: 'Endpoint', endpointHint: 'Scheme + host + optional port, no path, e.g. http://10.252.25.70:9000',
+        region: 'Region', regionHint: 'Leave empty to use the server default region.',
+        akid: 'Access Key ID', secret: 'Secret Access Key',
+        secretKeepHint: 'Configured, leave empty to keep', secretNewHint: 'Required; stored only inside the gateway and never echoed back',
+        writablePaths: 'Writable scope', writablePathsHint: 'One <bucket> or <bucket>/<prefix> per line; lines are joined with commas on save. Empty = unrestricted.',
+        defaultBucket: 'Default bucket', defaultBucketHint: 'Empty = the browser page must pick a bucket explicitly.',
+        shareBucket: 'Mount bucket', shareBucketHint: 'Restrict the mount root to this bucket; empty = any bucket.',
+        shareRoot: 'Mount root', shareRootHint: 'e.g. share/<LAN IP>; empty = no preset mount root.',
+        expiresHours: 'Upload TTL (hours)', expiresHoursHint: 'Integer between 0 and 720; 0 = never expires.',
+        useLifecycle: 'Reclaim via bucket lifecycle', useLifecycleHint: 'When on, deletion is done by bucket lifecycle rules and the gateway only records the expiry.',
+        allowHttp: 'Allow plaintext http endpoint', allowHttpHint: 'Enable only on a trusted network: plaintext HTTP leaves credentials and payloads unencrypted.',
+        allowHttpWarn: 'This endpoint is plaintext http: credentials and object bytes are unencrypted on the wire. Use it only on a trusted network.',
+        cfgEnabled: 'Enable this service',
+        required: 'Required', nameRule: 'Name may only use lowercase letters, digits, - and _, up to 32 characters',
+        endpointRule: 'Endpoint must start with http:// or https:// and must not contain a path, ? or #',
+        akidRule: 'Access Key ID is required when creating', secretRule: 'Secret Access Key is required when creating',
+        expiresRule: 'TTL hours must be an integer between 0 and 720',
+        created: 'Storage service created', updated: 'Storage service saved', loadError: 'Failed to load storage service configs',
+        deleteTitle: 'Delete storage service', deleteConfirm: 'Upload rows for this service can no longer be managed afterwards. Delete %s?', deleted: 'Storage service deleted',
+        uploadsTitle: 'Upload ledger and expiry cleanup',
+        uploadsNote: 'Objects written through the gateway with their expiry time; delete a row individually or run a cleanup now.',
+        colCreated: 'Created', colKind: 'Kind', colCfg: 'Service', colBucket: 'Bucket', colKey: 'Object', colSize: 'Size',
+        colOwner: 'Owner', colExpiry: 'Validity left', colState: 'State', colError: 'Last error',
+        remaining: '%s h %s min left', expiredPending: 'Expired, pending cleanup',
+        deleteUpload: 'Delete now', deleteUploadTitle: 'Delete upload row', deleteUploadConfirm: 'The object is deleted from the bucket as well when still present. Delete this row?', uploadDeleted: 'Row deleted',
+        cleanup: 'Run cleanup', cleanupRunning: 'Cleaning', cleanupDone: 'Cleanup done: scanned {scanned} · deleted {deleted} · failed {failed} · skipped {skipped}',
+        autoRefresh: 'Auto refresh every 5 minutes', loadMore: 'Load more',
+        loadedCount: 'Loaded {n} of {total}', uploadsLoadError: 'Failed to load upload rows', noData: 'No upload rows'
       },
       nginxConf: {
         title: 'Nginx Configuration (danger)',

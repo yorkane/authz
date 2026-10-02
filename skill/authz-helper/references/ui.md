@@ -61,6 +61,7 @@ Cookie 会话或 `x-api-key` 头（Playwright setExtraHTTPHeaders）均可认证
 | 列表 | 列 AUTHZ_FILES_ROOT 目录 + 行操作菜单（下载/重命名/删除；目录非空需 recursive）；沙箱预览依赖 SameSite=None Cookie | `PUT /api/files/rename`、`DELETE /api/files/remove` |
 | 多选 | 单击=只移动焦点；Ctrl/Cmd+单击=切换单项；Shift+单击=从锚点连选（锚点不移动）；Shift+方向键=键盘扩选；Ctrl+A=全选「已加载」条目；表头复选框三态（半选点一下=全选）；Esc 清空选择 | — |
 | 预览全屏 | 预览浮层内按 `f` 切换全屏：视频/音频元素（没有媒体元素时是预览卡片）进入/退出全屏，标准浏览器走 `requestFullscreen`，iOS Safari 的 video 走 `webkitEnterFullscreen`；非预览状态 `f` 仍是聚焦搜索框。预览中按 `Esc`：若处于全屏，第一次只退全屏（组件在 document 捕获阶段接管，避免同一次按键被 QDialog 当成关浮层），第二次才关闭预览 | — |
+| 预览音量 | 预览浮层（含全屏播放）内按 `↑` / `↓` 调视频或音频音量，**±5% 步进**，收敛在 0~1 并在右上角短暂回显百分比；从静音状态按 `↑` 会自动取消静音。非媒体预览（图片/文本/HTML）不劫持上下键，仍走原生滚动。用 `event.defaultPrevented` 判重，避免与内核自带的方向键调音量叠加成一次 10% | — |
 | 返回定位 | `Backspace` 返回上级目录后，焦点落在「刚刚离开的那个目录」条目上（自动换算分页并滚动到可见位置），不回到列表第一行；普通刷新/翻页不受影响 | — |
 | 选择条 | 选中数 >0 时出现在面包屑上方：取消选择 / 已选 n 项 / 下载（≤20 项、跳过目录）/ 移动 / 删除；后三项按「选中且可写」数量置灰 | — |
 | 批量移动 | 目标目录输入框：**默认按「当前目录的子目录」解析**（S3 的 `path` 是深前缀时，按桶根解析会掉出可写范围导致整批 403）；以 `/` 开头才从内容根/桶根算起；对话框实时回显解析后的完整目标路径；留空或等于当前目录不提交，含 `..` 直接拒；服务端逐条校验（目录不得移入自身子目录 422、目标同名 409、目标目录不存在 404） | `PUT /api/files/rename` 带 `new_path`（`new_name` 传原名 = 纯移动） |
@@ -76,9 +77,31 @@ s3.html 与 files.html 共用 `admin/browser.js` 的 `az-browser` 组件，因�
 | 差异 | 说明 |
 |---|---|
 | 跨目录移动 | 同样走 `PUT /api/s3/rename` + `new_path`，实现是 CopyObject + DeleteObject（目录 = 整棵前缀复制后批量删旧），大目录成本高于本地文件 |
-| 可写范围 | 逐条按 `AUTHZ_S3_WRITABLE_PATHS` 判定，**源 key 与目标 key 各判一次**，任一越界该条 403 `s3_read_only`（不会整批回滚）；列表项带 `writable`，不可写项在选择条里自动跳过 |
+| 存储服务下拉 | 工具栏多出一个「存储服务」选择器（`?cfg=<id|name>`）：选项取 `GET /api/s3` 新增的 `data.configs`（缺失时另拉 `GET /api/s3-configs`），选中值记在 `localStorage authz_s3_cfg`，并拼进**每一个**请求与条目 URL；后端回 `data.cfg` 用于对齐，记住的服务被删/停用时自动回落默认项重载一次。表里有启用行时 env 那套不进下拉（避免幽灵选项），但 `?cfg=env` 仍可用 |
+| 可写范围 | 逐条按**当前所选配置**的 `writable_paths` 判定（多套配置各自一份，不再只有一个 `AUTHZ_S3_WRITABLE_PATHS`），**源 key 与目标 key 各判一次**，任一越界该条 403 `s3_read_only`（不会整批回滚）；列表项带 `writable`，不可写项在选择条里自动跳过 |
 | 全选范围 | `items` 是翻页累积集合，Ctrl+A 只覆盖已加载部分（每页 1000） |
 | 目录非空 | 未勾递归且前缀下有对象 → 该条 409，进部分失败清单 |
+
+## 4c. 存储配置（多套 S3 + 上传流水清理）
+
+入口：对象存储页（`s3.html`）工具栏「配置」按钮 → 页内配置视图（锚点 `#configs` 直达）；`s3-configs.html` 保留为挂载同一组件的薄壳直链页。原独立菜单 `builtin=s3Configs` 已在迁移 v27 隐藏。
+
+左侧菜单「系统应用 → 存储配置」（`builtin=s3Configs`，迁移 v25 seed，`admin_only=1`，
+仅 admin 可见）。这个页面能编辑**明文入库**的 S3 凭证，因此不给 staff 看到。
+上下两个区，不复用 `az-browser` 组件。
+
+| 区块 | 功能 | API |
+|---|---|---|
+| 存储服务列表 | 名称/endpoint/region/AKID 掩码/SECRET 是否已配置/可写范围/默认 TTL/回收方式/默认标记/启停；env 回落项显示橙色「环境变量 / Environment」徽标并提示只读 | `GET /api/s3-configs` |
+| 新建/编辑 | 表单；**AKID 与 SECRET 留空 = 不修改**（编辑态只在非空时才把字段塞进 payload）；`writable_paths` 每行一条，保存时按逗号拼接；`expires_hours` 表单限 0-720（接口允许到 8760） | `POST /api/s3-configs`、`PATCH /api/s3-configs/:id` |
+| 行操作 | 测试连通性（成功提示可见桶数，失败显示原因，不回显凭证）、设为默认、启用/停用、删除（确认框说明该服务的流水将无法再管理） | `POST /api/s3-configs/:id/test`、`PUT /:id/default`、`PATCH /:id`、`DELETE /:id` |
+| 上传记录列表 | 经网关写入的对象/文件流水：kind/服务/桶/对象/大小/所有者/剩余有效期/状态/最近错误；状态下拉过滤 + 「加载更多」翻页 + 5 分钟自动刷新 | `GET /api/uploads?state=&limit=&offset=` |
+| 立即清理 | 顶部扫帚按钮，跑一轮清理并汇总「扫描 n · 删除 n · 失败 n · 跳过 n」 | `POST /api/uploads/cleanup` |
+| 单条删除 | 行操作「立即删除」：按记录删对象/本地文件并闭账（勾了桶生命周期的行这里照删） | `DELETE /api/uploads/:id` |
+
+要点：改这张表**即时生效，不需要 reload nginx**（查询缓存 30s + `db_rev` 失效）；
+表里没有任何启用行时才回落到 `.env` 的 `AUTHZ_S3_*`（页面上的 `id=0` 只读项，
+除「设为默认」外编辑/删除都会 422）。
 
 ## 5. nginx_conf.html — Nginx include 编辑（隐藏入口）
 

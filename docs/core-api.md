@@ -410,6 +410,164 @@ s3 端：`new_path` 复用与 `path` 同源的 `normalize_prefix`（含 `..`/控
 `400 invalid_path`），并对**目标 key**（`join(new_path or path, new_name)`）单独再判一次
 `item_writable`：只判源 key 就能把范围内的整棵目录挪出范围，或反向写入只读前缀。
 
+### 6.2 多套存储服务配置（`/api/s3-configs`）
+
+一行 = 一套 S3 兼容服务（endpoint + 凭证 + 可写范围 + 过期策略），存在 SQLite
+`s3_configs` 表里，对象存储页（`s3.html`）工具栏「配置」按钮进入的配置视图就是这张表（原「系统应用 → 存储配置」菜单入口已在迁移 v27 隐藏，直链页 `/s3-configs.html` 仍可用）。身份要求与 6.1 相同：
+admin 会话（写请求带 `X-CSRF-Token`）或 admin 机器 Key（免 CSRF）。
+
+| Method | Path | CSRF | 用途 / 成功响应 |
+|---|---|---|---|
+| `GET` | `/s3-configs` | — | 列出全部行（含禁用）+ env 回落项；`{"data":{"items":[...]}}` |
+| `POST` | `/s3-configs` | 是 | 新建；`201` + `{"data":{"item":{...}}}`；名称重复 `409` |
+| `PATCH` | `/s3-configs/:id` | 是 | 局部更新；`{"data":{"item":{...}}}` |
+| `PUT` | `/s3-configs/:id/default` | 是 | 设为默认（全表先清后设）；`{"data":{"item":{...}}}` |
+| `POST` | `/s3-configs/:id/test` | 是 | 用这套配置列举桶；`{"data":{"ok":true,"buckets":["noco"]}}` |
+| `DELETE` | `/s3-configs/:id` | 是 | 删除；`{"data":{"deleted":true}}` |
+
+**优先级（env 只是回落）**：表里存在「启用 + 字段合法」的行时，运行时用表里的配置；
+表里一行可用配置都没有时才回落 `AUTHZ_S3_*`。回落项在列表里是
+`{"id":0,"name":"env","virtual":true,"is_default":1,"enabled":1}`（仅当 `AUTHZ_S3_ENDPOINT` 已配置时出现；整套未配置时列表只含表里的行，可能为空数组）：**只读**——
+`PATCH`/`DELETE` 一律 `422`（消息「由环境变量提供」），`PUT /default` 是 no-op 成功。
+
+**改表即生效，不需要 reload**：行数据经 mlcache（TTL 30s），派生结果在 worker 本地
+按 `db_rev` 判活，任何写库都会 bump revision，所以通常下一个请求就切到新配置，
+最坏 30 秒。直接改 SQLite 不触发失效（见 `design.md` §6）。
+
+**凭证纪律**：`secret_access_key` 明文存进 SQLite（本仓库首例，SigV4 需要原文参与签名），
+因此任何接口只回 `has_secret`（0/1）与 `access_key_id_masked`（AKID 前 4 位 + 掩码），
+永不回显密钥原文。`PATCH` 的凭证字段是**空 = 不修改**（不传、空串、JSON `null` 三者同义）。
+
+回显的 item 字段：
+
+| 字段 | 说明 |
+|---|---|
+| `id` / `name` / `virtual` | `name` 是 `cfg=` 参数可用的引用；`virtual=true` 只属于 env 回落项（`id=0`） |
+| `endpoint` / `region` / `allow_http` | endpoint 存归一化回显形态（`scheme://host[:port]`，无尾斜杠）；`allow_http` 只对 `http://` endpoint 有意义，https 落库前被压回 0 |
+| `has_secret` / `access_key_id_masked` | 见上面的凭证纪律 |
+| `writable_paths` / `writable_roots` / `share_prefix` | 原始白名单字符串 + 派生后的可写根数组 + 默认挂载前缀（`share/<LAN IP>`，显式白名单或探测失败时 `null`） |
+| `share_root` / `share_bucket` | 挂载根与挂载桶（`share_bucket` 空 = share 前缀在任意桶生效） |
+| `expires_hours` / `use_bucket_lifecycle` | 见 6.3 |
+| `default_bucket` | 该服务的默认桶（可空）。当前只落库与回显，对象存储页仍用 `localStorage authz_s3_bucket` 记住上次桶，**尚未消费**这一字段 |
+| `local_root` | 该服务配套的本地中转目录，空 = 用全局保存区 `AUTHZ_STORE_DIR`（清理器按行取值）。**可写不可读**：`POST`/`PATCH` 接受它，但回显的 item 里没有这个字段（`api/services/s3_configs.lua` 的 `view()` 白名单不含它） |
+| `is_default` / `enabled` / `note` / `created_at` / `updated_at` | 开关与审计 |
+
+创建必填：`name`、`endpoint`、`access_key_id`、`secret_access_key`。取值区间
+（`lualib/resty/authz/api/services/s3_configs.lua:27`）：
+`expires_hours` 0–8760（管理页表单只放开到 720）。表里的第一行无条件成为默认项。
+
+```bash
+AUTHZ=http://127.0.0.1:6080
+# 新建一套服务并立刻可用（无需 reload）
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"name":"minio-a","endpoint":"http://10.251.14.70:30080","region":"RegionOne",
+       "access_key_id":"<AKID>","secret_access_key":"<SECRET>","allow_http":true,
+       "writable_paths":"agent","expires_hours":24}' \
+  "$AUTHZ/_authz/api/s3-configs"
+# 设为默认 + 连通性测试
+curl -sS -X PUT -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' -d '{}' \
+  "$AUTHZ/_authz/api/s3-configs/1/default"
+curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' -d '{}' \
+  "$AUTHZ/_authz/api/s3-configs/1/test"
+```
+
+**既有 S3 接口新增的选配置入参**：`/_authz/api/s3*` 全部接受 `cfg`（query `?cfg=` 或
+JSON body 的 `cfg` 字段），取值 `id` / `cfg:<id>` / `name` / `env`；不传 = 默认项。
+点名的配置不存在或已停用 `423`，存在但字段写坏 `502`。字节流
+`/_authz/s3/<bucket>/<key>` 同样用 `?cfg=`。`GET /api/s3` 的响应新增
+`data.cfg`（本次实际生效的配置摘要）与 `data.configs`（可选配置清单），两者都不含凭证。
+
+要点 env 那套时统一写 `?cfg=env`：`cfg=0` 只在控制面 API 一侧被翻译成 `env`
+（`router.lua:292`），字节流出口 `s3_proxy.lua` 直连 `s3_config_store.get(raw)`，
+拿到 `0` 会按「点名的配置不存在」回 423。
+
+### 6.3 上传流水与过期清理（`/api/uploads*`）
+
+经网关写入的对象（S3 对象与本地保存区文件）在 `upload_records` 表记一条流水，
+构成过期清理队列。为什么要自己记账：S3 官方 bucket lifecycle 只到**天**粒度且异步执行，
+做不了小时级过期，所以小时级回收只能靠 DB 记账 + 每小时定时器
+（`lualib/resty/authz/maintenance.lua`）。
+
+| Method | Path | CSRF | 用途 / 成功响应 |
+|---|---|---|---|
+| `GET` | `/uploads?state=&limit=&offset=` | — | `{"data":{"items":[...],"total":n}}`；`state` 取 `active`/`deleted`/`failed`/`skipped`（`expired`、`pending_delete` 被放行但恒 0 行），`limit` 默认 50、上限 500 |
+| `POST` | `/uploads/cleanup` | 是 | 立刻跑一轮清理（等价于定时器的一轮）；body 可选 `{"limit":n}`，响应 `{"data":{"scanned","deleted","failed","skipped","orphans","staged","updated"}}` |
+| `DELETE` | `/uploads/:id` | 是 | 按记录立刻删对象/本地文件并闭账；`{"data":{"removed":true,"id":n}}`，重复删回 `already:true`，删除失败 `502` + 原因 |
+
+流水字段：`id`、`kind`（`s3` / `local`）、`cfg_id`（NULL = 当时用的是 env 回落配置）、
+`bucket`、`key`、`size`、`source`（`upload` = 浏览器会话，`api`/`multipart` = 机器 Key）、
+`created_by`、`created_at`、`expires_at`（NULL = 永不过期）、`state`、`last_error`。
+
+过期语义（三个必须记住的点）：
+
+- `expires_hours` 单位是**小时**，`0` = 永不过期（`expires_at` 写 NULL，不入队）；
+  `expires_at` 一律**整点对齐**，所以「同一小时写入的一批」在同一小时被删。
+- `use_bucket_lifecycle=1` 的配置只记账不删：新流水直接落 `state='skipped'`，
+  回收交给桶自己的生命周期规则；但 `DELETE /api/uploads/:id` 这类人工意志照删。
+- 记账永不影响上传结果：对象已写成功，账没记上只落一条 WARN 日志，响应仍成功。
+
+```bash
+# 手工触发一轮清理
+curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"limit":500}' "$AUTHZ/_authz/api/uploads/cleanup"
+```
+
+### 6.4 本机临时保存区（`/api/store*`）
+
+给 Agent 的免登录文件落盘/取回接口。定位是**临时交换区**（默认 24 小时后自动删除），
+**不是持久存储**：需要长期保存的内容走对象存储（6.2 + `/api/s3*`）。
+根目录由 `AUTHZ_STORE_DIR` 决定（容器内默认 `/data/store`，落在 compose 的
+`${DATA_DIR}:/data` 卷下，无需额外 volume）；默认 TTL 由 `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS`
+决定（24，`0` = 不过期）。
+
+这一组路由**刻意不带 `session_only`**：核心用途就是 Agent 用 `x-api-key` 直传直取。
+能力面不变（admin 角色 + Key 来源白名单），写端点仍标 `csrf`，机器 Key 天然免 CSRF。
+
+| Method | Path | CSRF | 用途 / 成功响应 |
+|---|---|---|---|
+| `GET` | `/store/info` | — | `{"data":{"enabled","store_dir","writable","default_expiry_hours","max_bytes","max_files","message","counts":{"active","deleted","failed","skipped"}}}`；目录不可用不是错误，回 `200` + `enabled:false` |
+| `GET` | `/store?path=&raw=1` | — | 单层列目录（省略 `path` = 保存区根）；`{"data":{"items":[{name,type,size,mtime,expires_at,state}],"path","truncated"}}`；`raw=1` 跳过流水关联 |
+| `GET` | `/store/stat?path=` | — | 单对象元信息；`{"data":{"name","type","size","mtime","path","url","expires_at","state"}}` |
+| `PUT` | `/store?path=&expires_hours=&overwrite=0` | 是 | 写单个对象（`path` 可多级，缺失祖先目录在保存区内逐级创建）；`201` + `{"data":{"path","size","url","expires_at","expires_in","state"}}` |
+| `POST` | `/store/upload?path=&expires_hours=&overwrite=1` | 是 | multipart 多文件（表单字段名 `file`）；`201` + `{"data":{"uploaded":[{name,size}],"skipped":[{name,reason}],"path"}}` |
+| `DELETE` | `/store?path=&recursive=1` | 是 | 删文件或目录树并闭账；`{"data":{"message","path","removed":{"files","dirs"},"records"}}` |
+
+相对路径一律走 query（`?path=`），不放进 URL 段。`PUT` 的 `overwrite` **默认开**
+（Agent 反复保存同一路径是主用途，显式 `overwrite=0`/`false` 才在同名时 `409`）；
+`upload` 相反，`overwrite` **默认关**（同名计入 `skipped`，全冲突回 `409`）。
+`expires_hours` 不传 = 用默认 TTL，`0` = 永不过期。
+
+限制：单对象 `max_bytes` = 512MB（超限 `413`，nginx 侧 `location ^~ /_authz/` 的
+`client_max_body_size 2048m` 是外层硬闸）、单请求 `max_files` = 64（超出计入 `skipped`）、
+目录深度 ≤32。路径非法（绝对路径、`.`/`..`、`~`、控制字符、反斜杠，或以 `.upload-`
+等暂存保留名前缀开头）→ `400`；非 multipart → `415`；表单里没有 `file` 字段 → `422`；
+保存区目录不可用 → `503`。
+
+`url` 是**同源相对**入口（形如 `/_authz/store/<rel>`，逐段转义），配合
+`?download=1`（强制下载）与 `?authz_preview=1`（HTML 沙箱预览）、`Range` 请求头可用；
+该出口只读（其他方法 `405`），非法/越界/含符号链接/不存在一律 `404`。
+取回侧的身份要求与写入侧一致（安全审查 P2 收口）：**admin 机器 Key 或 admin 会话**；
+其他角色的 Key、普通登录会话一律 `403`，未登录 `302` 到登录页。store 是 agent 中转区，
+不是给人浏览的共享目录（那是 `/files` 与对象存储的职责），取回 URL 又能按路径推算，
+所以不向普通用户开放。
+
+```bash
+AUTHZ=http://127.0.0.1:6080
+# 保存 → 拿回可访问的相对 URL → 取回 → 立即清理（一条链路）
+URL=$(curl -sS -X PUT -H "x-api-key: $AUTHZ_API_KEY" \
+  --data-binary @report.md "$AUTHZ/_authz/api/store?path=reports/report.md&expires_hours=6" \
+  | jq -r .data.url)                       # → /_authz/store/reports/report.md
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ$URL" -o /tmp/back.md
+curl -sS -X DELETE -H "x-api-key: $AUTHZ_API_KEY" \
+  "$AUTHZ/_authz/api/store?path=reports/report.md"
+# 不想等删除接口，也可以直接催一轮清理
+curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' -d '{}' \
+  "$AUTHZ/_authz/api/uploads/cleanup"
+```
+
+每个文件都写 `.upload-*` 暂存名再原子改名，中断不会留下半截目标文件；超过 6 小时的
+暂存残留由同一个每小时定时器扫掉。
+
 ## 7. Agent 安全要求
 
 - 不在日志、终端输出、任务结果或错误信息中打印 API Key。

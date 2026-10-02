@@ -421,6 +421,9 @@ COPY --from=lua-resty-http-source /out/ /usr/local/openresty/lualib/resty/
 COPY lualib/ /usr/local/openresty/site/lualib/
 # File browser support module (built in the lfs-builder stage).
 COPY --from=lfs-builder /opt/lfs.so /usr/local/openresty/site/lualib/lfs.so
+# Same module in the built-in lualib (cpath fallback): dev/test deploys bind-mount
+# ./lualib over site/lualib, which would otherwise shadow lfs.so away entirely.
+COPY --from=lfs-builder /opt/lfs.so /usr/local/openresty/lualib/lfs.so
 # Container maintenance command for recovering the built-in admin account.
 COPY scripts/admin_password_reset.lua /usr/local/openresty/admin_password_reset.lua
 COPY scripts/admin_password_reset /usr/local/bin/admin_password_reset

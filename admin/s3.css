@@ -35,3 +35,16 @@
   text-overflow: ellipsis;
   max-width: 40vw;
 }
+
+/* 未配置卡片下方的「配置」按钮：与说明卡片同轴居中，给未配置状态一个出口。 */
+.s3-not-configured-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 18px;
+}
+
+/* 存储服务选择器：与桶选择器同宽量级，长服务名省略号收尾。 */
+.s3-cfg-select {
+  width: 230px;
+  max-width: 45vw;
+}

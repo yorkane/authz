@@ -53,6 +53,20 @@ lualib/resty/authz/         ★ Authz Gateway 核心
   oauth.lua                 OAuth2/OIDC + Google 授权码、PKCE、userinfo
   remote.lua                远程身份单向记录与本地角色覆盖
   util.lua                  密码哈希(HMAC-SHA256 迭代5000次)/随机token/HTML转义
+  s3.lua / s3_upload.lua / s3_scope.lua / s3_proxy.lua
+                          S3 客户端与 multipart 中转、可写范围白名单、字节流出口
+  s3_config_store.lua     ★ 多套 S3 配置的运行时枢纽：把「表行」或「env 默认项」统一成
+                          与 config.s3 同构的 cfg 表；改表即生效（worker 本地派生缓存按
+                          db_rev 判活，行数据经 mlcache TTL 30s）
+  store.lua / store_proxy.lua
+                          本机「临时保存区」文件原语（归一化/符号链接防护/原子写）
+                          与只读字节流出口 /_authz/store/<rel>
+  maintenance.lua         ★ 每小时后台维护：到期对象/文件清理 + 上传暂存残留扫描；
+                          共享字典抢单 owner，由 init_worker_by_lua_block 里 start()
+  api/services/s3_configs.lua / uploads.lua / store.lua
+                          存储配置 CRUD 与校验、上传记账与清理、保存区业务层
+  repository/s3_configs.lua / upload_records.lua
+                          两张新表的 SQL（META 列集合在 SQL 层就不选明文密钥）
 test/run_tests.sh           基础镜像功能测试(17项断言, 不依赖 authz)
 test/test_authz_gateway.sh  Gateway/API 隔离测试矩阵
 test/test_shared_session.sh 共享会话 (Redis 单写多读) 独立回归
@@ -81,6 +95,17 @@ nginx.conf.template
 | bindings | domain(UNIQUE), port, enabled, note | 显式域名绑定 |
 | bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/menu_name/**request_rewrite**/**response_rewrite** | `request_rewrite`/`response_rewrite` 为改写请求/响应的规范化 JSON（结构同构：headers/append_headers/remove_headers/body/body_base64/content_type/rewrites；append 仅请求侧），空串表示未配置；header_overrides 列已由迁移 17 并入 request_rewrite |
 | schema_migrations | version(PK), name, applied_at | 已应用迁移的有序版本账本 |
+| s3_configs | id(PK AUTOINCREMENT), name(UNIQUE), endpoint, region(`DEFAULT 'us-east-1'`), allow_http(DEFAULT 0), access_key_id(''), **secret_access_key('')**, writable_paths(''), share_root('share'), share_bucket(''), expires_hours(0), use_bucket_lifecycle(0), default_bucket(''), local_root(''), is_default(0), enabled(1), note(''), created_at, updated_at | 多套 S3 服务配置（迁移 v23）。一行 = 一套服务；表内无可用行时回落 `AUTHZ_S3_*`。`secret_access_key` 为**明文**（见 §17.3） |
+| upload_records | id(PK AUTOINCREMENT), kind(DEFAULT 's3'), cfg_id(**可空、无外键**), bucket(''), key(''), size(0), source('api'), created_by(''), created_at, expires_at(**可空**), state('active'), last_error(''), checked_at | 上传流水账 + 过期清理队列（迁移 v24）。`expires_at` NULL = 永不过期，非 NULL 必须整点对齐；`state` ∈ active/deleted/failed/skipped。`idx_upload_records_expiry(state, expires_at)` 是清理队列唯一入口 |
+
+菜单入口由迁移 `25:menu_entry_s3_configs` seed：系统应用组下的「存储配置」
+（`builtin='s3Configs'`，`admin_only=1`，sort_order=18）——该页面能编辑明文入库的
+S3 凭证，与「对象存储」「Nginx配置(危险)」同级，不给 staff 看到。
+
+迁移 `26:retire_s3_share_ttl` 为既有库执行 `ALTER TABLE s3_configs DROP COLUMN
+share_ttl`（v23 建表已不含该列，因此先判存在再删，新库不受影响）。
+
+迁移 `27:hide_menu_s3_configs` 把该菜单条目 `enabled=0`（照抄 v22 隐藏 nginxConf 的做法）：配置能力改由「对象存储」页工具栏「配置」按钮进入页内视图（s3.html 内嵌 az-s3-configs 组件，锚点 `#configs` 直达），`/_authz/apps/s3-configs.html` 保留为挂载同一组件的薄壳直链页。条目本身不删，菜单编辑器的平铺接口仍能看到并随时重新启用。
 
 **policies 编码约定**：
 - `p` 行: v0=主体(`user:<source>:<username>`或`role:x`), v1=对象"/<port><path模式>", v2=HTTP方法或`*`
@@ -101,6 +126,9 @@ Python 等价验证: `hmac.new(salt.encode(), prev, hashlib.sha256).digest()`。
 | AUTHZ_HTTP_PORT / AUTHZ_HTTPS_PORT | 6080 / 6443 | HTTP/HTTPS 入口端口 |
 | AUTHZ_HTTP_MODE | redirect | `redirect`=HTTP 308 到 HTTPS；`disabled`=只监听 127.0.0.1；`serve`=明文服务（仅受控环境） |
 | AUTHZ_PORT_MIN / AUTHZ_PORT_MAX | 2000 / 20000 | `<端口>-<域名>` 数字前缀动态路由允许的端口范围 |
+| AUTHZ_APP_DOMAINS | 1 | 内置应用保留前缀域名入口总开关（`0` 关闭，file/s3 域名回退 404） |
+| AUTHZ_APP_PREFIX_FILES / AUTHZ_APP_PORT_FILES | file / 100 | files 应用的保留前缀与虚拟端口 |
+| AUTHZ_APP_PREFIX_S3 / AUTHZ_APP_PORT_S3 | s3 / 101 | s3 应用的保留前缀与虚拟端口 |
 | AUTHZ_DISCOVERY_PORTS | 空 | 服务发现追加探测端口（Docker Desktop 等容器监听表不可见时） |
 | AUTHZ_DISCOVERY_TTL / _CONNECT_TIMEOUT_MS / _READ_TIMEOUT_MS | 30 / 100 / 200 | 本机 HTTP 服务探测缓存与超时 |
 
@@ -111,6 +139,8 @@ Python 等价验证: `hmac.new(salt.encode(), prev, hashlib.sha256).digest()`。
 | AUTHZ_DB_PATH | /data/authz/authz.db | SQLite 路径 |
 | AUTHZ_CERT_DIR | /data/certs | 自签证书目录（缺失自动生成 10 年期） |
 | AUTHZ_FILES_ROOT | /files | 文件浏览应用只读根目录，必须与 server.conf 的 `/_authz/files/` alias 一致 |
+| AUTHZ_STORE_DIR | /data/store | 本机「临时保存区」根目录（`PUT /_authz/api/store` 落点，必须可写）。与 files_root 语义分离：store 由网关自己管生命周期、不承诺长期保存；files_root 给人浏览、默认只读。落在 compose 的 `${DATA_DIR}:/data` 卷下（宿主 `${DATA_DIR}/store`），无需额外 volume |
+| AUTHZ_STORE_DEFAULT_EXPIRY_HOURS | 24 | 保存区默认保留小时数，钳 0-8760；0 = 永不过期。单次请求可用 `?expires_hours=` 覆盖 |
 | AUTHZ_DB_CACHE_TTL / _LRU_SIZE | 30 / 500 | 数据库查询缓存 |
 | AUTHZ_REWRITE_BUFFER_MB | 64 | 正文改写 worker 级缓冲预算（单响应上限固定 1MB） |
 | AUTHZ_NGINX_CONF_DIR / _PREFIX / _BIN / OPENRESTY_TEMPLATE_DIR | 镜像内路径 | nginx conf 在线编辑使用的运行时/模板目录与二进制 |
@@ -141,6 +171,12 @@ AUTHZ_GOOGLE_*、AUTHZ_DINGTALK_*（Authorization Code，钉钉默认角色 gues
 各 provider 的 CONNECT/SEND/READ 超时与 MAX_BODY_SIZE；OAuth state 使用
 `authz_oauth_state` shared dict（TTL 默认 600s）。NocoBase 强制 HTTPS，除非显式
 AUTHZ_NOCO_ALLOW_HTTP。
+
+**对象存储**：`AUTHZ_S3_*` 全套现在是**回落默认配置**（表里没有可用行时才生效），
+优先级与字段继承口径见 §17；四个超时/连接池项是实例级参数，表行也复用同一份 env 取值。
+
+**存储区**：`AUTHZ_STORE_DIR` + `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS`（见上表）。
+到点回收由 §17.4 的每小时定时器负责，改这两个 env 需要重建容器。
 
 ## 5. 请求处理流程 (authz.access())
 
@@ -188,10 +224,19 @@ resolver（gateway/resolver.lua）按序命中：
 1. bindings 精确 host 匹配（enabled=1）
 2. 裸前缀索引：首级标签 `<前缀>` 或 `<前缀>-<节点>` 命中前缀绑定；纯数字前缀
    不参与带节点回退（让位给动态端口路由）；物化旧域名先按 `前缀|节点` 精确回退
-3. 数字前缀：`^(\d{1,5})-` 且端口在 PORT_MIN~MAX → 端口，且默认
+3. 内置应用保留前缀（虚拟绑定，config.app_prefixes）：`file`→100/files.html、
+   `s3`→101/s3.html（env 可改/可关，见 §4）。**数据库真实绑定优先于虚拟入口**：
+   管理员显式绑定同名前缀时在上一步就被接管。命中时返回保留端口 +
+   `binding.app` 标记，认证与 Casbin 照常（对象 `/<端口><uri>`，端口虽在
+   PORT_MIN 之下但策略对象白名单放行——这就是「单独配置授权」的落点），
+   通过后 `ngx.var.authz_app_entry` 置位并 internal redirect 到
+   `/_authz/apps/<页面>`（不代理上游）；页面静态资源在 `/_authz/apps/` 的
+   access 钩子（gateway/app_entry.lua）里按同一端口对象复用同一套策略。
+   该端口不允许被域名绑定占用（applications 服务拒绝 422）。
+4. 数字前缀：`^(\d{1,5})-` 且端口在 PORT_MIN~MAX → 端口，且默认
    `simulate_local=true`（目标固定 127.0.0.1：上游 Host/Forwarded 头按本机访问
    构造，兼容只认本地来源的本地应用）
-4. 全部未命中 → 404 页面（host 已 HTML 转义）
+5. 全部未命中 → 404 页面（host 已 HTML 转义）
 
 代理循环防护：目标 IP+端口等于网关自身监听地址时返回 508。
 
@@ -421,8 +466,95 @@ template include；compose 可把模板目录只读挂载实现外置。
 | 菜单 | `GET /api/menu-entries|menu-tree|menu-services`、`POST/PATCH/DELETE menu-entries`、`PUT menu-entries/reorder`、`PATCH/DELETE menu-services/:key`、`PUT menu-services/reorder` | 读取登录即可；写 admin |
 | 文件 | `GET /api/files` | 登录/Key，guest 除外 |
 | conf | `GET /api/nginx-conf`、`POST validate`、`PUT`、`POST reload` | admin |
+| 存储配置 | `GET/POST /api/s3-configs`、`PATCH/DELETE /:id`、`PUT /:id/default`、`POST /:id/test` | admin（写 CSRF） |
+| 上传流水 | `GET /api/uploads`、`POST /api/uploads/cleanup`、`DELETE /api/uploads/:id` | admin（写 CSRF） |
+| 保存区 | `GET /api/store/info|/api/store|/api/store/stat`、`PUT /api/store`、`POST /api/store/upload`、`DELETE /api/store` | admin（写 CSRF，**不带 session_only**：Agent 用 Key 免登录直传直取） |
+| 保存区出口 | `GET /_authz/store/<rel>`（只读字节流，独立 location） | admin Key 或 admin 会话；其他角色 403、未登录 302（与写入侧同一道门，理由见 §17.5） |
+
+**注册顺序红线**：字面量路由必须早于同段数的 `/:id` 注册（`klib.router` 的 sort 只把
+「多段参数」路由排到尾部，同段数的字面量与 `:param` 仍按注册先后取第一个完整匹配）。
+因此 `POST /api/s3-configs` 必须早于 `PATCH/DELETE /api/s3-configs/:id`、
+`POST /api/uploads/cleanup` 必须早于 `DELETE /api/uploads/:id`。
 
 guard 语义：`admin=true` 要求 admin；`roles` 白名单；`csrf=true` 校验
 `X-CSRF-Token == session.csrf`（机器 Key 请求免）；`session_only` 拒绝 Key；
 `self_service` 放行 guest 的只读自身端点。错误统一 `{error:{code,message}}`，
 404/500 按 Accept 头回 JSON 或 HTML。
+
+## 17. 多存储配置枢纽与过期回收（设计原则）
+
+### 17.1 单一枢纽：`s3_config_store` 是唯一的「取配置」入口
+
+原本对象存储只有一套进程级凭证（`config.s3`）。多配置上线后，所有取 cfg 的路径
+（`router.lua` 的接口、`s3_proxy.lua` 的字节流、清理器按 `cfg_id` 回查）一律收敛到
+`s3_config_store`，**禁止再直读 `config.s3`**——那会让 `?cfg=` 与页面新建的配置全部失效。
+
+枢纽输出与既有 `config.s3` 同构的 cfg 表，因此 `s3.lua`/`s3_upload.lua`/`s3_scope.lua`
+不需要知道「配置从哪来」。给调用方的 cfg 一律是**新建表**（`db.query` 的返回是跨请求
+共享的 mlcache 缓存表，就地 mutate 会污染别的请求）。
+
+### 17.2 表覆盖 env 的优先级，与两条路径的失败语义不对称
+
+| | env 路径 | 表行路径 |
+|---|---|---|
+| 生效条件 | 表内没有任何「启用 + 字段合法」的行 | 有可用行时优先；按 `is_default` → id 最小 enabled 行 |
+| 字段非法 | **启动期 fail-fast**：`error()`，容器起不来（配置写坏不许带病上线） | **运行期可失败**：返回 `(nil, 原因)`，绝不 `error()`。一行写坏只让这一套配置不可用，不拖垮网关 |
+| 调用方处理 | — | `missing`/`disabled` → 423，`invalid` → 502 + 原因 |
+
+两条路径共用 `config.build_s3` 做校验与派生，**规则只有一份**。
+`cfg_id=NULL` 的流水必须回 env 项，**不能**退回「当前默认项」——对象可能在另一套服务上。
+
+### 17.3 明文密钥入库是本仓库首例，属于有意决策
+
+既有敏感数据都不落明文（`api_keys` 只存 SHA-256 摘要）。`s3_configs.secret_access_key`
+必须存明文，因为 SigV4 要拿原文参与签名（`s3.lua` 的 `credentials(cfg)`），摘要无法还原。
+换来的三条硬约束：
+
+1. 回显只允许 `has_secret` + `access_key_id_masked`，且 `has_secret` 由 SQL 算出
+   （META 列集合根本不选明文列）；含明文的查询只被命名为 `*_full` / `enabled_rows`，
+   唯一合法消费者是 `s3_config_store.build_map`；
+2. 写侧「空 = 不修改」，校验时用哨兵值满足非空判据且该哨兵不落库、不外传；
+3. **备份即含密**：`azops backup` / 复制 `authz.db` 会连带复制密钥，备份介质的
+   保密等级由此抬升（`deploy.md` §6、`docs/maintenance-handbook.md` 有告警）。
+
+### 17.4 过期回收：DB 记账 + 单 owner 定时器，而不是桶生命周期
+
+S3 官方 bucket lifecycle 只到**天**粒度且异步执行，满足不了小时级过期；而桶规则与网关
+删除同时生效会互相打架。因此分成两层：
+
+- **默认（网关负责）**：写入时在 `upload_records` 记账，`expires_at` 由
+  `s3_config_store.align_expiry` **整点对齐**（清理器每小时跑，不对齐就会错过当轮，
+  且索引区间扫会退化成一堆毫秒散布的边界行；0 = 永不过期写 NULL）。
+- **委托桶（`use_bucket_lifecycle=1`）**：只记账不删，新流水直接落 `state='skipped'`，
+  清理器也跳过；人工 `DELETE /api/uploads/:id` 仍照删（明确意志不算越权）。
+
+定时器纪律（`maintenance.lua`）：
+
+- **单 owner**：每个 worker 都调 `start()`，用共享字典原子 `add` 抢锁（TTL = 一轮，
+  每轮续期），只有 owner 挂定时器；owner 死亡后**只允许 worker 0** 判活接管
+  （共享字典没有 CAS，`delete + add` 不原子，不限定单一候选者会出现双 owner 双清理链）。
+- `tick` 无条件自我续期（一次失败不能把定时器弄丢），但只有 `_M.owned` 为真才续锁续期；
+  接口层要「立即清理」必须调纯函数 `cleanup(opts)`，**不得**调 `tick`。
+- 所有 HTTP 删除在事务**之外**，状态回填攒到最后一次事务提交（避免长事务持写锁跨网络
+  请求，也避免逐行 `db.exec` 把 `db_rev` 刷爆打穿 mlcache）。
+- 依赖纪律：本模块在 `init_worker` 链上，禁止 require 上层模块（session/api/router 会
+  拉起请求期依赖并彼此循环）；路径一律走 `config` 的记忆化访问器，**绝不能 `os.getenv`**
+  （nginx exec 后清空 worker 环境块，直读会去开一个凭空的 sqlite 文件，表现成
+  「表不存在」这种误导性错误）。
+
+### 17.5 保存区是临时交换区，不是第四个存储层
+
+`AUTHZ_STORE_DIR` 的定位是 Agent 落盘 → 换一条可取回链接 → 默认 24h 后自动删除。
+设计取舍：
+
+- 复用 `upload_records` 记账（`kind='local'`、`bucket=''`、`cfg_id=NULL`），
+  清理器对 NULL 行退回 `config.store_dir()`，与写入根目录同一判据，不新增表；
+- 覆盖写会先把同 key 的旧 active 行闭账，保证「一个 key 只有一条 active 流水」——
+  否则最早那条到期会提前把新文件删掉；
+- 不额外加 volume：根目录就在 `${DATA_DIR}:/data` 里，宿主路径可预期；
+- 字节流出口独立 location（`client_max_body_size 1m` 当写方法栅栏），
+  非法/越界/含符号链接一律 404（403 会把「存在但被挡」泄漏给探测者）；
+- 需要长期保存的内容一律走对象存储（§17.1 那套），API 层不做承诺。
+
+可写范围（`writable_paths` → `share/<本机 LAN IP>` 默认条目）的语义**照旧**，
+只是现在每套配置各自一份、各自探测/派生，互不影响。

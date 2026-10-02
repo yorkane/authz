@@ -322,6 +322,18 @@ function _M.authorization(subject)
         http_methods = common.HTTP_METHODS,
         port_min = current.port_min,
         port_max = current.port_max,
+        -- 内置应用保留前缀入口（file/s3 虚拟绑定）：前端据此提示策略对象可用端口。
+        app_entries = common.empty_array((function()
+            local rows = {}
+            for _, entry in pairs(current.app_entries or {}) do
+                rows[#rows + 1] = {
+                    name = entry.name, prefix = entry.prefix, port = entry.port,
+                    page = entry.page, title = entry.title,
+                }
+            end
+            table.sort(rows, function(left, right) return left.port < right.port end)
+            return rows
+        end)()),
     }
 end
 

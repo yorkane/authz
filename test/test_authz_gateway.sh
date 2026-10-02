@@ -11,6 +11,7 @@ BUDGET_CONTAINER_NAME=""
 ENVKEY_CONTAINER_NAME=""
 ENVKEY2_CONTAINER_NAME=""
 S3_CONTAINER_NAME=""
+APPDOM_CONTAINER_NAME=""
 TMP_DIR=$(mktemp -d)
 # 文件管理测试需要可写 /files：拷贝一份 admin 目录作为可写文件根
 # （只读浏览断言仍依赖其中的 vendor 子目录）。
@@ -88,6 +89,10 @@ cleanup() {
     if [[ -n "${S3_CONTAINER_NAME:-}" ]]; then
         docker exec "$S3_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
         docker rm -f "$S3_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${APPDOM_CONTAINER_NAME:-}" ]]; then
+        docker exec "$APPDOM_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+        docker rm -f "$APPDOM_CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
     if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" >/dev/null 2>&1 || true; fi
     if [[ -n "$REMOTE_PID" ]]; then kill "$REMOTE_PID" >/dev/null 2>&1 || true; fi
@@ -188,8 +193,8 @@ assert_json() {
 #   guest domain-prefix request-rewrite body-rewrite gzip-negotiation
 #   conditional-rewrite
 #   complex-rewrite response-rewrite-xss menu-tree files files-legacy files-manage
-#   nginx-conf agent-key login-lock http-redirect cookie-domain s3 s3-live
-#   rewrite-budget envkey
+#   nginx-conf agent-key login-lock http-redirect cookie-domain s3 s3-live store
+#   rewrite-budget envkey app-domains
 # 段之间共享登录会话、端口与 mock。被标记成可挑选的段都自带前置（自己登录、
 # 自己建数据）；挑中的段若依赖被跳过段留下的变量，ensure 会让它安静跳过而不是
 # 拿空值发请求。因此 TEST_ONLY 的结果同样只当线索，确认用全量跑。
@@ -624,7 +629,7 @@ assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "retired viewer role folded into guest everywhere" "$(report_get viewer_retired)" "yes"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new|21:menu_entry_s3_browser|22:menu_entry_nginx_conf_hidden"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new|21:menu_entry_s3_browser|22:menu_entry_nginx_conf_hidden|23:s3_configs|24:upload_records|25:menu_entry_s3_configs|26:retire_s3_share_ttl|27:hide_menu_s3_configs"
 
 cookie_header() {
     awk '
@@ -855,6 +860,15 @@ assert_contains_all "preview f toggles media fullscreen; Esc exits fullscreen fi
     "document.addEventListener('keydown', onPreviewEscCapture, true)" \
     "document.removeEventListener('keydown', onPreviewEscCapture, true)"
 request GET "$ADMIN_HOST" '/_authz/apps/browser.js' "$ADMIN_COOKIE"
+assert_contains_all "preview arrows change media volume by 5 percent" "$BODY" \
+    "function adjustPreviewVolume (delta) {" \
+    "card.querySelectorAll('video, audio')" \
+    "Math.min(1, Math.max(0, Math.round((els[0].volume + delta) * 100) / 100))" \
+    "if (next > 0) media.muted = false" \
+    "notify(t.value.volume + ' ' + Math.round(next * 100) + '%', 'info', 900)" \
+    "} else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {" \
+    "adjustPreviewVolume(event.key === 'ArrowUp' ? 0.05 : -0.05)"
+request GET "$ADMIN_HOST" '/_authz/apps/browser.js' "$ADMIN_COOKIE"
 assert_contains_all "backspace-up returns focus to the folder just left" "$BODY" \
     "let pendingFocusName = ''" \
     "pendingFocusName = parts[parts.length - 1]" \
@@ -867,6 +881,12 @@ assert_contains_all "kbd hints document fullscreen and focus-back" "$BODY" \
     "焦点回到来源目录" \
     "in preview f toggles fullscreen" \
     "focus returns to the folder you left"
+request GET "$ADMIN_HOST" '/_authz/apps/i18n.js?v=58' "$ADMIN_COOKIE"
+assert_contains_all "kbd hints document volume stepping" "$BODY" \
+    "↑/↓ 音量 ±5%" \
+    "volume: '音量'," \
+    "up/down arrows volume ±5%" \
+    "volume: 'Volume',"
 request GET "$ADMIN_HOST" '/_authz/apps/menu-editor.html' "$ADMIN_COOKIE"
 assert_contains_all "menu editor renders service entries with edit and reset" "$BODY" \
     "window.adminApi.menuServices()" \
@@ -2839,8 +2859,12 @@ request GET "$ADMIN_HOST" /_authz/api/menu-tree "$ADMIN_COOKIE"
 assert_eq "menu tree loads" "$STATUS" "200"
 assert_json "menu tree seeds three groups" '.data.groups | length' "3"
 assert_json "first seeded group is system apps" '.data.groups[0].label' "系统应用"
-# nginxConf 是隐藏入口（迁移 v22 置 enabled=0，不在菜单渲染），系统应用剩 5 个
+# nginxConf 是隐藏入口（迁移 v22 置 enabled=0，不在菜单渲染）；迁移 v25 内置的
+# 「存储配置」又被 v27 隐藏（入口改由对象存储页的「配置」按钮进入），
+# 所以系统应用是 5 个可见内置页。
 assert_json "system group carries five built-in pages" '.data.groups[0].children | length' "5"
+assert_json "storage-configs entry is hidden from the menu tree" \
+    '[.data.groups[0].children[] | select(.builtin == "s3Configs")] | length' "0"
 assert_json "hidden nginx-conf entry is not rendered" '[.data.groups[0].children[] | select(.builtin == "nginxConf")] | length' "0"
 assert_json "file browser built-in is seeded" '[.data.groups[0].children[] | select(.builtin == "files")] | length' "1"
 assert_json "built-in item maps to internal page" '.data.groups[0].children[0].builtin' "users"
@@ -2852,6 +2876,8 @@ request GET "$ADMIN_HOST" /_authz/api/menu-entries "$ADMIN_COOKIE"
 assert_eq "menu entries list" "$STATUS" "200"
 assert_json "hidden nginx-conf entry stays manageable in the editor" \
     '[.data[] | select(.builtin == "nginxConf") | .enabled] | .[0]' "0"
+assert_json "hidden storage-configs entry stays manageable in the editor" \
+    '[.data[] | select(.builtin == "s3Configs") | .enabled] | .[0]' "0"
 assert_json "menu entries expose kind and parent" '.data[0] | has("kind") and has("sort_order") | tostring' "true"
 MENU_GROUP_ID=$(jq -er '.data[] | select(.kind == "group" and .label == "系统应用") | .id' "$TMP_DIR/body")
 assert_json "menu entries expose parent linkage" '[.data[] | select(.kind == "item")] | map(has("parent_id")) | all | tostring' "true"
@@ -3388,14 +3414,31 @@ request GET "$ADMIN_HOST" /_authz/api/s3 "$ADMIN_COOKIE"
 assert_eq "unconfigured S3 info answers 200" "$STATUS" "200"
 assert_json "unconfigured S3 reports enabled false" '.data.enabled | tostring' "false"
 # 带 bucket 但未配置仍回 enabled=false：/api/s3 的降级语义统一由信息接口表达，
-# 桶级写操作（share/upload/...）才用 423 + s3_disabled。
+# 桶级写操作（upload/...）才用 423 + s3_disabled。
 request GET "$ADMIN_HOST" "/_authz/api/s3?bucket=any-bucket&path=" "$ADMIN_COOKIE"
 assert_eq "unconfigured S3 bucket listing still degrades to info" "$STATUS" "200"
 assert_json "unconfigured bucket listing reports disabled" '.data.enabled | tostring' "false"
+# 分享功能（presigned GET）已整体下线：路由必须彻底不存在，而不是退化成 423。
 request GET "$ADMIN_HOST" "/_authz/api/s3/share?bucket=any&name=x.txt" "$ADMIN_COOKIE"
-assert_eq "unconfigured S3 share 423" "$STATUS" "423"
+assert_eq "retired share route answers 404" "$STATUS" "404"
 request GET "$ADMIN_HOST" /_authz/s3/any-bucket/some/key.txt "$ADMIN_COOKIE"
 assert_eq "unconfigured bytes proxy 423" "$STATUS" "423"
+# 存储配置清单（/api/s3-configs）与 ?cfg= 点名：纯 env 部署（表里无启用行且
+# AUTHZ_S3_ENDPOINT 未配置）下 items 是空数组 —— env 回落项只有在 endpoint 配了
+# 才存在（配了时回显成 id=0 / virtual=true，见 s3-live 段的同名断言）。
+request GET "$ADMIN_HOST" /_authz/api/s3-configs "$ADMIN_COOKIE"
+assert_eq "storage config list answers without S3" "$STATUS" "200"
+assert_json "unconfigured deployment lists no storage configs" '.data.items | length' "0"
+# 点名 env 虚拟 id（?cfg=0）的桶级操作必须区分「整套功能没开」与「我记的那套服务
+# 没了」：未配置时是 s3_disabled，不能报成 s3_config_missing。
+# /api/s3 对「整套未配置」（含点名 env 虚拟项 ?cfg=0）统一降级 200+enabled=false；
+# 真正要区分的是「点名了不存在/已禁用的配置」—— 必须报 423 s3_config_missing，
+# 前端才会回落默认项，而不是静默显示未配置。
+request GET "$ADMIN_HOST" "/_authz/api/s3?bucket=any-bucket&path=&cfg=0" "$ADMIN_COOKIE"
+assert_eq "env fallback ref on unconfigured deployment degrades to info" "$STATUS" "200"
+request GET "$ADMIN_HOST" "/_authz/api/s3?bucket=any-bucket&path=&cfg=no-such-store" "$ADMIN_COOKIE"
+assert_eq "named missing storage config reports its own code" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '.error.code' "$TMP_DIR/body")")" "423,s3_config_missing"
 request GET "$ADMIN_HOST" /_authz/api/s3
 assert_eq "S3 info requires a session" "$STATUS" "401"
 request GET "$ADMIN_HOST" /_authz/s3/any-bucket/some/key.txt
@@ -3427,6 +3470,132 @@ assert_contains_all "object storage page mounts the shared browser component" "$
 request GET "$ADMIN_HOST" /_authz/apps/files.html "$ADMIN_COOKIE"
 assert_contains_all "files page reuses the shared browser component" "$BODY" \
     "browser.js" "window.authzBrowser"
+fi
+
+section store
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE CSRF
+# ── 存储配置 / 上传流水 / 本机临时保存区（/api/s3-configs、/api/uploads、/api/store）
+# 本段刻意跑在「纯 env、没有任何 S3 配置」的主容器上：store 是本地磁盘区，
+# s3-configs 与 uploads 是账本接口，三者都不需要真实的对象存储服务。
+# 体积闸门分工（写侧）：nginx 在 router 所在 location 收 client_max_body_size 2048m，
+# api/services/store.lua 再按 MAX_BYTES=512MB 判 413，所以 1MB 请求体必须成功。
+STORE_MARKER="SECRET-MARKER-9d2f"
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name":"store-agent","role":"admin"}'
+assert_eq "store section creates its own admin key" "$STATUS" "201"
+STORE_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+STORE_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$CSRF" '{"name":"store-plain-agent","role":"api"}'
+assert_eq "store section creates a non-admin key" "$STATUS" "201"
+STORE_PLAIN_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+STORE_PLAIN_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+request GET "$ADMIN_HOST" /_authz/api/store/info
+assert_eq "store info is a machine key family endpoint" "$STATUS" "401"
+request GET "$ADMIN_HOST" /_authz/api/s3-configs
+assert_eq "storage config list requires a credential" "$STATUS" "401"
+
+# ── s3-configs：CRUD、密钥永不回显、停用后点名 423 ─────────────────
+request POST "$ADMIN_HOST" /_authz/api/s3-configs "$ADMIN_COOKIE" "$CSRF" \
+    "{\"name\":\"store-probe-cfg\",\"endpoint\":\"https://s3.invalid.test:9000\",\"region\":\"us-east-1\",\"access_key_id\":\"AKIDPROBE123\",\"secret_access_key\":\"$STORE_MARKER\",\"expires_hours\":0}"
+assert_eq "admin creates a storage configuration" "$STATUS" "201"
+STORE_CFG_ID=$(jq -er '.data.item.id' "$TMP_DIR/body")
+assert_not_contains "storage config create never echoes the secret" "$BODY" "$STORE_MARKER"
+assert_eq "storage config create records and masks the credentials" \
+    "$(jq -r '[(.data.item.has_secret | tostring), (.data.item.access_key_id_masked | test("\\*") | tostring)] | join(",")' "$TMP_DIR/body")" \
+    "1,true"
+request POST "$ADMIN_HOST" /_authz/api/s3-configs "$ADMIN_COOKIE" "$CSRF" \
+    "{\"name\":\"store-probe-cfg\",\"endpoint\":\"https://s3.invalid.test:9000\",\"region\":\"us-east-1\",\"access_key_id\":\"AKIDPROBE123\",\"secret_access_key\":\"$STORE_MARKER\"}"
+assert_eq "duplicate storage config name conflicts" "$STATUS" "409"
+request PATCH "$ADMIN_HOST" "/_authz/api/s3-configs/$STORE_CFG_ID" "$ADMIN_COOKIE" "$CSRF" '{"enabled":false}'
+assert_eq "storage config patch disables the row" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/s3-configs "" "" "" "$STORE_KEY_TOKEN"
+assert_json "disabled storage config is listed as disabled" \
+    '[.data.items[] | select(.id == '$STORE_CFG_ID') | .enabled] | first' "0"
+request GET "$ADMIN_HOST" "/_authz/api/s3?cfg=$STORE_CFG_ID" "$ADMIN_COOKIE"
+assert_eq "naming a disabled storage config reports missing" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '.error.code' "$TMP_DIR/body")")" "423,s3_config_missing"
+request DELETE "$ADMIN_HOST" "/_authz/api/s3-configs/0" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "env fallback config cannot be deleted" "$STATUS" "422"
+# 实测 DELETE 回的是 200 + {"data":{"deleted":true}}（不是 204）：本仓库所有
+# DELETE 端点都经 guard.result 走 JSON 信封，这里按实测口径钉住。
+request DELETE "$ADMIN_HOST" "/_authz/api/s3-configs/$STORE_CFG_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "deleting a storage config answers the json envelope" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '.data.deleted | tostring' "$TMP_DIR/body")")" "200,true"
+
+# ── store：写入、取回、路径防护、TTL、体积与删除 ────────────────────
+STORE_BODY="hello-from-store-$$"
+request PUT "$ADMIN_HOST" "/_authz/api/store?path=reports/ok.txt" "" "" "$STORE_BODY" "$STORE_KEY_TOKEN"
+assert_eq "save reports the relative path and a url" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '[.data.path, (.data.url | length > 0 | tostring)] | join(",")' "$TMP_DIR/body")")" \
+    "201,reports/ok.txt,true"
+request GET "$ADMIN_HOST" "/_authz/store/reports/ok.txt" "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "saved bytes come back unchanged" "$BODY" "$STORE_BODY"
+for store_bad_path in '../outside.txt' '/etc/passwd' '.upload-1-2-3' 'a/../../b'; do
+    request PUT "$ADMIN_HOST" "/_authz/api/store?path=$store_bad_path" "" "" "$STORE_BODY" "$STORE_KEY_TOKEN"
+    assert_eq "store rejects the unsafe path $store_bad_path" "$STATUS" "400"
+done
+request PUT "$ADMIN_HOST" /_authz/api/store "" "" "$STORE_BODY" "$STORE_KEY_TOKEN"
+assert_eq "store write without a path target" "$STATUS" "400"
+request PUT "$ADMIN_HOST" "/_authz/api/store?key=foo.txt" "" "" "$STORE_BODY" "$STORE_KEY_TOKEN"
+assert_eq "store write rejects the upload style key argument" "$STATUS" "400"
+request PUT "$ADMIN_HOST" "/_authz/api/store?path=e0.txt&expires_hours=0" "" "" "$STORE_BODY" "$STORE_KEY_TOKEN"
+assert_eq "zero expiry stores the file forever" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '.data.expires_at | tostring' "$TMP_DIR/body")")" "201,null"
+request PUT "$ADMIN_HOST" "/_authz/api/store?path=e1.txt&expires_hours=1" "" "" "$STORE_BODY" "$STORE_KEY_TOKEN"
+assert_eq "one hour expiry stores a deadline" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '.data.expires_at | type' "$TMP_DIR/body")")" "201,number"
+request PUT "$ADMIN_HOST" "/_authz/api/store?path=%E6%8A%A5%E5%91%8A/%E4%B8%AD%E6%96%87.md" "" "" "$STORE_BODY" "$STORE_KEY_TOKEN"
+assert_eq "multi level chinese path is stored unchanged" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '.data.path' "$TMP_DIR/body")")" "201,报告/中文.md"
+request GET "$ADMIN_HOST" /_authz/api/store/info "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "store info reports the enabled save area and its quota" \
+    "$(jq -r '[(.data.enabled | tostring), .data.max_bytes] | join(",")' "$TMP_DIR/body")" "true,536870912"
+head -c 1048577 /dev/zero | tr '\0' 'a' > "$TMP_DIR/store-big.bin"
+STORE_BIG_STATUS=$(curl -sS --max-time 20 --resolve "$ADMIN_HOST:$HTTP_PORT:127.0.0.1" \
+    -o "$TMP_DIR/body" -w '%{http_code}' -X PUT -H "x-api-key: $STORE_KEY_TOKEN" \
+    -H 'Content-Type: application/octet-stream' --data-binary "@$TMP_DIR/store-big.bin" \
+    "http://$ADMIN_HOST:$HTTP_PORT/_authz/api/store?path=big.bin")
+assert_eq "one megabyte body is accepted by the save area" "$STORE_BIG_STATUS" "201"
+
+# ── uploads：流水、状态过滤、权限与「清理只删到期项」────────────────
+request GET "$ADMIN_HOST" /_authz/api/uploads "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "machine key lists the upload ledger" "$STATUS" "200"
+assert_json "local save is recorded as a local ledger row" \
+    '[.data.items[] | select(.key == "reports/ok.txt") | .kind] | first' "local"
+request GET "$ADMIN_HOST" "/_authz/api/uploads?state=active" "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "ledger state filter returns only active rows" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '[.data.items[].state] | all(. == "active") | tostring' "$TMP_DIR/body")")" "200,true"
+request GET "$ADMIN_HOST" "/_authz/api/uploads?state=nonsense" "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "unknown ledger state is rejected" "$STATUS" "422"
+request GET "$ADMIN_HOST" /_authz/api/uploads "" "" "" "$STORE_PLAIN_KEY_TOKEN"
+assert_eq "upload ledger is admin only" "$STATUS" "403"
+# 取回出口的门禁与写入侧对齐（安全审查 P2）：files/s3 是给人浏览的内容，store 是
+# agent 中转区，普通登录用户/非 admin Key 猜到路径也不该读别人的中转正文。
+request GET "$ADMIN_HOST" "/_authz/store/reports/ok.txt" "" "" "" "$STORE_PLAIN_KEY_TOKEN"
+assert_eq "store bytes are admin-key only" "$STATUS" "403"
+request POST "$ADMIN_HOST" /_authz/api/s3-configs "$ADMIN_COOKIE" "$CSRF" \
+    "{\"name\":\"local-root-probe\",\"endpoint\":\"https://s3.invalid.test:9000\",\"access_key_id\":\"AKIDPROBE123\",\"secret_access_key\":\"$STORE_MARKER\",\"local_root\":\"data/../etc\"}"
+assert_eq "storage config rejects a traversal local_root" "$STATUS" "422"
+request POST "$ADMIN_HOST" /_authz/api/uploads/cleanup "$ADMIN_COOKIE" "" '{}'
+assert_eq "cleanup without CSRF is rejected" "$STATUS" "403"
+request POST "$ADMIN_HOST" /_authz/api/uploads/cleanup "" "" '{}' "$STORE_KEY_TOKEN"
+assert_eq "machine key runs a cleanup round" \
+    "$(printf '%s,%s' "$STATUS" "$(jq -r '.data.scanned | type' "$TMP_DIR/body")")" "200,number"
+request GET "$ADMIN_HOST" "/_authz/store/reports/ok.txt" "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "cleanup keeps an unexpired file" "$STATUS" "200"
+request DELETE "$ADMIN_HOST" /_authz/api/uploads/424242 "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "deleting an unknown upload record" "$STATUS" "404"
+request GET "$ADMIN_HOST" /_authz/store/reports/ok.txt
+assert_eq "anonymous visitors are sent to the login page" "$STATUS" "302"
+# 同上：保存区删除成功回 200 + {"data":{"removed":..,"path":..}}，不是 204。
+request DELETE "$ADMIN_HOST" "/_authz/api/store?path=big.bin" "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "machine key deletes a saved file" "$STATUS" "200"
+request GET "$ADMIN_HOST" "/_authz/store/big.bin" "" "" "" "$STORE_KEY_TOKEN"
+assert_eq "deleted file is gone from the public path" "$STATUS" "404"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$STORE_PLAIN_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "store section removes its non-admin key" "$STATUS" "200"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$STORE_KEY_ID" "$ADMIN_COOKIE" "$CSRF"
+assert_eq "store section removes its admin key" "$STATUS" "200"
 fi
 
 section s3-live
@@ -3506,6 +3675,15 @@ s3put() {
 }
 s3req GET /_authz/api/session "$S3_COOKIE"
 S3_CSRF=$(jq -er '.data.csrf' "$TMP_DIR/body")
+s3req GET /_authz/api/s3-configs "$S3_COOKIE"
+# env 那套 S3 在配置清单里是只读的 id=0 / virtual=true 回落项；它要求 AUTHZ_S3_ENDPOINT
+# 已配置，所以只能在本段（真实 S3 专用容器，或 TEST_ONLY=s3-live 单独选段）里验证；
+# 全量跑且未注入 AUTHZ_S3_TEST_* 时随本段一起跳过。
+assert_eq "env S3 fallback is virtual id zero with a masked key" \
+    "$(printf '%s,%s,%s' "$STATUS" \
+        "$(jq -r '[.data.items[0] | (.id == 0 and .virtual == true) | tostring] | first' "$TMP_DIR/body")" \
+        "$(jq -r '.data.items[0].access_key_id_masked | test("\\*") | tostring' "$TMP_DIR/body")")" \
+    "200,true,true"
 s3req GET /_authz/api/s3 "$S3_COOKIE"
 assert_eq "live S3 info 200" "$STATUS" "200"
 assert_json "live S3 enabled" '.data.enabled | tostring' "true"
@@ -3542,11 +3720,6 @@ DISP_HEADERS=$(curl -sS -D - --max-time 10 -o /dev/null \
 assert_contains "live download disposition" "$DISP_HEADERS" "Content-Disposition: attachment"
 s3req GET "/_authz/s3/$S3_B/..%2F..%2Fetc" "$S3_COOKIE"
 assert_eq "live bytes traversal rejected" "$STATUS" "404"
-s3req GET "/_authz/api/s3/share?bucket=$S3_B&path=$S3_P&name=hello.txt" "$S3_COOKIE"
-assert_eq "live share 200" "$STATUS" "200"
-S3_SHARE_URL=$(jq -er '.data.url' "$TMP_DIR/body")
-assert_eq "live presigned URL fetches" \
-    "$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$S3_SHARE_URL")" "200"
 s3put "$S3_P" "hello.txt" "$TMP_DIR/s3-hello.txt"
 assert_eq "live duplicate upload 409" "$STATUS" "409"
 s3put "$S3_P" "hello.txt" "$TMP_DIR/s3-hello.txt" "1"
@@ -4060,6 +4233,145 @@ done
 pass "concurrent rewrites stay within the worker buffer budget ($REWRITTEN rewritten, $SKIPPED degraded)"
 
 fi
+section app-domains
+if [[ "$SECTION_RUN" == "1" ]]; then
+ensure ADMIN_COOKIE
+# CSRF 必须在本段现取：前面 agent-key 段会重置 admin 密码并重新登录，
+# 沿用启动阶段的全局 $CSRF 会让本段所有写请求 403（会话与 token 不再匹配）。
+request GET "$ADMIN_HOST" /_authz/api/session "$ADMIN_COOKIE"
+APP_CSRF=$(jq -er '.data.csrf' "$TMP_DIR/body")
+# ── 内置应用保留前缀域名入口（file-<节点>.<域> → files 页面/:100，s3 → s3 页面/:101）──
+# 虚拟绑定：不查数据库、不占绑定表端口，认证与授权仍走网关那套（策略对象 /<端口><uri>）。
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$APP_CSRF" '{"name":"app-domains-admin","role":"admin"}'
+assert_eq "app-domains creates its admin key" "$STATUS" "201"
+APP_ADMIN_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+APP_ADMIN_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+request POST "$ADMIN_HOST" /_authz/api/api-keys "$ADMIN_COOKIE" "$APP_CSRF" '{"name":"app-domains-guest","role":"guest"}'
+assert_eq "app-domains creates its guest key" "$STATUS" "201"
+APP_GUEST_KEY_ID=$(jq -er '.data.id' "$TMP_DIR/body")
+APP_GUEST_KEY_TOKEN=$(jq -er '.data.token' "$TMP_DIR/body")
+
+# 管理员会话直达入口页：resolver 命中保留前缀 → 网关授权 → internal redirect 到页面。
+request GET file-235.example / "$ADMIN_COOKIE"
+assert_eq "files entry page reachable for admin" "$STATUS" "200"
+assert_contains_all "files entry page renders the files app" "$BODY" "<title>Files</title>" "az-authz-files"
+request GET s3-235.example / "$ADMIN_COOKIE"
+assert_eq "s3 entry page reachable for admin" "$STATUS" "200"
+assert_contains_all "s3 entry page renders the s3 app" "$BODY" "<title>S3</title>" "az-browser"
+# 裸前缀（不带节点后缀）同样命中。
+request GET file.example / "$ADMIN_COOKIE"
+assert_eq "bare files prefix host resolves" "$STATUS" "200"
+assert_contains "bare prefix serves the files page" "$BODY" "<title>Files</title>"
+# 页面引用的静态资源在同一入口域名下也按 /100 对象放行（admin 有 /*）。
+request GET file-235.example /_authz/apps/browser.js?v=14 "$ADMIN_COOKIE"
+assert_eq "entry page assets load for admin" "$STATUS" "200"
+# 机器 Key：admin Key 走网关授权 + 入口页标记直放。
+request GET file-235.example / "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "admin machine key opens entry page" "$STATUS" "200"
+assert_contains "admin key sees the files page" "$BODY" "<title>Files</title>"
+# 无任何凭证：网关层未认证 → 302 登录页（不是 404，说明保留前缀确实解析成功）。
+request GET file-235.example /
+assert_eq "anonymous entry page redirects to login" "$STATUS" "302"
+assert_contains "anonymous redirect targets the login page" "$(cat "$TMP_DIR/headers")" "/_authz/login"
+# guest Key：默认无策略 → 机器请求被拒 403；匿名静态资源 → 302。
+request GET file-235.example / "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest key without policy is forbidden on entry page" "$STATUS" "403"
+request GET file-235.example /_authz/apps/app.js "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest key without policy is forbidden on assets" "$STATUS" "403"
+request GET file-235.example /_authz/apps/app.js
+assert_eq "anonymous assets redirect to login" "$STATUS" "302"
+# 保留端口 100 < port_min(容器为 1000)：策略对象必须仍然可写（app_ports 白名单），
+# 这正是「可以单独做配置授权」的落点。
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$APP_CSRF" \
+    '{"ptype":"p","v0":"role:guest","v1":"/100/*","v2":"GET","eft":"allow"}'
+assert_eq "policy object accepts reserved port 100" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+APP_GUEST_POLICY_ID=$(jq -er '.data.policies[] | select(.v0 == "role:guest" and .v1 == "/100/*") | .id' "$TMP_DIR/body")
+request GET file-235.example / "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest key reaches entry page after policy" "$STATUS" "200"
+request GET file-235.example /_authz/apps/browser.js?v=14 "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest key loads entry assets after policy" "$STATUS" "200"
+# 入口策略只覆盖「页面资源」后缀：其它管理页 HTML 不在 /100 的授权面里，
+# 匿名请求仍回到会话鉴权（302 登录），不会被一条 /100/* 策略白送控制面骨架。
+request GET file-235.example /_authz/apps/users.html
+assert_eq "reserved grant does not expose other admin pages anonymously" "$STATUS" "302"
+request GET "$ADMIN_HOST" /_authz/apps/users.html "$ADMIN_COOKIE"
+assert_eq "other admin page still serves for a logged-in admin" "$STATUS" "200"
+request GET "$ADMIN_HOST" /_authz/api/files "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "reserved grant never opens the files API for guest" "$STATUS" "403"
+request GET s3-235.example / "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest policy on /100 does not open /101" "$STATUS" "403"
+# 数据库真实绑定优先于虚拟入口：显式绑定 file 前缀后接管。
+request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$APP_CSRF" \
+    "{\"domain\":\"file\",\"port\":$UPSTREAM_PORT,\"enabled\":true}"
+assert_eq "binding may take over the reserved prefix" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+APP_TAKEOVER_ID=$(jq -er '.data.bindings[] | select(.domain == "file") | .id' "$TMP_DIR/body")
+request GET file-235.example / "$ADMIN_COOKIE"
+assert_eq "explicit binding overrides the virtual entry" "$STATUS" "200"
+assert_eq "explicit binding proxies upstream" "$BODY" "$MOCK_BODY"
+request DELETE "$ADMIN_HOST" "/_authz/api/applications/$APP_TAKEOVER_ID" "$ADMIN_COOKIE" "$APP_CSRF"
+assert_eq "takeover binding removed" "$STATUS" "200"
+request GET file-235.example / "$ADMIN_COOKIE"
+assert_eq "virtual entry restored after binding removal" "$STATUS" "200"
+assert_contains "restored virtual entry serves the files page" "$BODY" "<title>Files</title>"
+# 保留端口禁止被绑定占用。
+request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$APP_CSRF" \
+    '{"domain":"appres.test.example","port":100}'
+assert_eq "binding cannot occupy reserved port 100" "$STATUS" "422"
+assert_contains "reserved port rejection names the reason" "$BODY" "为内置应用保留"
+# 前端提示数据：/api/authorization 回 app_entries（port 升序）。
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+assert_json "authorization payload lists app entries" '.data.app_entries | length' "2"
+assert_json "app entries expose ports below port_min" '.data.app_entries | map(.port) | @json' "[100,101]"
+assert_json "app entries carry prefix mapping" '[.data.app_entries[] | "\(.prefix)->\(.name)"] | @json' '["file->files","s3->s3"]'
+# 清理本段数据（Key/策略删除；guest Key 删除会连带失去 g 线）。
+request DELETE "$ADMIN_HOST" "/_authz/api/policies/$APP_GUEST_POLICY_ID" "$ADMIN_COOKIE" "$APP_CSRF"
+assert_eq "guest entry policy removed" "$STATUS" "200"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$APP_GUEST_KEY_ID" "$ADMIN_COOKIE" "$APP_CSRF"
+assert_eq "guest key removed" "$STATUS" "200"
+request DELETE "$ADMIN_HOST" "/_authz/api/api-keys/$APP_ADMIN_KEY_ID" "$ADMIN_COOKIE" "$APP_CSRF"
+assert_eq "admin key removed" "$STATUS" "200"
+
+# ── AUTHZ_APP_DOMAINS=0：虚拟入口整体回退 404（独立容器，参照 envkey 段做法）──
+APPDOM_CONTAINER_NAME="authz-gateway-appdom-test-$$"
+APPDOM_HTTP_PORT=$(free_port)
+APPDOM_HTTPS_PORT=$(free_port)
+mkdir -p "$TMP_DIR/appdom-data/authz"
+docker run -d \
+    --name "$APPDOM_CONTAINER_NAME" \
+    --network host \
+    -e NGINX_WORKER_PROCESSES=1 \
+    -e AUTHZ_HTTP_PORT="$APPDOM_HTTP_PORT" \
+    -e AUTHZ_HTTPS_PORT="$APPDOM_HTTPS_PORT" \
+    -e AUTHZ_HTTP_MODE=serve \
+    -e AUTHZ_ADMIN_PASSWORD=admin123 \
+    -e AUTHZ_PORT_MIN=1000 \
+    -e AUTHZ_PORT_MAX=65535 \
+    -e AUTHZ_APP_DOMAINS=0 \
+    -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
+    -v "$TMP_DIR/appdom-data:/data" \
+    -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+    "$IMAGE" >/dev/null
+for _ in $(seq 1 80); do
+    STATUS=$(curl -sS --max-time 2 --resolve "file-off.test.example:$APPDOM_HTTP_PORT:127.0.0.1" \
+        -o /dev/null -w '%{http_code}' "http://file-off.test.example:$APPDOM_HTTP_PORT/_authz/api/session" 2>/dev/null || true)
+    [[ "$STATUS" == "401" ]] && break
+    sleep 0.25
+done
+[[ "$STATUS" == "401" ]] || fail "app-domains disabled instance did not become ready"
+STATUS=$(curl -sS --max-time 5 --resolve "file-off.test.example:$APPDOM_HTTP_PORT:127.0.0.1" \
+    -o "$TMP_DIR/appdom-body" -w '%{http_code}' "http://file-off.test.example:$APPDOM_HTTP_PORT/")
+assert_eq "disabled app entries fall back to 404" "$STATUS" "404"
+assert_contains "disabled fallback shows the 404 page" "$(<"$TMP_DIR/appdom-body")" "未找到"
+docker exec "$APPDOM_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+docker rm -f "$APPDOM_CONTAINER_NAME" >/dev/null 2>&1 || true
+APPDOM_CONTAINER_NAME=""
+fi
+
 section envkey
 if [[ "$SECTION_RUN" == "1" ]]; then
 # ── 实例级预置 API Key（AUTHZ_API_KEY + x-api-key 免登录）──────────────

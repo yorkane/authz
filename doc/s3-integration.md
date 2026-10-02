@@ -7,20 +7,25 @@ S3 兼容服务变成管理界面里的一个浏览器应用。行为细节与�
 
 ## 1. 目标与边界
 
-- **凭证只在网关侧**：AKID/SECRET 由 `config.lua` 从环境变量读入，仅存在于
-  签名器内部；所有 API 与页面都不回显凭证。浏览器只拿会话（或 API Key）
+- **凭证只在网关侧**：AKID/SECRET 有两种来源——环境变量（`config.lua` 读入）或
+  `s3_configs` 表行（管理页写入，见 §3.1）。两者都只存在于签名器内部；所有 API 与
+  页面都不回显凭证（表行只回 `has_secret` + 掩码 AKID）。浏览器只拿会话（或 API Key）
   访问 `/_authz/api/s3*` 与 `/_authz/s3/<bucket>/<key>`，签名发生在网关 worker 内。
-- **未配置的降级语义**（`config.lua` 未设 `AUTHZ_S3_ENDPOINT` 时 `config.s3 == nil`）：
+- **配置优先级**：`s3_configs` 表里有「启用 + 字段合法」的行时，运行时以表为准；
+  表里一行可用配置都没有时才回落 `AUTHZ_S3_*`。取配置的唯一入口是
+  `s3_config_store`，任何地方都不许再直读 `config.s3`（那会让 `?cfg=` 与页面新建的
+  配置全部失效）。细节见 §3.1。
+- **未配置的降级语义**（表里没有可用行 **且** 未设 `AUTHZ_S3_ENDPOINT`）：
   - 菜单始终可见（迁移 `21:menu_entry_s3_browser` 无条件 seed 系统应用组下的
     「对象存储」入口，`admin_only=1`）；
   - `GET /api/s3`（含带 `bucket` 参数的列表请求）统一返回 `200` +
     `data.enabled=false`，前端据此显示「对象存储未配置」卡片——信息接口
     永远是 200，降级语义只由它表达；
-  - 其余桶级接口（`share`/`upload`/`rename`/`remove`/`mkdir`）与字节流
+  - 其余桶级接口（`upload`/`rename`/`remove`/`mkdir`）与字节流
     `/_authz/s3/...` 返回 `423`（`code=s3_disabled`）。写接口的
     认证/角色/CSRF 门禁先于 423 生效（403/401 优先）。
 - **权限模型**：只读的 `GET /api/s3`（info/list）对任何已登录非 guest 会话或
-  合法 API Key 开放；`GET /api/s3/share`（生成 presigned 链接）同样只读开放；
+  合法 API Key 开放；
   `upload`/`rename`/`remove`/`mkdir` 要求 `admin`：浏览器会话（写请求带
   `X-CSRF-Token`）**或** `admin` 角色机器 Key（`x-api-key`/`x-role-key`，
   guard 的 CSRF 判定只在「未呈现凭证头」时生效，机器 Key 天然免 CSRF）。
@@ -39,7 +44,6 @@ S3 兼容服务变成管理界面里的一个浏览器应用。行为细节与�
 | 文件 | 来源 |
 |------|------|
 | `lualib/resty/aws/request/signatures/v4.lua` | Kong/lua-resty-aws **1.7.2（commit a73c39c）**，Apache-2.0 |
-| `lualib/resty/aws/request/signatures/presign.lua` | 同上 |
 | `lualib/resty/aws/request/signatures/utils.lua` | 同上 |
 | `lualib/resty/aws/LICENSE.lua-resty-aws` | 上游 LICENSE 副本 |
 
@@ -62,7 +66,10 @@ ListObjectsV2 就得拖进 Penlight + luatz + luaexpat（68 个文件约 1.4MB�
 凭证注入是 `s3.lua` 里手写的静态 `credentials(cfg)` 对象（`get()` 直接返回
 AKID/SECRET），`signatureVersion="s3"`、`endpointPrefix="s3"`。
 
-## 3. 环境变量（`config.lua`，启动期校验）
+## 3. 环境变量（回落默认配置，`config.lua` 启动期校验）
+
+本节全部变量现在只是**回落默认配置**：`s3_configs` 表里有可用行时它们不参与选路
+（只有超时/连接池与 `AUTHZ_HOST_LAN_IP` 例外，见 §3.1）。表结构与管理接口见 §3.1。
 
 | 变量 | 默认 | 含义 / 约束 |
 |------|------|------------|
@@ -72,12 +79,10 @@ AKID/SECRET），`signatureVersion="s3"`、`endpointPrefix="s3"`。
 | `AUTHZ_S3_SECRET_ACCESS_KEY` | 空 | endpoint 已设时必填（不得含空白/控制字符） |
 | `AUTHZ_S3_ALLOW_HTTP` | `false` | endpoint 为明文 `http` 时必须显式置 `true`，否则**启动报错**（防止误以为在走 TLS） |
 | `AUTHZ_S3_TMP_DIR` | `/data/s3tmp` | 上传中转暂存目录（容器内路径，需可写；与 `/data` 同卷最省 IO）。`docker-entrypoint.sh` 在 endpoint 已设时自动 `mkdir -p`；即使 entrypoint 是旧版或目录运行期被清掉，上传路径每次也会先逐级自建（见 §6.k） |
-| `AUTHZ_S3_WRITABLE_PATHS` | 空（= 默认 `share/<本机局域网 IP>`，见 `AUTHZ_S3_SHARE_ROOT`） | **可写范围白名单**（逗号分隔）。上传/建目录/重命名/删除只允许落在范围内；范围外一律只读（仍可浏览、预览、下载、分享）。条目语义：`noco`=整桶、`noco/rpa`=该桶内前缀、`*/docs`=任意桶内前缀、无分隔符条目（如 LAN IP）=同名整桶或任意桶内该路径前缀。`/` 或 `*` = 全部可写；条目含 `..`/控制字符/`?`/`#` 启动报错 |
+| `AUTHZ_S3_WRITABLE_PATHS` | 空（= 默认 `share/<本机局域网 IP>`，见 `AUTHZ_S3_SHARE_ROOT`） | **可写范围白名单**（逗号分隔）。上传/建目录/重命名/删除只允许落在范围内；范围外一律只读（仍可浏览、预览、下载）。条目语义：`noco`=整桶、`noco/rpa`=该桶内前缀、`*/docs`=任意桶内前缀、无分隔符条目（如 LAN IP）=同名整桶或任意桶内该路径前缀。`/` 或 `*` = 全部可写；条目含 `..`/控制字符/`?`/`#` 启动报错 |
 | `AUTHZ_S3_SHARE_ROOT` | `/share/` | 对象存储内的**挂载根**（归一化去首尾 `/`）。默认场景的可写前缀 = `<share 根去斜杠>/<本机 LAN IP>`（如 `share/10.252.25.241`）：桶根与挂载祖先只读，该前缀及其子目录可写。LAN IP 探测失败（且 `AUTHZ_HOST_LAN_IP` 未设）时默认场景整体降级只读，该前缀不出现在 `writable_roots`，`GET /api/s3` 的 `share_prefix` 回显 `null` |
 | `AUTHZ_S3_SHARE_BUCKET` | 空（= 任意桶） | 非空时 share 前缀**只在该桶**生效，其他桶不存在默认可写前缀；info 的 `share_bucket` 原样回显 |
 | `AUTHZ_HOST_LAN_IP` | 空（= 自动探测） | 覆盖「本机局域网 IP」的探测值（非 host 网络或测试用）。探测用 FFI UDP connect 到保留地址选路由源地址，不发包；探测失败且未设本变量时**整体降级为只读**并告警 |
-
-| `AUTHZ_S3_SHARE_TTL` | `3600` | 分享 presigned URL 有效期（秒），钳制在 **60–604800** |
 | `AUTHZ_S3_CONNECT_TIMEOUT_MS` | `2000` | 建连超时（毫秒，下限 50） |
 | `AUTHZ_S3_SEND_TIMEOUT_MS` | `30000` | 发送超时（毫秒，下限 200） |
 | `AUTHZ_S3_READ_TIMEOUT_MS` | `30000` | 读取超时（毫秒，下限 200）；同时作为签名器 `config.timeout` |
@@ -93,16 +98,81 @@ compose 与 `.env.example` 已列出全部超时项；`config.lua` 对每个数�
 下限钳制，非法值回落默认。`AUTHZ_S3_ENDPOINT` 会回显给
 管理页面（`/api/s3` 的 `endpoint` 字段，便于排障），凭证不回显。
 
+### 3.1 env 回落 + DB 多配置（`s3_configs` 表）
+
+一套 env 只能指向一个 S3 服务，多服务只能在页面维护。迁移 `23:s3_configs` 建表，
+一行 = 一套服务；`lualib/resty/authz/s3_config_store.lua` 是唯一的取配置入口，
+把「表行」与「env 默认项」统一变成与既有 `config.s3` 同构的 cfg 表交给
+`s3.lua` / `s3_proxy.lua` / 清理器消费。
+
+**优先级**（`s3_config_store.get(ref)`）：
+
+| `ref` | 解析结果 |
+|-------|----------|
+| 不传 / 空 | `is_default=1` 且 `enabled=1` 的行 → id 最小的 enabled 行 → env 回落项 |
+| 数字或 `cfg:<id>` | 按 id（`0` / `cfg:0` 在 router 侧翻成按名字点 `env`） |
+| 其它字符串 | 按 `name`，最后再试一次 `env`（纯 env 部署里 `?cfg=env` 必须可用） |
+
+取不到分两类，状态码不同：`missing`（无此行/已禁用）与 `disabled`（表空且 env 也没配）
+→ `423`；`invalid`（行存在但字段写坏）→ `502` + 原因。**行路径永不 `error()`**：
+一行被写坏只让这一套配置不可用，不像 env 路径那样启动期 fail-fast 拖垮容器。
+
+**表覆盖 env 的判据是「有没有可用行」**，不是「有没有默认行」；所以只要页面上加了
+一行并启用，env 那套就不再是默认项，且不再出现在对象存储页的下拉里（避免多出一个
+「谁都不知道还作不作数」的幽灵选项）。列表接口（`GET /api/s3-configs`）仍会把 env
+项作为 `id=0`、`virtual=true` 的只读行给出来，除「设为默认」（no-op 成功）外
+编辑/删除一律 `422`。
+
+**改表即生效，不需要 reload**：行数据走 mlcache（`AUTHZ_DB_CACHE_TTL`，默认 30s），
+派生结果（endpoint 解析 + 可写范围 parse）缓存在 worker 本地表并以
+`ngx.shared.authz_cache` 的 `db_rev` 判活，任何写库都会 bump revision，所以通常写完
+下一个请求就生效，最坏 30 秒。
+
+**实例级参数不从 env 继承**：`s3_config_store.from_row` 里
+
+| 字段 | 表行的取值口径 |
+|------|----------------|
+| `allow_http` | 只按行自身，**不继承** env。它是「明文 http 是否可信」的安全开关，若被 env 隐式打开，等于 env 恰好用 http 时页面新增的任意配置都自动允许明文且关不掉。后果：http 部署里新增 http 配置必须显式勾选，否则该配置报错不可用（刻意的显式确认） |
+| `*_TIMEOUT_MS` / `KEEPALIVE_MS` | 一律取 env（超时是实例级调优，不按配置行各来一套） |
+| `region` | 行内值，留空回落 env 的 region |
+| 可写范围 | 行内 `writable_paths` 留空 → 默认条目 `share/<本机 LAN IP>`（与 env 同一套语义，见 §3；探测失败降级只读并告警） |
+| `expires_hours` / `use_bucket_lifecycle` / `default_bucket` / `local_root` | 纯新增列，env 侧没有对应项（回落项的这三项恒为 0 / 0 / 空 / 空） |
+
+**凭证纪律**（本仓库首例明文密钥入库，理由见 `db/migrations.lua` v23 注释）：
+SigV4 要拿 `secret_access_key` 原文参与签名，摘要无法还原，所以只能存明文。
+补偿约束：
+
+- 回显只走 `repository/s3_configs.lua` 的 META 列集合（SQL 层就不选 `secret_access_key`，
+  `has_secret` 由 SQL 算出来），接口层再叠加 `mask_akid`（AKID 只留前 4 位）；
+  含明文的 `*_full` / `enabled_rows` 唯一合法消费者是 `s3_config_store.build_map`；
+- `PATCH` 的凭证字段「空 = 不修改」，校验时用哨兵 `unchanged` 满足 build_s3 的非空判据，
+  该哨兵不会被写进任何其他地方；
+- **备份会连带复制密钥**：`azops backup` / `cp data/authz/authz.db` 出来的文件含明文
+  S3 密钥，必须按含密介质处理（详见 `deploy.md` 第 6 节与 `docs/maintenance-handbook.md`）。
+
+**管理接口**：契约见 `docs/core-api.md` §6.2，页面是「系统应用 → 存储配置」
+（`admin/s3-configs.html`，迁移 `25:menu_entry_s3_configs` seed，`admin_only=1`）。
+
+**表行独有的列**（env 侧没有等价物）：`expires_hours`、`use_bucket_lifecycle`（见 §9）、
+`default_bucket`（**当前只落库与回显，前端尚未消费**——浏览页记住的仍是
+`localStorage authz_s3_bucket`）、`local_root`（该服务配套的本地中转目录，空 = 用全局保存区
+`AUTHZ_STORE_DIR`，清理器按行取值；接口可写但回显 item 里没有该字段）、`note`。
+
 ## 4. API 一览（全部在 `router.lua` 注册，前缀 `/_authz/api`）
 
 统一响应形状：成功 `{"data": ...}`，失败 `{"error":{"code","message"}}`。
+
+**每个接口都多了一个选配置的入参** `cfg`（query `?cfg=<id|cfg:id|name|env>`，
+JSON body 端点也可以放 body 的 `cfg` 字段——前端 `admin/api.js` 的 `appendCfg` 两个位置
+都塞，服务端归一化在 `router.lua` 的 `s3_config_by_ref`）：不传 = 默认项。
+URL 形态 `/_authz/s3/<bucket>/<key>` 保持不变，多配置只靠 query 区分。
 
 写接口（upload/mkdir/rename/remove）先过 `s3_scope` 可写范围白名单（见 §3
 `AUTHZ_S3_WRITABLE_PATHS`）：范围外一律 `403` + `code=s3_read_only`。
 判定口径：upload 看当前目录（dir 语义）；mkdir 看目标目录自身（允许在只读
 父目录下首次创建范围内的目录）；rename **源 key 与目标 key 都要单独判一次**
 （跨目录移动时目标 key 按 `new_path` 拼，见下），
-remove 看目标条目（item 语义）。只读接口（列表/share/字节流）不受影响。
+remove 看目标条目（item 语义）。只读接口（列表/字节流）不受影响。
 
 **auto-mkdir（默认 share 挂载祖先的自动补建）**：默认场景下可写前缀是
 `share/<本机 LAN IP>`（`AUTHZ_S3_SHARE_ROOT` + `AUTHZ_HOST_LAN_IP` 拼出），挂载
@@ -174,16 +244,6 @@ query `mkdir=1`、`POST /api/s3/mkdir` 带 body 字段 "mkdir": 1 时，若请�
 - `recursive: true`：分批 DeleteObjects（每批 ≤1000）+ 目录标记逐个单 DELETE，
   200：`data = { removed: <数量>, errors: [...] }`（部分失败必须可见）。
 
-### `GET /api/s3/share`（只读）
-
-- 查询参数 `bucket`、`path`、`name`、可选 `download=1`。
-- 200：`data = { url, expires_in }`；`url` 是 presigned GET（签名在 query，
-  到期自动失效），有效期 = `AUTHZ_S3_SHARE_TTL`。
-- 永远带 `response-content-type` + `response-content-disposition`：
-  存储端不持久化 Content-Type（全是 octet-stream），不覆盖的话浏览器
-  只会当二进制下载，图片/视频无法内联。`download=1` 时 disposition=attachment、
-  type=octet-stream，否则 inline + 按扩展名推断的类型。
-
 ### 字节流 `GET|HEAD /_authz/s3/<bucket>/<key>`（`s3_proxy.lua`）
 
 - 认证与 `/_authz/files/` 同款（nginx access 门：会话或合法非 guest API Key，
@@ -212,24 +272,37 @@ query `mkdir=1`、`POST /api/s3/mkdir` 带 body 字段 "mkdir": 1 时，若请�
   **共享浏览器组件**（挂载为 `window.authzBrowser`，模板 `<az-browser :adapter>`）：
   网格/列表视图、排序搜索、分页/加载下一页、图片/音频/视频/HTML/文本预览、
   键盘导航（预览浮层内 `f` 切全屏、`Backspace` 返回后焦点落在刚离开的目录上）、
-  预览区手势、拖拽上传、重命名、删除、mkdir、分享等交互逻辑全在组件内；
+  预览区手势、拖拽上传、重命名、删除、mkdir 等交互逻辑全在组件内；
   组件不引入任何新依赖，复用页面已加载的 Vue/Quasar/adminApi/adminI18n。
-- 宿主页只提供 **adapter**（`list/upload/mkdir/rename/remove/itemUrl/itemPath/shareUrl`
+- 宿主页只提供 **adapter**（`list/upload/mkdir/rename/remove/itemUrl/itemPath`
   + `storagePrefix`/`i18nRoot`/`supportsMkdir`/`rootLabel`）与页面外壳：
   - `admin/files.html` 瘦身为外壳 + files 端点 adapter（`/_authz/files*`），
     `files.css` 只剩页特有规则（当前为空壳，样式全走 `browser.css`）；
   - `admin/s3.html` + `s3.css` 是 S3 外壳：未配置卡片、桶选择器（工具栏插槽，
-    记住上次桶在 `localStorage authz_s3_bucket`）、S3 adapter
-    （`/_authz/api/s3*`，对象 URL 为 `/_authz/s3/<bucket>/<key>`）。
+    记住上次桶在 `localStorage authz_s3_bucket`）、**存储服务选择器**（多配置，见下条）、
+    S3 adapter（`/_authz/api/s3*`，对象 URL 为 `/_authz/s3/<bucket>/<key>`）。
+  - `admin/s3-configs.html` + `s3-configs.css` 是「存储配置」管理页（不在
+    `browser.js` 组件之内）：上半区 `s3_configs` 行的 CRUD + 连通性测试 + 设为默认
+    + 启停，下半区上传流水与「立即清理」。凭证字段只在填了才发（PATCH 空 = 不改）。
+- **多配置选择器**：工具栏的「存储服务」下拉取 `GET /api/s3` 新增的 `data.configs`
+  （缺失时另拉 `GET /api/s3-configs`，两个入口同源），值优先用 `id`；选中值记在
+  `localStorage authz_s3_cfg`，并拼进 adapter 的**每个**请求（列表/上传/mkdir/
+  rename/remove 与条目 URL 的 `?cfg=`）。info 返回后用 `data.cfg`（后端本次
+  实际生效的配置）对齐本地选择，记住的 cfg 指向已删/已停用的服务时回落默认项重载一次。
+  env 回落项在下拉里是 `id=0`/`virtual=true` 的只读行。
 - i18n：`admin/i18n.js` 新增 `browser` 块（组件通用文案打底）与 `s3` 块
-  （页面特有部分：未配置文案、桶选择、分享），`menu.s3` = 对象存储 /
+  （页面特有部分：未配置文案、桶选择），`menu.s3` = 对象存储 /
   Object Storage。文案合并规则 = browser 块打底、页面块覆盖同名键。
 - 路由：`admin/app.js` 的 builtin 映射加 `s3: 's3.html?v=1'`；菜单由迁移
   `21:menu_entry_s3_browser` 写入 `menu_entries`（系统应用组，label=对象存储，
   icon=mdi-bucket，`builtin='s3'`，`admin_only=1`，sort_order=17）。
+  多配置上线后再加 `s3Configs: 's3-configs.html?v=1'`，菜单入口由迁移
+  `25:menu_entry_s3_configs` seed（系统应用组，label=存储配置，icon=mdi-cloud-cog，
+  `builtin='s3Configs'`，`admin_only=1`，sort_order=18）：这个页面能编辑明文入库的
+  S3 凭证，与「对象存储」「Nginx配置」同级，不给 staff 看到。
 - **只读范围（写白名单）**：s3 adapter 声明 `supportsWritable: true` 后，
   组件按 `GET /api/s3` 的 `data.writable`（当前目录）与 `items[].writable`
-  （每个条目）隐藏上传/新建目录/重命名/删除入口，只留下载/分享/预览；
+  （每个条目）隐藏上传/新建目录/重命名/删除入口，只留下载/预览；
   范围外条目名旁显示 `mdi-lock`，目录只读时顶部一条 banner。files 页不声明
   该属性 → 恒可写，行为不变。后端仍独立 403（`s3_read_only`），前端只是省点击。
 - **share 挂载默认值**：info（不带 bucket 的 `GET /api/s3`）回显 `share_prefix`
@@ -244,10 +317,12 @@ query `mkdir=1`、`POST /api/s3/mkdir` 带 body 字段 "mkdir": 1 时，若请�
   `/_authz/apps/browser.js`（逻辑移进了共享组件），`section s3` 同时断言
   s3 页与 files 页都挂载 `window.authzBrowser`。
 - 静态资源版本号（`?v=`，改动即递增；回归按当前版本号拉文件做断言）：
-  `api.js` **v22**、`i18n.js` **v53**、`app.js` **v27**、`app.css` **v13**、
-  `app-page.css` **v16**、`files.css` **v10**、`s3.css` / `nginx-conf.css` /
-  `mdi-names.js` **v1**、`browser.js` **v13**、`browser.css` **v4**；页面自身版本
-  由 `admin/app.js` 的 builtin 映射引用：`files.html` **v19**、`s3.html` **v4**、
+  `api.js` **v23**、`i18n.js` **v54**、`app.js` **v28**、`app.css` **v13**、
+  `app-page.css` **v16**、`files.css` **v10**、`s3.css` **v2**、
+  `s3-configs.css` / `nginx-conf.css` / `mdi-names.js` **v1**、`browser.js` **v13**、
+  `browser.css` **v4**；页面自身版本
+  由 `admin/app.js` 的 builtin 映射引用：`files.html` **v19**、`s3.html` **v5**、
+  `s3-configs.html` **v1**、
   `authorization.html` **v16**、`menu-editor.html` **v11**、`users.html` **v7**、
   `nginx_conf.html` **v2**。
 
@@ -295,7 +370,7 @@ f. **DeleteObjects 跳过 `/` 目录标记**：批量删会清掉真对象却把
 g. **bucket 列表能力探测的降级路径**：`GET /api/s3`（含带 bucket 的列表请求）
    未配置时统一 200 + `enabled=false`，**不**返回 423——前端需要
    `enabled:false` 才能渲染「未配置」卡片；423 只留给桶级操作
-   （share/upload/rename/remove/mkdir 与字节流）。回归测试断言以该行为为准。
+   （upload/rename/remove/mkdir 与字节流）。回归测试断言以该行为为准。
 
 h. **klib.router 只转发 2 个返回值**：handler 里 `return nil, err, status`
    三值返回会把 err 文案当成状态码（实测变空 200）。三值错误必须包成
@@ -333,7 +408,7 @@ l. **不支持条件请求，网关不得转发 ETag/Last-Modified**：该服务
 ## 7. 活体测试（`test/test_authz_gateway.sh`）
 
 - `section s3`（**始终运行**）：未配置降级语义
-  （info 200+enabled=false、带 bucket 同样降级、share/字节流 423）、
+  （info 200+enabled=false、带 bucket 同样降级、字节流 423）、
   未登录 401/302、无 CSRF 403、**admin 机器 Key 免会话抵达写接口**（未配置时
   表现为 423 s3_disabled，证明门禁放行）、**非 admin 角色 Key 仍 403**、
   菜单 seed（builtin=s3、label=对象存储）、s3.html 与 files.html
@@ -341,7 +416,7 @@ l. **不支持条件请求，网关不得转发 ETag/Last-Modified**：该服务
 - `section s3-live`（需真实服务）：临时起一个带 S3 env 的
   网关容器，跑完整生命周期——info/桶列表、上传 201、列表命中、字节回读
   （含 Content-Type 与 sandbox CSP）、Range 206、`?download=1` 的
-  Content-Disposition、路径穿越 404、presign 链接可直取 200、同名 409、
+  Content-Disposition、路径穿越 404、同名 409、
   覆盖 201、rename、mkdir 显示为目录、子目录上传、非空目录删 409、
   递归删除、清理后前缀为空（空前缀列表必须 200：array_data 把空 items 换成 cjson.empty_array 后不能再 ipairs，否则整个请求 500）、字节响应不带 ETag/Last-Modified
   - **跨目录移动（`new_path`）**：纯移动（`new_name`=`name`）与「移动 + 改名」各自
@@ -379,14 +454,64 @@ bash test/test_authz_gateway.sh
   暂存目录与 `/data` 同卷时最省 IO，独立小盘会先爆盘再报错。
   单文件 2GB 上限、单次 64 个文件；更大文件理论可走 S3 multipart upload，
   本版未实现（直接跳过并说明原因）。
-- **无版本化 / 无生命周期**：重命名 = Copy + Delete，复制成功但删除失败时
+- **无版本化**：重命名 = Copy + Delete，复制成功但删除失败时
   会留两份并明确报错；删除不可恢复（递归删除前必须显式勾选）。
-- **presign 链接最长 7 天**（`AUTHZ_S3_SHARE_TTL` 钳制 60–604800），
-  且链接是明文 HTTP 的直链，有效期内任何拿到 URL 的人可读该对象
-  （不带网关认证）；分享即等于交出该对象。
+  「无生命周期」这条已经不再成立：网关侧有 DB 记账 + 每小时定时清理器（§9），
+  存储端 lifecycle 仍然只在显式勾选 `use_bucket_lifecycle` 时才由桶规则负责。
+  注意 rename/move 只给**源** key 闭账，不给目标 key 补新流水（目标的字节不是本
+  网关写入的，没有可信 size/归属）——目标对象因此不在 TTL 队列里，回收交给桶生命周期
+  或下一次经本网关的上传记账，这是已知缺口。
 - **不做服务端加密**：网关不做额外加密层，对象以服务端原样存储。
 - **存储端不持久化 Content-Type**：永远存成 octet-stream，预览/下载的类型
   全靠网关按扩展名推断；上传时给的 `Content-Type` 头只是装饰。
 - 换用标准 AWS S3 时，§6 的坑大多不适用，但 vendored 签名器、
   UNSIGNED-PAYLOAD 补丁与本服务的 list/delete 语义仍按本服务的契约实现，
   直接互换 endpoint 前应先重跑一遍 probe 契约。
+
+## 9. 上传记账与小时级过期清理（`upload_records` + `maintenance.lua`）
+
+**为什么要自己记账**：S3 官方 bucket lifecycle 的粒度只到**天**，而且执行是异步的
+（规则命中后由存储端在不确定时间后台删），做不了「上传 6 小时后必须消失」这种需求。
+所以小时级过期只能走 DB 记账 + 网关自己的定时器；存储端生命周期规则仍然可用，
+两种模式由每套配置各自勾选，互不打架。
+
+迁移 `24:upload_records` 建流水账表，每次经网关写入都记一行：
+
+| 列 | 口径 |
+|----|------|
+| `kind` | `s3` = 对象存储对象（按 `cfg_id` 找回配置删对象）；`local` = 本机保存区文件（`key` 存相对路径） |
+| `cfg_id` | 关联 `s3_configs.id`；**NULL = 当时用的是 env 回落配置**（不加外键：配置行删了流水必须留着可审计，且记账时 env 项的虚拟 id=0 必须写 NULL，否则 `cfg_id=0` 指向不存在的行会被判孤儿） |
+| `expires_at` | NULL = 永不过期（不入队）；非 NULL 必须**整点对齐**（`s3_config_store.align_expiry`：`floor(now/3600)*3600 + n*3600`）。对齐才能保证「同一小时写入的一批在同一小时被删」，不让索引区间扫退化成一堆边界行 |
+| `state` | `active`（待删）→ `deleted`（删成功）→ `failed`（删除报错或成孤儿，`last_error` 记原因，**不再重试**，是「要人工看一眼」的信号）；`skipped` = 该配置勾了 `use_bucket_lifecycle`，只记账不删，不进队列 |
+| `source` / `created_by` | 浏览器会话上传记 `upload`、机器 Key 记 `api`/`multipart`；`created_by` 存身份名，可审计 |
+
+清理器 `lualib/resty/authz/maintenance.lua` 每小时跑一轮（`GC_INTERVAL=3600`，
+启动后 `GC_DELAY=60` 跑第一轮，单轮上限 `MAX_PER_ROUND=500` 行，剩下下一轮继续）：
+
+- **单 owner**：`init_worker_by_lua_block` 里每个 worker 都调 `start()`，用共享字典
+  `authz_cache` 的原子 `add` 抢 owner 锁（TTL = 一轮间隔，每轮续期），只有抢到的 worker
+  挂定时器。owner worker 崩掉后由 **worker 0** 检查 `/proc/<pid>` 判活并接管（限定单一
+  候选者是因为共享字典没有 CAS，`delete + add` 不原子，两个 worker 同时接管会各跑一份）；
+  接管不了就最坏空转一小时。手动触发清理调 `cleanup()`（纯函数），**不要调 `tick()`**
+  （它会种下第二个每小时循环）。
+- HTTP 删除全部在事务**之外**做，状态回填攒到最后一次 `db.transaction` 提交
+  （事务里持有写锁跨网络请求 = 长事务；且每跑一次 `db.exec` 就 bump 一次 `db_rev`，
+  逐行 UPDATE 会把 mlcache 键刷爆）。
+- 同配置同桶的行攒成一批走 `DeleteObjects`；`local` 行逐条删（无批量接口）。
+- 顺带扫上传暂存残留（`.upload-` / `.s3-upload-` / `.tmp-` / `tmp-` 前缀，
+  mtime 超过 6 小时才算残留；`AUTHZ_S3_TMP_DIR`、`/data/s3tmp` 字面值、
+  `AUTHZ_FILES_ROOT`、保存区四处都扫，单层、不跟随符号链接）。
+
+`expires_hours` 与 `use_bucket_lifecycle` 都是**每套配置各自一份**的字段：
+前者是小时数（0 = 永不过期，上限 8760）；后者为真时新流水一出生就是 `skipped`，
+清理器也会跳过它（重复删反而和桶规则打架），但 `DELETE /api/uploads/:id` 这类
+明确的人工意志照删。
+
+**记账永不改变上传结果**：对象已经写成功，流水只是账本，所以记账整段 `pcall` +
+失败只 `ngx.log(WARN)`。反过来「账没闭上」是可见的（`502` + 原因），不静默。
+
+配置行被删除时的处理：该配置下仍处于 `active` 的流水当场标 `failed` +
+`last_error='config removed'`（凭证已消失，对象再也删不到，但记录保留可审计）；
+只是被禁用（`enabled=0`）不算孤儿，重新启用后仍能删。
+
+接口与手动触发方式见 `docs/core-api.md` §6.3。

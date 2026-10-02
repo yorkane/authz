@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>S3 Configs</title>
+  <link rel="stylesheet" href="./vendor/quasar-umd.css?v=3.5.41-2.26.0-2">
+  <link rel="stylesheet" href="./app-page.css?v=16">
+  <link rel="stylesheet" href="./s3-configs.css?v=2">
+</head>
+<body>
+  <!-- 薄壳独立页：菜单入口已在迁移 v27 隐藏（改由对象存储页工具栏「配置」进入
+       页内配置视图），但 /_authz/apps/s3-configs.html 直链与历史链接仍要能用，
+       所以保留本页并直接挂载共享组件。全部逻辑在 s3-configs.js。 -->
+  <div id="q-app">
+    <az-s3-configs></az-s3-configs>
+  </div>
+
+  <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
+  <script src="./api.js?v=24"></script>
+  <script src="./i18n.js?v=58"></script>
+  <script src="./s3-configs.js?v=1"></script>
+  <script>
+    const app = Vue.createApp({})
+    app.component('AzS3Configs', window.authzS3Configs.component)
+    app.use(Quasar, { config: { dark: true } })
+    Quasar.Dark.set(true)
+    Quasar.Lang.set(window.adminI18n.getLocale() === 'en-US' ? Quasar.Lang.enUS : Quasar.Lang.zhCN)
+    Quasar.IconSet.set(Quasar.IconSet.mdiV7)
+    app.mount('#q-app')
+  </script>
+</body>
+</html>

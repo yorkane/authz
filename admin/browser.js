@@ -84,10 +84,6 @@
     {{ error }}
     <template v-slot:action><q-btn flat dense no-caps :label="t.retry" @click="load"></q-btn></template>
   </q-banner>
-  <q-banner v-if="!dirWritable" rounded class="q-mb-md" dense>
-    <template v-slot:avatar><q-icon name="mdi-lock-outline"></q-icon></template>
-    {{ t.readOnlyDir }}
-  </q-banner>
   <q-banner v-if="truncated" rounded class="q-mb-md" dense>
     <template v-slot:avatar><q-icon name="mdi-information-outline"></q-icon></template>
     {{ t.truncated }}
@@ -140,7 +136,6 @@
             <q-menu auto-close>
               <q-list dense class="files-item-menu">
                 <q-item v-if="item.type !== 'dir'" clickable v-close-popup @click="download(item)"><q-item-section side><q-icon name="mdi-download" size="18px"></q-icon></q-item-section><q-item-section>{{ t.download }}</q-item-section></q-item>
-                <q-item v-if="adapter.shareUrl" clickable v-close-popup @click="share(item)"><q-item-section side><q-icon name="mdi-link-variant" size="18px"></q-icon></q-item-section><q-item-section>{{ t.share }}</q-item-section></q-item>
                 <q-item v-for="action in (adapter.extraActions || [])" :key="action.label" clickable v-close-popup @click="action.onClick(item)"><q-item-section side><q-icon :name="action.icon || 'mdi-dots-vertical'" size="18px"></q-icon></q-item-section><q-item-section>{{ action.label }}</q-item-section></q-item>
                 <q-item v-if="itemWritable(item)" clickable v-close-popup @click="startRename(item)"><q-item-section side><q-icon name="mdi-rename-box" size="18px"></q-icon></q-item-section><q-item-section>{{ t.rename }}</q-item-section></q-item>
                 <q-separator></q-separator>
@@ -170,7 +165,6 @@
         <q-btn flat dense no-caps icon="mdi-content-copy" :label="t.copyPath" @click="copyPath(focused)"></q-btn>
         <q-btn flat dense no-caps icon="mdi-open-in-new" :label="t.openInTab" @click="openInTab(focused)"></q-btn>
         <q-btn v-if="focused.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="t.download" @click="download(focused)"></q-btn>
-        <q-btn v-if="focused.type !== 'dir' && adapter.shareUrl" flat dense no-caps icon="mdi-link-variant" :label="t.share" @click="share(focused)"></q-btn>
         <q-btn v-if="itemWritable(focused)" flat dense no-caps icon="mdi-rename-box" :label="t.rename" @click="startRename(focused)"></q-btn>
         <q-btn v-if="itemWritable(focused)" flat dense no-caps icon="mdi-trash-can-outline" color="negative" :label="t.delete" @click="askRemove(focused)"></q-btn>
       </div>
@@ -189,6 +183,12 @@
   </div>
 
   <div class="files-kbd-hint">{{ t.kbdHint }}</div>
+
+  <!-- 只读目录提示：页脚辅助说明，放在列表面板之后，避免占据页面顶部视觉重量。 -->
+  <q-banner v-if="!dirWritable" rounded dense class="az-readonly-footer text-caption q-mt-md">
+    <template v-slot:avatar><q-icon name="mdi-lock-outline" size="16px"></q-icon></template>
+    {{ t.readOnlyDir }}
+  </q-banner>
 
   <q-dialog v-if="adapter.supportsMkdir" v-model="mkdirOpen" persistent>
     <q-card class="files-dialog-card">
@@ -261,7 +261,6 @@
           <q-btn v-if="previewItem" flat dense no-caps icon="mdi-content-copy" :label="isTouch ? '' : t.copyPath" :aria-label="t.copyPath" @click="copyPath(previewItem)"></q-btn>
           <q-btn v-if="previewItem" flat dense no-caps icon="mdi-open-in-new" :label="isTouch ? '' : t.openInTab" :aria-label="t.openInTab" @click="openInTab(previewItem)"></q-btn>
           <q-btn v-if="previewItem && previewItem.type !== 'dir'" flat dense no-caps icon="mdi-download" :label="isTouch ? '' : t.download" :aria-label="t.download" @click="download(previewItem)"></q-btn>
-          <q-btn v-if="previewItem && previewItem.type !== 'dir' && adapter.shareUrl" flat dense no-caps icon="mdi-link-variant" :label="isTouch ? '' : t.share" :aria-label="t.share" @click="share(previewItem)"></q-btn>
           <q-btn dense round icon="mdi-close" color="primary" :flat="!isTouch" :unelevated="isTouch" :aria-label="t.close" @click="previewOpen = false"></q-btn>
         </div>
       </q-card-section>
@@ -436,19 +435,6 @@
         }
       }
 
-      // 分享链接（S3）：调 adapter.shareUrl 拿 presigned URL，复制到剪贴板并提示。
-      async function share (item) {
-        if (!item || typeof adapter.shareUrl !== 'function') return
-        try {
-          const res = await adapter.shareUrl(item)
-          const url = typeof res === 'string' ? res : (res && res.url) || ''
-          if (!url) throw new Error('empty url')
-          await copyText(url)
-          notify(t.value.shared + '：' + url, 'positive')
-        } catch (err) {
-          notify(t.value.shareFailed + (err && err.message ? '：' + err.message : ''), 'negative')
-        }
-      }
       const previewKind = computed(() => previewItem.value ? kindOf(previewItem.value) : '')
 
       // 全屏预览的上一/下一个：沿用 filtered 的顺序（排序 + 过滤后的完整序列，
@@ -832,6 +818,28 @@
       }
       function fullscreenFailedText (err) {
         return t.value.fullscreenFailed + (err && err.message ? '：' + err.message : '')
+      }
+
+      // 预览 / 全屏播放中按 ↑ / ↓ 调音量：±5％步进，收敛到 0~1。
+      // 同一时刻只渲染一个媒体元素，但仍把 video/audio 全部取出来统一设置，
+      // 避免部分内核重排后漏掉（全屏目标是卡片时 media 仍在卡片内）。
+      function previewMediaEls () {
+        const card = document.querySelector('.files-preview-card')
+        if (!card) return []
+        return Array.prototype.slice.call(card.querySelectorAll('video, audio'))
+      }
+      // 返回 false 表示当前预览不是媒体（图片 / 文本 / html），让上下键留给原生滚动。
+      function adjustPreviewVolume (delta) {
+        const els = previewMediaEls()
+        if (!els.length) return false
+        const next = Math.min(1, Math.max(0, Math.round((els[0].volume + delta) * 100) / 100))
+        els.forEach(function (media) {
+          media.volume = next
+          if (next > 0) media.muted = false
+        })
+        // 与原生控件条同口径：整数百分比、短暂提示。
+        notify(t.value.volume + ' ' + Math.round(next * 100) + '%', 'info', 900)
+        return true
       }
 
       async function open (item) {
@@ -1361,6 +1369,11 @@
             && !(target && (target.tagName === 'VIDEO' || target.tagName === 'AUDIO'))) {
             stepPreview(event.key === 'ArrowRight' ? 1 : -1)
             event.preventDefault()
+          } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+            // 全屏与非全屏同一条路径：全屏时键盘事件照样冒泡到 window。
+            // 焦点在媒体元素上时部分内核（Firefox）会自己处理上下键调音量并已
+            // preventDefault；那种情况不再叠加一次，否则会一次跳 10%。
+            if (!event.defaultPrevented && adjustPreviewVolume(event.key === 'ArrowUp' ? 0.05 : -0.05)) event.preventDefault()
           }
           return
         }
@@ -1514,12 +1527,12 @@
       // 宿主页面通过插槽访问组件状态（如 S3 桶选择器读写 path/previewOpen），
       // 用 defineExpose 显式列出，避免依赖 setup 返回对象。
       defineExpose({
-        path, items, loading, previewOpen, previewItem, previewPanelOpen,
+        path, items, loading, dirWritable, previewOpen, previewItem, previewPanelOpen,
         filter, viewMode, sortKey, sortDesc, focusIndex,
         selected, selectionCount, selectedNames, clearSelection, selectAll, toggleSelect,
         load, navigate, open, select, focusFirst, moveFocus,
         kindOf, iconOf, colorOf, fileUrl, sizeText, dateText,
-        startRename, startMkdir, askRemove, pickFiles, share, copyPath
+        startRename, startMkdir, askRemove, pickFiles, copyPath
       })
 
       return {
@@ -1538,7 +1551,7 @@
         pruneSelection, rangeSelectTo, removeSelectedForm, removeSelectedOpen, selectedHasDir,
         selectionCount, selectionPathText, selectionText, selectAll, selectedWritableCount, someSelected,
         toggleSelect,
-        askRemove, select, share, shown, sizeText, sortBy, sortDesc, sortKey, dirWritable, itemWritable,
+        askRemove, select, shown, sizeText, sortBy, sortDesc, sortKey, dirWritable, itemWritable,
         startRename, statText, stepPreview, t, toggleSortOrder, truncated, upload,
         uploading, uploadingText, viewMode, viewOptions, currentLocationText
       }

@@ -76,8 +76,12 @@
                <q-btn flat round dense icon="mdi-arrow-up" size="sm" :disable="idx === 0" @click="moveChild(group, child, -1)"><q-tooltip>{{ t.moveUp }}</q-tooltip></q-btn>
                <q-btn flat round dense icon="mdi-arrow-down" size="sm" :disable="idx === group.children.length - 1" @click="moveChild(group, child, 1)"><q-tooltip>{{ t.moveDown }}</q-tooltip></q-btn>
                 <q-btn flat round dense size="sm" :icon="childEnabled(child) ? 'mdi-eye-outline' : 'mdi-eye-off-outline'" :color="childEnabled(child) ? '' : 'grey-6'" @click="toggleEnabled(child)"><q-tooltip>{{ childEnabled(child) ? t.disableToggle : t.enableToggle }}</q-tooltip></q-btn>
-                <q-btn flat round dense icon="mdi-pencil-outline" @click="openEdit(child, group)"><q-tooltip>{{ t.editTitle }}</q-tooltip></q-btn>
-                <q-btn v-if="!child.menu_key && !child.builtin" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="remove(child)"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
+                <!-- 虚拟内置条目（file-/s3- 保留前缀映射的内置应用：带 app 标记，
+                     或带 builtin 标记但没有 menu_entries 行）：后端已有「内置菜单
+                     不能删除」保护，前端同步禁用编辑/删除；库里种子条目（有整数
+                     id）仍可改名称/图标，与后端口径一致。 -->
+                <q-btn flat round dense icon="mdi-pencil-outline" :disable="isVirtualBuiltin(child)" @click="openEdit(child, group)"><q-tooltip>{{ isVirtualBuiltin(child) ? t.builtinUndeletable : t.editTitle }}</q-tooltip></q-btn>
+                <q-btn v-if="!child.menu_key && !child.builtin && !child.app" flat round dense icon="mdi-trash-can-outline" color="red-4" @click="remove(child)"><q-tooltip>{{ t.deleteTitle }}</q-tooltip></q-btn>
              </q-item-section>
             </q-item>
             <q-item v-if="!group.children.length" class="empty-state row flex-center"><span>{{ t.noEntries }}</span></q-item>
@@ -126,8 +130,8 @@
 
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
   <script src="./vendor/mdi-names.js?v=1"></script>
-  <script src="./api.js?v=22"></script>
-  <script src="./i18n.js?v=53"></script>
+  <script src="./api.js?v=24"></script>
+  <script src="./i18n.js?v=58"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
 
@@ -264,7 +268,17 @@
           formOpen.value = true
         }
 
+        // 虚拟内置条目：/api/menu-services 或 menu-tree 注入的 file-/s3- 前缀
+        // 入口（带 app 标记，或带 builtin 标记但无 menu_entries 整数 id）。
+        // 这类条目不在数据库里，不可编辑、不可删除；DB 种子内置条目仍可改
+        // 名称/图标（后端 delete 仍按 builtin 拒绝）。
+        function isVirtualBuiltin (row) {
+          return Boolean(row.app) || (Boolean(row.builtin) && !Number.isFinite(Number(row.id)))
+        }
+
         function openEdit (row, group) {
+          // 虚拟内置条目不可编辑（与后端 menu_entries 的保护口径一致）。
+          if (isVirtualBuiltin(row)) return
           isGroupForm.value = false
           editingId.value = row.menu_key || row.id
           resetForm()
@@ -413,7 +427,7 @@
 
         onBeforeUnmount(() => unsubscribeLocale?.())
 
-        return { childEnabled, editableGroups, editingId, form, formCopy, formOpen, formTitle, groupOptions, groups, iconChoices, iconSearch, isAdmin, isGroupOpen, isItemForm, isServiceEdit, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, remove, removeGroup, resetService, saveForm, saving, t, toggleEnabled, toggleGroupOpen, urlValid, error }
+        return { childEnabled, editableGroups, isVirtualBuiltin, editingId, form, formCopy, formOpen, formTitle, groupOptions, groups, iconChoices, iconSearch, isAdmin, isGroupOpen, isItemForm, isServiceEdit, load, loading, moveChild, moveGroup, openCreate, openCreateGroup, openEdit, openEditGroup, pickIcon, remove, removeGroup, resetService, saveForm, saving, t, toggleEnabled, toggleGroupOpen, urlValid, error }
       }
     })
 

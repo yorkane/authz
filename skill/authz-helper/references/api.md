@@ -117,6 +117,9 @@ label `local:<port>`）。
 - `v0` 主体：`role:<admin|staff|user|guest|api>` 或 `user:<source>:<username>`
   （本地用户可省略 `user:local:` 前缀直接传用户名）。
 - `v1` 对象：`/<port><path>`，如 `/2077/*`、`/2077/api/*`；不同 IP 上同端口共享策略。
+  内置应用保留前缀入口（`file-*`→100 文件浏览、`s3-*`→101 对象存储，虚拟绑定、
+  不在绑定表里）也按端口授权：`/100/*`、`/101/*` 同样合法（这两个端口在
+  `AUTHZ_PORT_MIN` 之下但被白名单放行），且不允许用 `/applications` 占用。
 - `v2` 动作：HTTP 方法逗号/竖线或 `*`。`eft:"deny"` 优先于 allow。
 - `binding_id` 可选，校验绑定存在且端口与 v1 一致（展示用，授权仍按端口+路径）。
 - `ptype:"g"` 是角色分配规则（`v0=user:...`、`v1=role:staff`），管理 UI 不提供编辑，
@@ -236,6 +239,9 @@ core-api.md 与代码为准）。
 |---|---|
 | 多域名共享登录 | `AUTHZ_COOKIE_DOMAIN=.a.com,.b.com` + 共享 Redis 会话（`AUTHZ_SESSION_SHARED`、`AUTHZ_SESSION_REDIS_*`、`AUTHZ_SESSION_SIGNING_KEY`，仅一个实例 read-write） |
 | Agent 免登录 Key | `AUTHZ_API_KEY`（32-256 字符）+ `AUTHZ_API_KEY_ROLE` + `AUTHZ_API_KEY_ALLOWED_IPS`（IP/CIDR 逗号分隔，默认 127.0.0.1） |
+| 本机保存区位置 | `AUTHZ_STORE_DIR`（容器内，默认 `/data/store`，宿主 `${DATA_DIR}/store`，无需额外 volume） |
+| 保存区默认 TTL | `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS`（默认 24，0 = 永不过期；单次请求可用 `?expires_hours=` 覆盖） |
+| 对象存储回落项 | `AUTHZ_S3_*` 整套现在只是**回落默认配置**：`/api/s3-configs` 表里有任何启用行就以表为准，改表即生效不用重建容器。只有想改实例级超时/连接池（`AUTHZ_S3_*_TIMEOUT_MS`、`AUTHZ_S3_KEEPALIVE_MS`）或 LAN IP（`AUTHZ_HOST_LAN_IP`）才需要动 .env |
 | 登录防爆破 | `AUTHZ_LOGIN_ATTEMPTS`(5) / `AUTHZ_LOGIN_WINDOW`(1800s) / `AUTHZ_LOGIN_FAIL_DELAY_MS`(1000)，按「账户名+IP」锁定 |
 | 端口发现 | `AUTHZ_DISCOVERY_PORTS`（容器监听表不可见时追加）、`AUTHZ_DISCOVERY_TTL` |
 | HTTP 入口策略 | `AUTHZ_HTTP_MODE`=redirect/disabled/serve |
@@ -243,6 +249,7 @@ core-api.md 与代码为准）。
 
 注意：数据库类配置（用户/策略/绑定/菜单/Key）走 API 即时生效，不要改库；
 环境类配置走 .env，两层不要混。
+S3 服务配置属于**数据库类**（见 §12），不要在 .env 里加第二套凭证。
 
 ## 11. 其他端点与语义速查
 
@@ -266,3 +273,105 @@ core-api.md 与代码为准）。
   单文件 256KB 上限；validate/PUT 都是 staging + `openresty -t` 通过才落盘；
   reload 失败看返回 message；模板目录只读时 API 会标 `persistent:false`。
 - 登录页：`GET /_authz/login?next=<path>`；`next` 只接受以 `/` 开头的本站路径。
+
+## 12. 存储服务配置（多套 S3 + 过期策略）
+
+一行 = 一套 S3 兼容服务。管理入口是对象存储页（`s3.html`）工具栏的「配置」按钮（仅 admin）；独立菜单已在迁移 v27 隐藏，直链 `s3-configs.html` 仍可用。
+
+- `GET /s3-configs` — `{"data":{"items":[...]}}`，含禁用行 + env 回落项。
+- `POST /s3-configs` — 必填 `name`/`endpoint`/`access_key_id`/`secret_access_key`；
+  可选 `region`、`allow_http`、`writable_paths`（逗号分隔多条，留空 = 默认 `share/<本机 LAN IP>`）、
+  `share_root`、`share_bucket`、`expires_hours`(0-8760，0 = 永不过期)、
+  `use_bucket_lifecycle`、`default_bucket`、`note`、`enabled`、`is_default`。成功 201 + `{"item":{...}}`；名称重复 409。
+- `PATCH /s3-configs/:id` — 局部更新；**凭证字段留空/不传/传 `null` 都等于不修改**（回显只有掩码，拿不到原文）。
+- `PUT /s3-configs/:id/default` — 设为默认（全表先清后设，不会出现两个默认）。
+- `POST /s3-configs/:id/test` — 用这套配置列举桶：`{"ok":true,"buckets":["noco",...]}`；失败 502 + 原因（不回显凭证）。
+- `DELETE /s3-configs/:id` — 删除；该配置下未闭账的流水当场标 `failed` + `config removed`（保留可审计）。
+
+语义要点（用户会踩的四条）：
+
+1. **优先级**：表里有「启用 + 字段合法」的行 → 表覆盖 env；一行可用配置都没有 → 回落
+   `AUTHZ_S3_*`。回落项在列表里是 `{"id":0,"name":"env","virtual":true}`：**只读**，
+   PATCH/DELETE 一律 422，只有「设为默认」是 no-op 成功。
+2. **改表即生效，不需要 reload**：查询缓存 TTL 30s + `db_rev` 失效，通常下一个请求就切过去。
+3. **凭证明文入库**（SigV4 要原文签名，有意决策）：任何接口只回 `has_secret` 与
+   `access_key_id_masked`。绝不把 secret 回显给用户，也不要写进日志/工单；
+   提醒用户备份 `authz.db` 等于备份密钥。
+4. `expires_hours` 单位是**小时**、整点对齐、0 = 永不过期；`use_bucket_lifecycle=1`
+   表示「只记账不删，回收交给桶生命周期规则」。见 §13。
+
+既有对象存储接口全部多了一个选配置的入参 `cfg`（`?cfg=<id|name|env>`，JSON 端点也可放 body）：
+不传 = 默认项；点名到不存在/已停用 423，行存在但字段写坏 502。
+
+```bash
+AUTHZ=http://127.0.0.1:6080
+# 新增一套服务并设为默认（明文 http 内网必须显式 allow_http）
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"name":"minio-a","endpoint":"http://10.251.14.70:30080","region":"RegionOne",
+       "access_key_id":"<AKID>","secret_access_key":"<SECRET>","allow_http":true,
+       "writable_paths":"agent","expires_hours":24}' \
+  "$AUTHZ/_authz/api/s3-configs" | jq '.data.item | {id,name,has_secret}'
+curl -sS -X PUT -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' -d '{}' \
+  "$AUTHZ/_authz/api/s3-configs/1/default" | jq '.data.item.is_default'
+curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' -d '{}' \
+  "$AUTHZ/_authz/api/s3-configs/1/test" | jq '.data'
+```
+
+## 13. 上传流水与过期清理
+
+经网关写入的对象（S3 对象 + 本机保存区文件）都记在 `upload_records` 里，构成清理队列。
+为什么要自己记账：S3 官方 bucket lifecycle 只到**天**粒度且异步，做不了小时级过期。
+
+- `GET /uploads?state=&limit=&offset=` — `{"data":{"items":[...],"total":n}}`；
+  `state` ∈ `active`/`deleted`/`failed`/`skipped`（省略或 `all` = 全部），`limit` 默认 50、上限 500。
+- `POST /uploads/cleanup` — 立刻跑一轮清理（等价定时器的一轮，另有每小时自动跑）；
+  body 可选 `{"limit":n}`；响应 `{"scanned","deleted","failed","skipped","orphans","staged","updated"}`。
+- `DELETE /uploads/:id` — 按记录立刻删对象/本地文件并闭账；已删过的行幂等回 `already:true`；
+  删除失败 502 + 原因（不静默）。勾了 `use_bucket_lifecycle` 的行这里**照删**（人工意志优先）。
+
+排障口径：`state=failed` + `last_error='config removed'` = 配置行被删导致对象不可达（要人工处理，
+清理器不会重试）；`config disabled` = 配置只是停用，重新启用后仍能删。
+
+```bash
+curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"limit":500}' "$AUTHZ/_authz/api/uploads/cleanup" | jq .data
+```
+
+## 14. 本机保存区（Agent 落盘 → 换一条取回链接）
+
+定位是**临时交换区**（默认 24 小时后自动删除），**不是持久存储**：需要长期保存的走 §12 的对象存储。
+根目录 `AUTHZ_STORE_DIR`（容器内 `/data/store`，宿主 `${DATA_DIR}/store`）。这一组端点
+刻意允许机器 Key 免登录，正是为 Agent 直传直取设计（仍要求 admin 角色 + 来源 IP 白名单）。
+
+- `GET /store/info` — `{enabled, store_dir, writable, default_expiry_hours, max_bytes(512MB), max_files(64), counts}`；
+  目录不可用不是错误，回 200 + `enabled:false`。
+- `GET /store?path=<rel>` — 单层列目录（省略 = 根；`raw=1` 跳过 TTL 关联）。
+- `GET /store/stat?path=<rel>` — 单对象元信息 + `expires_at`。
+- `PUT /store?path=<rel>&expires_hours=<h>&overwrite=0` — 请求体即文件字节；
+  `path` 可多级（祖先目录自动创建）；`overwrite` **默认开**；成功 201
+  `{path,size,url,expires_at,expires_in}`。
+- `POST /store/upload?path=<dir>&expires_hours=<h>&overwrite=1` — multipart，表单字段名 `file`
+  （可多个，单请求 ≤64 个）；`overwrite` **默认关**，全同名冲突回 409。
+- `DELETE /store?path=<rel>&recursive=1` — 删除并闭账。
+
+限制：单对象 512MB（超限 413）、单请求 64 个文件（超出计入 `skipped`）、目录深度 ≤32。
+路径非法（绝对路径、`..`、`~`、控制字符、以 `.upload-` 等暂存保留名开头）→ 400。
+`url` 是**同源相对**入口（`/_authz/store/<rel>`），带 `?download=1` 强制下载、
+`?authz_preview=1` 沙箱预览，支持 Range；该出口只读，非法/越界/含符号链接一律 404。身份与写入侧一致：**admin 机器 Key 或
+admin 会话**才可取回（其他角色 403、未登录 302 登录页）。
+
+```bash
+AUTHZ=http://127.0.0.1:6080
+# 保存 → 取回 URL → 立即清理（一条链路跑完）
+URL=$(curl -sS -X PUT -H "x-api-key: $AUTHZ_API_KEY" \
+  --data-binary @report.md \
+  "$AUTHZ/_authz/api/store?path=reports/report.md&expires_hours=6" | jq -r .data.url)
+echo "取回地址：$AUTHZ$URL"                                # → /_authz/store/reports/report.md
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ$URL" -o /tmp/back.md   # admin Key 直取（浏览器打开要先登录 admin）
+curl -sS -X DELETE -H "x-api-key: $AUTHZ_API_KEY" \
+  "$AUTHZ/_authz/api/store?path=reports/report.md" | jq .data
+```
+
+注意 `url` 只有路径没有主机名：交付给用户时要拼上实例地址（`AUTHZ_HOST_URL` 或
+`http://127.0.0.1:6080`），并说明打开它需要 **admin** 会话或 admin 角色的 `x-api-key`
+（保存区是 agent 中转区，不对普通登录用户开放）。

@@ -139,15 +139,28 @@ function saveApiKey (values) {
   throw new Error('Unsupported api key action')
 }
 
-// 对象存储（S3）：列表/分享是 GET 查询参数，mkdir/rename/remove 是普通 JSON mutation，
+// 对象存储（S3）：列表是 GET 查询参数，mkdir/rename/remove 是普通 JSON mutation，
 // 上传与 files 同构（multipart + X-CSRF-Token，全同名冲突 409 触发覆盖确认）。
-function s3Info (bucket) {
-  return request('/s3' + (bucket ? '?bucket=' + encodeURIComponent(bucket) : ''))
+// 多套 S3 服务配置上线后，这一族方法都接受可选的 cfg（配置 id 或 name）：
+// 显式传值时 GET/上传附加 ?cfg=<id>，JSON mutation 在 body 里带 cfg 字段；
+// 不传（undefined/null/''）时 URL 与 body 与旧版逐字节一致，向后兼容。
+function appendCfg (query, cfg) {
+  if (cfg !== undefined && cfg !== null && cfg !== '') query.set('cfg', String(cfg))
+  return query
 }
 
-function s3List (bucket, path, token) {
+function s3Info (bucket, cfg) {
+  const query = new URLSearchParams()
+  if (bucket) query.set('bucket', bucket)
+  appendCfg(query, cfg)
+  const suffix = query.toString()
+  return request('/s3' + (suffix ? '?' + suffix : ''))
+}
+
+function s3List (bucket, path, token, cfg) {
   const query = new URLSearchParams({ bucket: bucket, path: path || '' })
   if (token) query.set('token', token)
+  appendCfg(query, cfg)
   return request('/s3?' + query)
 }
 
@@ -158,6 +171,7 @@ async function uploadS3 (bucket, path, files, overwrite, opts) {
   const query = new URLSearchParams({ bucket: bucket, path: path || '' })
   if (overwrite) query.set('overwrite', '1')
   if (opts && opts.mkdir) query.set('mkdir', '1')
+  if (opts) appendCfg(query, opts.cfg)
   const response = await fetch(`${API_BASE}/s3/upload?${query}`, {
     method: 'POST',
     credentials: 'same-origin',
@@ -173,10 +187,59 @@ async function uploadS3 (bucket, path, files, overwrite, opts) {
   return data?.data
 }
 
-function shareS3 (bucket, path, name, download) {
-  const query = new URLSearchParams({ bucket: bucket, path: path || '', name: name })
-  if (download) query.set('download', '1')
-  return request('/s3/share?' + query)
+// S3 服务配置管理（/_authz/api/s3-configs）：cfg 永不回显 secret_access_key，
+// 列表只给 has_secret 与 access_key_id_masked，所以编辑表单里 AKID/SECRET
+// 留空 = 不修改（与后端 PATCH 语义一致）。id 只出现在路径里，写请求统一
+// 提取 _csrf 成 X-CSRF-Token 头（照 saveMenuService 的写法剔除 id）。
+function s3Configs () {
+  return request('/s3-configs')
+}
+
+function createS3Config (values) {
+  const { _csrf: csrf, id, ...payload } = values
+  return request('/s3-configs', { method: 'POST', csrf, values: payload })
+}
+
+function updateS3Config (values) {
+  const { _csrf: csrf, id, ...payload } = values
+  return request(`/s3-configs/${encodeURIComponent(id)}`, { method: 'PATCH', csrf, values: payload })
+}
+
+function deleteS3Config (values) {
+  const { _csrf: csrf, id } = values
+  // DELETE 无 body：只发方法 + CSRF 头，后端按路径 id 定位。
+  return request(`/s3-configs/${encodeURIComponent(id)}`, { method: 'DELETE', csrf })
+}
+
+function testS3Config (values) {
+  const { _csrf: csrf, id } = values
+  // 空对象也要走 JSON 分支：后端读 body 前会先解析 JSON。
+  return request(`/s3-configs/${encodeURIComponent(id)}/test`, { method: 'POST', csrf, values: {} })
+}
+
+function setDefaultS3Config (values) {
+  const { _csrf: csrf, id } = values
+  return request(`/s3-configs/${encodeURIComponent(id)}/default`, { method: 'PUT', csrf, values: {} })
+}
+
+// 上传记录（过期清理面板）：state 空串 = 不带参数（全部）；limit/offset 服务端分页。
+function listUploads (opts = {}) {
+  const query = new URLSearchParams()
+  if (opts.state) query.set('state', String(opts.state))
+  if (opts.limit !== undefined && opts.limit !== null && opts.limit !== '') query.set('limit', String(opts.limit))
+  if (opts.offset) query.set('offset', String(opts.offset))
+  const suffix = query.toString()
+  return request('/uploads' + (suffix ? '?' + suffix : ''))
+}
+
+function deleteUpload (values) {
+  const { _csrf: csrf, id } = values
+  return request(`/uploads/${encodeURIComponent(id)}`, { method: 'DELETE', csrf })
+}
+
+function cleanupUploads (values) {
+  const { _csrf: csrf, ...payload } = values
+  return request('/uploads/cleanup', { method: 'POST', csrf, values: payload })
 }
 
 window.adminApi = {
@@ -195,10 +258,18 @@ window.adminApi = {
   s3Info,
   s3List,
   uploadS3,
-  shareS3,
   mkdirS3: values => mutation('POST', '/s3/mkdir', values),
   renameS3: values => mutation('PUT', '/s3/rename', values),
   removeS3: values => mutation('DELETE', '/s3/remove', values),
+  s3Configs,
+  createS3Config,
+  updateS3Config,
+  deleteS3Config,
+  testS3Config,
+  setDefaultS3Config,
+  listUploads,
+  deleteUpload,
+  cleanupUploads,
   nginxConf: () => request('/nginx-conf'),
   apiKeys: () => request('/api-keys'),
   saveUser,

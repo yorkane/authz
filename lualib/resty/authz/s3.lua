@@ -14,7 +14,6 @@
 ---     内容类型一律由网关按扩展名给，否则浏览器不会内联渲染图片/播放视频
 local http = require "resty.http"
 local prepare_awsv4_request = require "resty.aws.request.signatures.v4"
-local presign_awsv4_request = require "resty.aws.request.signatures.presign"
 local utils = require "resty.aws.request.signatures.utils"
 
 local _M = {}
@@ -757,32 +756,6 @@ function _M.rename(cfg, bucket, path, name, new_name, new_path)
         return { renamed = name, new_name = new_name, moved = true, new_path = new_path or "" }
     end
     return { renamed = name, new_name = new_name }
-end
-
---- presigned GET（分享链接）。永远带 response-content-type：存储端存的类型是
---- octet-stream，不覆盖的话浏览器只会当二进制下载，图片/视频无法内联。
-function _M.presign_get(cfg, bucket, key, expires, download)
-    expires = math.max(60, math.min(tonumber(expires) or 3600, 604800))
-    local filename = tostring(key):match("([^/]+)$") or "file"
-    local canonical_query = utils.canonicalise_query_string({
-        ["response-content-type"] = download
-            and "application/octet-stream" or _M.content_type(key),
-        ["response-content-disposition"] =
-            (download and "attachment" or "inline") .. '; filename="' .. filename .. '"',
-    })
-    local authority = endpoint_authority(cfg.host, cfg.port, cfg.tls)
-    local presigned, err = presign_awsv4_request(signer_config(cfg), {
-        method = "GET",
-        canonicalURI = utils.canonicalise_path("/" .. bucket .. "/" .. key),
-        canonical_querystring = canonical_query,
-        host = authority,
-        port = cfg.port,
-        -- presign 只需 host 参与签名；实测未签名的 Range 头也放行。
-        headers = { host = authority },
-    }, "s3", cfg.region, expires)
-    if not presigned then return nil, "生成分享链接失败: " .. tostring(err) end
-    return (cfg.tls and "https://" or "http://") .. authority .. presigned.path
-        .. "?" .. presigned.query
 end
 
 return _M

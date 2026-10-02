@@ -35,6 +35,11 @@ Browser
   ├─ /_authz/*       -> resty.authz.router (klib.router("/_authz"))
   │                      ├─ /login、/oauth/* -> ui.lua 登录页与 OAuth
   │                      └─ /api/* -> guard -> api/service -> api/services
+  ├─ /_authz/files/* -> 静态 alias 只读出口（内容根 AUTHZ_FILES_ROOT）
+  ├─ /_authz/s3/*    -> s3_proxy.lua 字节流（按 ?cfg= 选存储配置）
+  ├─ /_authz/store/* -> store_proxy.lua 只读字节流（本机临时保存区取回出口）
+  │                      （三条出口的 access 门同款：合法 Key 免登录放行、
+  │                        无会话引导登录页、guest 引导诊断页）
   └─ /*              -> resty.authz.access
                          -> 解析端口
                          -> 读取会话
@@ -68,7 +73,7 @@ host 网络或其他方式让目标服务位于网关容器的 `127.0.0.1` 网�
 
 左侧菜单由存储的菜单树渲染（迁移 v7 起）：`menu_entries` 表以 `kind` 区分分组(`group`)与条目(`item`)，
 条目通过 `parent_id` 挂到分组下；`builtin` 标记内置节点：内置页面条目
-(`users/authorization/menuEditor/files/nginxConf`)、内置分组（迁移 v15 起 `builtin='system'`
+(`users/authorization/menuEditor/files/s3/s3Configs/nginxConf`)、内置分组（迁移 v15 起 `builtin='system'`
 的“系统应用”，以及 `domains`/`local` 两个动态分组）。凡 `builtin` 非空的分组与条目一律不可删除
 （API `409`，编辑器不显示删除按钮）。
 `/_authz/api/menu-tree` 输出两级树供左侧菜单渲染（只含启用项；编辑器通过 `/_authz/api/menu-entries` 读取全量
@@ -78,6 +83,8 @@ host 网络或其他方式让目标服务位于网关容器的 `127.0.0.1` 网�
 编辑器——其条目随端口探测动态变化，不支持编辑。迁移 v7 把旧扁平布局种子化为「系统应用」分组，v13 拆出三个分组：
 系统应用、`builtin='domains'`（域名服务）与 `builtin='local'`（本地服务）。后两者的条目由 `/_authz/api/applications`
 在渲染时注入（已绑定域名的应用进域名服务，其余端口探测结果进本地服务），本身不落 `menu_entries`。
+
+`menu-tree` 的条目标题与图标以 `menu_entries`（迁移种子 + 编辑器覆盖）为唯一事实来源：前端 `menu.html` 直接渲染 `label` / `icon`，英文界面也显示库里的标题。`i18n.js` 的 `menu` 块只保留菜单外壳文案（展开/收起、注销、语言切换、空分组提示），不再放菜单标题；`s3-configs.html` 页面内的标题来自 `s3Configs` 块，与菜单标题无关。「存储配置」入口已在迁移 v27 隐藏（enabled=0，编辑器仍可见可恢复）：配置视图改由「对象存储」页工具栏的「配置」按钮进入（s3.html 内嵌 az-s3-configs 组件，锚点 `#configs` 直达），`/_authz/apps/s3-configs.html` 保留为挂载同一组件的薄壳直链页。
 
 这类注入条目通过 `menu_overrides` 表（迁移 v14）按稳定服务键 `binding:<id>` / `port:<port>` 保存菜单定制
 （label / icon / sort_order / enabled）。域名条目改名会回写 `bindings.menu_name`（与代理层共用同一事实来源），
@@ -127,11 +134,27 @@ Key 不入库（不受管理界面禁用影响）、常量时间比较、网关�
 | `lualib/resty/authz/discovery.lua` | 读取本机监听端口并用短超时 HTTP HEAD 发现本地服务 |
 | `lualib/resty/authz/api/services/menu_services.lua` | 注入条目（binding:/port: 键）的菜单覆盖读写：改名/图标/排序/显隐/恢复默认 |
 | `lualib/resty/authz/repository/menu_overrides.lua` | `menu_overrides` 表读写（须在事务内调用，读绕过 mlcache） |
+| `lualib/resty/authz/s3_config_store.lua` | 多套 S3 配置的运行时枢纽：把 `s3_configs` 行或 env 默认项统一成与 `config.s3` 同构的 cfg 表。所有取配置的入口都必须走这里，**禁止直读 `config.s3`**；行数据非法返回 `(nil, 原因)` 而不 `error()` |
+| `lualib/resty/authz/maintenance.lua` | 每小时后台维护（到期对象/文件清理 + 上传暂存残留扫描）。由 `conf/nginx.conf.template` 的 `init_worker_by_lua_block` 调 `start()`；共享字典原子 `add` 抢单 owner。手动触发清理调 `cleanup(opts)`（纯函数），不得调 `tick` |
+| `lualib/resty/authz/api/services/s3_configs.lua` | 存储配置 CRUD + 连通性测试 + 设为默认：区间校验、事务边界、回显白名单（永不外传含明文密钥的 cfg 表） |
+| `lualib/resty/authz/api/services/uploads.lua` | 上传流水查询、手工删除、手动清理，以及 S3 写路径成功后的记账入口（记账失败只落 WARN，绝不改变上传响应） |
+| `lualib/resty/authz/api/services/store.lua` | 本机临时保存区业务层：路径校验、落盘、`kind='local'` 记账、`expires_hours` 归一化 |
+| `lualib/resty/authz/store.lua` | 保存区文件原语（纯函数，不碰 ngx/config）：归一化、符号链接逐级拒绝、暂存 + 原子改名、单层列目录、删除树 |
+| `lualib/resty/authz/store_proxy.lua` | `GET\|HEAD /_authz/store/<rel>` 只读字节流出口（Range / `?download` / `?authz_preview`）；非法与越界与含符号链接一律 404 |
+| `lualib/resty/authz/repository/s3_configs.lua` | `s3_configs` SQL。META 列集合在 **SQL 层就不选** `secret_access_key`，`has_secret` 由 SQL 算出；`*_full`/`enabled_rows` 含明文，唯一合法消费者是 `s3_config_store` |
+| `lualib/resty/authz/repository/upload_records.lua` | `upload_records` SQL（到期队列 `due`、状态回填 `mark`、计数与分页）；只写 SQL，事务边界在 service 层 |
 | `admin/` | 无构建步骤的 Vue 3 + Quasar UMD Admin UI |
 | `lualib/klib/` | 项目代码注册式 Router 和请求上下文框架 |
 
 `lualib` 在镜像构建时整体复制到 `/usr/local/openresty/site/lualib`，开发部署也必须整体挂载。
 只挂载 `lualib/resty/authz` 会漏掉 `klib.router`、模板等依赖，导致镜像与挂载行为不一致。
+
+网关**不再只有请求驱动的链路**：`init_worker_by_lua_block` 里挂着每小时的后台维护
+定时器（到期对象清理 + 上传暂存残留扫描，`maintenance.lua`）。多 worker 只允许一个
+owner 真正在跑，改这块代码前必须读 `design.md` §17.4 的锁与接管语义；在 timer 协程里
+必须自己 `db.open(config.db_path())`，且路径只能取 `config` 的记忆化访问器（worker 的
+环境块被 nginx 清空，`os.getenv("AUTHZ_*")` 恒为 nil，直读会去开一个凭空的 sqlite 文件，
+表现成误导性的「表不存在」）。
 
 数据库查询使用 `resty.mlcache`：worker 内 L1 LRU、共享字典 L2 和 SQLite 回调 L3。缓存默认
 使用 `authz_db_cache` 共享字典，TTL 由 `AUTHZ_DB_CACHE_TTL` 控制，L1 容量由
@@ -165,6 +188,8 @@ SQLite 默认位于 `/data/authz/authz.db`，`/data` 必须持久化。
 | `sessions` | token、username、source、csrf、expires_at |
 | `policies` | `ptype/v0/v1/v2` 唯一；存 p/g 规则 |
 | `bindings` | domain 唯一；target_ip/port、enabled、websocket、note、menu_name；upstream/forwarded/origin 代理字段；simulate_local/local_ip；request_rewrite（请求改写规范化 JSON，迁移 17 由 header_overrides 升级并入）；response_rewrite（响应改写规范化 JSON，空串表示未配置） |
+| `s3_configs` | 迁移 23；`name` 唯一；`endpoint`/`access_key_id`/`secret_access_key` 逐行独立；`region` 默认 `us-east-1`、`expires_hours`/`use_bucket_lifecycle`/`is_default`/`enabled` 为整数开关；**`secret_access_key` 明文入库**（见 §10 的含密备份告警）。表内无「启用 + 字段合法」行时运行时回落 `AUTHZ_S3_*`（env 项在接口里是 `id=0`、`virtual=true` 的只读行） |
+| `upload_records` | 迁移 24；`kind` ∈ `s3`/`local`；`cfg_id` **可空且无外键**（NULL = 当时用的是 env 回落配置；配置行删除后流水必须保留可审计）；`expires_at` 可空（NULL = 永不过期，非 NULL 必须整点对齐）；`state` ∈ `active`/`deleted`/`failed`/`skipped`；索引 `(state, expires_at)` 是清理队列唯一入口 |
 
 `remote_users.synced_at` 是保留的内部存储列名；管理 API 只输出语义明确的 `recorded_at`，避免把
 单向身份记录误解为双向同步协议。
@@ -478,6 +503,25 @@ PKCE、resource、回调 issuer、state 一次性、角色映射、同名来源�
 宿主机 conf/   -> /etc/openresty/templates:ro
 ```
 
+`/data` 这一个卷同时承载 SQLite、自签证书、S3 上传暂存（`AUTHZ_S3_TMP_DIR`，默认
+`/data/s3tmp`）与本机临时保存区（`AUTHZ_STORE_DIR`，默认 `/data/store`）。**保存区不需要
+额外 volume**：它落在 `${DATA_DIR}/store` 下，entrypoint 负责 `mkdir -p`。它是网关自己
+管生命周期的临时交换区（`upload_records` `kind='local'` + 每小时清理，默认 24 小时删除），
+与只读浏览的 `FILES_DIR -> /files` 语义分离，不要把长期数据放这里。
+
+> ⚠️ **备份即含密（迁移 v23 起）**：`s3_configs.secret_access_key` 以**明文**存在
+> `authz.db` 里（SigV4 必须拿原文参与签名，摘要无法还原——本仓库首例明文密钥入库）。
+> 因此 `azops.sh backup`、`cp ${DATA_DIR}/authz/authz.db`、整目录打包 `${DATA_DIR}`
+> 这类操作会**连带复制所有 S3 密钥**，`data/store` 里的临时文件也可能含敏感正文。
+> 备份介质的保密等级由此抬升，必须按含密文件处理：限制可读者（`chmod 600`）、
+> 不进公开对象存储或匿名可访问的 S3 前缀、不贴进工单/聊天/issue、跨机传输走内网或
+> scp 而非共享目录。轮换密钥 = 改表 + 重做备份，旧备份文件仍是有效凭证。
+
+> **权限收敛（entrypoint 每次启动执行）**：`chmod 700` 数据库目录与 `AUTHZ_STORE_DIR`、
+> `chmod 600` `authz.db`。迁移 v23 之前这两处随 umask 落成 755/644，同宿主其他进程可读；
+> 现在明文 S3 密钥入库后必须收紧。已有部署重建容器即自动生效，无需手工 chmod。
+> store 的取回链接按路径确定可推断，安全靠的是访问门禁（匿名 302 登录、机器 Key/会话才放行）；700 收的是**宿主本地**其他用户的直读面。
+
 `conf/` 目录中有三个外置 include 文件：`http_inc.conf`（include 到 http{} 末尾）、
 `server_inc.conf`（include 到网关 server{} 最末尾，同路径 location 会覆盖内置行为）、
 `stream_inc.conf`（include 到顶层 stream{} 块）。入口脚本启动时检查：存在（哪怕为空）
@@ -502,6 +546,10 @@ PKCE、resource、回调 issuer、state 一次性、角色映射、同名来源�
 - 只修改模板且环境变量未变化时可直接 `docker restart`；`.env` 变化仍必须重新创建容器；
 - 改环境变量、网络、挂载、镜像：重建容器；
 - 改数据库 schema：先备份 `/data/authz/authz.db`，追加有明确版本号的迁移，不得改写已发布版本；必须重启或重建容器，让 `init_by_lua` 在 worker 接收流量前完成迁移；
+  （注意上面的含密告警：备份文件本身即凭证）
+- 只改 `s3_configs` 表（对象存储页的「配置」视图或 `/_authz/api/s3-configs`）：**既不用重启也不用 reload**，
+  行数据经 mlcache（TTL `AUTHZ_DB_CACHE_TTL`，默认 30s）、派生缓存按 `db_rev` 判活，通常下一个请求即生效；
+  但**直接改 SQLite 不会触发 revision**，那种做法必须重启才收敛；
 - 改 vendor：重新生成 manifest 和哈希，不在页面恢复 CDN 依赖。
 
 > **外置模板目录漂移**：部署若把宿主机目录挂载到 `/etc/openresty/templates`（如 235 的
@@ -573,6 +621,21 @@ bash scripts/restart_gateway.sh --build  # 按当前 Docker 架构重建镜像�
 - Dockerfile 使用 Buildx 多阶段构建，`RESTY_J` 默认 8；源码下载单独缓存，GitHub Actions 使用 GHA cache。不要退回 `DOCKER_BUILDKIT=0`。
 - 发布或部署镜像时优先使用 GitHub Actions 推送到 GHCR 的镜像；只有调试 Dockerfile、验证未发布改动或 CI 不可用时才本地构建。
 - Docker Desktop for Mac 必须开启 Host Networking；否则容器内的 `127.0.0.1` 不代表宿主机端口，自动发现和代理测试都会产生误导性结果。
+- 后台维护定时器必须**单 owner**：共享字典原子 `add` 抢锁，接管「持有者已死」的锁只允许
+  worker 0 做。共享字典没有 CAS，`delete + add` 不是原子操作，两个 worker 同时接管会各自
+  delete 掉对方的 `add` 并都成功（实测双 owner → 两条每小时清理链，同一批对象被删两遍）。
+  同理，接口层的「立即清理」只能调 `maintenance.cleanup(opts)`（纯函数），调 `tick` 会在
+  本 worker 里种下第二个每小时循环。防回归点：任何新增的定时器消费者都要走 `cleanup`。
+- S3 取配置只能经 `s3_config_store`。直读 `config.s3` 会让 `?cfg=` 与页面新建的配置**静默
+  失效**（表现为永远只访问 env 那一套，且没有任何报错）。表行字段非法必须是运行期
+  `(nil, 原因)` → 423/502，绝不 `error()`：一行写坏不能拖垮整个网关或让 worker 起不来。
+  记账（`upload_records`）失败绝不能把一次成功的上传变成失败响应——对象已写成功，
+  账只是账本；反过来「账没闭上」必须可见（502 + 原因），不许静默积累指向不存在对象的
+  active 行。
+- `s3_configs.secret_access_key` 是本仓库首例明文密钥入库，回显只允许 `has_secret` +
+  掩码 AKID，且判空要下沉到 SQL（META 列集合根本不选明文列）。任何新接口要复用行数据，
+  必须逐字段拷进白名单新表——`db.query` 返回的是跨请求共享的 mlcache 缓存表，
+  就地改字段既会污染别的请求，也可能把整张 cfg（含明文密钥）序列化出去。
 
 ## 12. 维护交付清单
 
@@ -905,6 +968,21 @@ lualib/tracker/
   与代理转发头，用于 debug；guest 的代理访问范围可像其他角色一样用策略配置。
 - 菜单树：`GET /_authz/api/menu-tree`（渲染用）；`GET|POST /_authz/api/menu-entries`、
   `PUT /_authz/api/menu-entries/reorder`、`PATCH|DELETE /_authz/api/menu-entries/:id`（编辑用）
+- 存储配置（admin；写请求需 CSRF，机器 Key 免）：`GET|POST /_authz/api/s3-configs`、
+  `PATCH|DELETE /_authz/api/s3-configs/:id`、`PUT /_authz/api/s3-configs/:id/default`、
+  `POST /_authz/api/s3-configs/:id/test`。回显只有 `has_secret` + 掩码 AKID；
+  `PATCH` 的凭证字段**空 = 不修改**；`id=0`（env 回落项）编辑/删除 422、设为默认 no-op 成功。
+  改表即生效，不需要 reload
+- 上传流水：`GET /_authz/api/uploads?state=&limit=&offset=`、`POST /_authz/api/uploads/cleanup`
+  （立刻跑一轮，等价定时器一轮；body 可选 `limit`）、`DELETE /_authz/api/uploads/:id`
+  （按记录删对象/本地文件并闭账，失败 502 + 原因，不静默）
+- 本机保存区（**刻意不标 `session_only`**：核心用途是 Agent 用 `x-api-key` 免登录落盘取回）：
+  `GET /_authz/api/store/info`、`GET /_authz/api/store?path=`、`GET /_authz/api/store/stat?path=`、
+  `PUT /_authz/api/store?path=&expires_hours=&overwrite=0`（201，`overwrite` 默认开）、
+  `POST /_authz/api/store/upload?path=&expires_hours=&overwrite=1`（multipart 字段名 `file`，
+  `overwrite` 默认关）、`DELETE /_authz/api/store?path=&recursive=1`；
+  取回出口 `GET|HEAD /_authz/store/<rel>`（`?download=1` / `?authz_preview=1`，只读，
+  独立 location，非法/越界/含符号链接一律 404）。契约见 `docs/core-api.md` §6.4
 
 完整字段与示例见 `docs/core-api.md`。
 

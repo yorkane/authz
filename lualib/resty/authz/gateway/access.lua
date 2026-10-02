@@ -81,7 +81,8 @@ function _M.handle(config)
     local host = ngx.var.host
     local port, _, target_ip, binding = resolver.resolve(host, config)
     if not port then return serve_not_found(host) end
-    if prevent_loop(target_ip, port) then return end
+    -- 内置应用保留前缀入口不代理上游（目标是网关自己的页面），没有循环风险。
+    if not (binding and binding.app) and prevent_loop(target_ip, port) then return end
 
     local machine_request, current = authenticate()
     local authorization = cache.ensure(config)
@@ -107,6 +108,16 @@ function _M.handle(config)
     ngx.var.authz_user = current and current.username or "guest"
     ngx.var.authz_source = current and current.source or "anonymous"
     ngx.var.authz_identity = principal
+    if binding and binding.app then
+        -- 保留前缀入口：认证 + Casbin（object 仍是 /<端口><uri>，这就是"单独
+        -- 配置授权"的落点）都通过后，直接渲染内置应用页面。internal redirect
+        -- 之后 ngx.ctx 不保留，跨 location 只能靠 ngx.var：authz_app_entry 由
+        -- Lua 写入，客户端伪造不了，/_authz/apps/ 的三个 location 据此放行
+        -- 「URI 精确等于入口页」的请求（详见 conf/server.conf.template）。
+        ngx.var.authz_app_entry = binding.app
+        ngx.req.set_uri("/_authz/apps/" .. binding.app_page, false)
+        return ngx.exec("/_authz/apps/" .. binding.app_page)
+    end
     local scheme = proxy.prepare(binding, target_ip, port)
     if scheme == "https" and binding and binding.upstream_ssl_verify == false then
         return ngx.exec("@authz_proxy_insecure")

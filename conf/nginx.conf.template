@@ -8,6 +8,23 @@ user root;
 error_log /usr/local/openresty/nginx/logs/error.log warn;
 pid       logs/nginx.pid;
 
+# 把这几个变量显式保留给 worker。
+# 【为什么必须写 env】nginx 在 exec 后会清空 worker 的环境块：只有在 nginx.conf
+# 主上下文里用 `env NAME;` 声明过的变量，worker / ngx.timer 协程里的 os.getenv
+# 才读得到（实测：未声明时 master 里读到 /data/store，worker 里是 nil）。
+# 本项目绝大多数配置都在 init_by_lua（master）里一次性读进运行时表，所以原本不
+# 需要这些声明；但下面三类变量在**运行期**还会被直接读：
+#   AUTHZ_S3_TMP_DIR  → s3_upload.lua 在请求上下文里取暂存目录（未声明时永远退成
+#                       /data/s3tmp，即运维改了这个 env 也白改）；
+#   AUTHZ_STORE_DIR / AUTHZ_STORE_DEFAULT_EXPIRY_HOURS / AUTHZ_FILES_ROOT
+#                     → maintenance 定时器与本机保存区相关代码。
+# Lua 侧（config.store_dir 等）另外做了 master 阶段记忆兜底，这一层是双保险；
+# 变量未设置时 nginx 只是不注入，不会报错。
+env AUTHZ_S3_TMP_DIR;
+env AUTHZ_STORE_DIR;
+env AUTHZ_STORE_DEFAULT_EXPIRY_HOURS;
+env AUTHZ_FILES_ROOT;
+
 events {
     worker_connections 1024;
 }
@@ -75,6 +92,19 @@ http {
 
     init_by_lua_block {
         require("resty.authz").init()
+    }
+
+    # 每小时一次的后台维护（到期对象清理 + 上传暂存残留扫描）。
+    # init_worker 阶段每个 worker 都会跑一次 start()：内部用共享字典原子 add 抢
+    # owner 锁，只有抢到的那个 worker 真正挂定时器，其余直接 return。
+    # pcall 包住：模块加载失败（比如老镜像里还没有 maintenance.lua）也不能挡住启动。
+    #
+    # 【部署提醒】本机生产把宿主机的 conf/ 挂到容器的 /etc/openresty/templates，
+    # 模板改动必须同步到部署目录（cp conf/nginx.conf.template
+    # /data/app/data/authz/conf/）再重启才生效；改仓库里的模板本身不会动到运行实例。
+    init_worker_by_lua_block {
+        local ok, m = pcall(require, "resty.authz.maintenance")
+        if ok then m.start() end
     }
 
     map $http_upgrade $connection_upgrade {

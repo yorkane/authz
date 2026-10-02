@@ -24,7 +24,10 @@
    支持多级子域名（`3000-a.b.c.example.com`），端口范围默认 `2000-20000`；
    该免配置入口默认按“模拟本机访问”处理（上游 Host 为 `127.0.0.1:<port>`，来源头为 `127.0.0.1`）
 2. **显式绑定**：管理界面配置固定域名到目标 IP + 端口的映射（存 SQLite，目标 IP 默认 `127.0.0.1`）
-3. 其余域名 → 404
+3. **内置应用保留前缀**（虚拟绑定，不在数据库中）：`file-任意域名` → 文件浏览页面、
+   `s3-任意域名` → 对象存储页面（默认端口 100/101，可用 `AUTHZ_APP_*` 调整或整体关闭）；
+   认证与授权仍走网关策略（对象 `/<端口><路径>`，如 `/100/*`），保留端口不允许被域名绑定占用
+4. 其余域名 → 404
 
 所有代理流量需登录 + Casbin 策略授权；后端收到 `X-Authz-User` 头。管理菜单会读取本机监听端口，
 在配置的端口范围内用 `127.0.0.1` 和短超时 HTTP `HEAD` 探测，只列出实际 HTTP 服务；入口变化会定时刷新，
@@ -71,10 +74,11 @@
 管理壳内置“对象存储”应用（左侧菜单 → 系统应用 → 对象存储 / Object Storage，即 `/_authz/apps/` 下的 `s3.html`，仅 admin 可见）：
 
 - 网关侧存凭证并代签 SigV4（vendored 的 Kong/lua-resty-aws 签名器，含 UNSIGNED-PAYLOAD 本地补丁），浏览器永远接触不到 AKID/SECRET；启用需 `AUTHZ_S3_ENDPOINT` + `AUTHZ_S3_REGION` + AKID/SECRET（明文 http 另加 `AUTHZ_S3_ALLOW_HTTP=true`），完整契约与私有服务实测坑清单见 [doc/s3-integration.md](doc/s3-integration.md)；
-- 能力与文件浏览对齐：列目录（桶选择器 + 分页）、上传（multipart 落暂存再 PUT，同名冲突 409 后可覆盖）、下载/预览（图片/音频/视频/HTML 沙箱/文本）、Range 206 分段、重命名（Copy+Delete）、新建目录（`key/` 标记对象）、递归删除、presign 分享链接（60s–7 天，带 response-content-type/disposition 覆盖）；
+- 能力与文件浏览对齐：列目录（桶选择器 + 分页）、上传（multipart 落暂存再 PUT，同名冲突 409 后可覆盖）、下载/预览（图片/音频/视频/HTML 沙箱/文本）、Range 206 分段、重命名（Copy+Delete）、新建目录（`key/` 标记对象）、递归删除；
 - 对象字节走 `/_authz/s3/<bucket>/<key>`（`?download=1` / `?authz_preview=1`，CSP sandbox + nosniff 由 Lua 下发），认证与 `/_authz/files/` 同款（会话或合法非 guest API Key）；
 - 与文件浏览共用同一套浏览器组件（`admin/browser.js` + `browser.css`，含预览/**预览内 `f` 全屏**/手势/上传/重命名/删除/**多选与批量移动、批量删除**），`files.html`/`files.css` 瘦身为薄壳，仅接口 adapter 不同；
 - 未配置 `AUTHZ_S3_ENDPOINT` 时菜单仍可见，`/api/s3` 返回 `enabled:false` 显示“未配置”卡片，桶级操作与字节流返回 423。
+- **多套存储服务 + 上传记账 + 小时级过期清理 + 本机临时保存区**：对象存储页（`s3.html`）工具栏「配置」按钮进入的配置视图（仅 admin；独立菜单入口已在迁移 v27 隐藏，直链 `s3-configs.html` 仍可用）可在数据库里维护多套 S3 服务（表覆盖 `AUTHZ_S3_*` 回落项，改表即生效、无需 reload），并查看经网关写入的对象流水、手工删除或立刻跑一轮清理（`expires_hours` 小时级过期，0 = 永不过期；`use_bucket_lifecycle` = 只记账交给桶规则回收）；另有 `PUT /_authz/api/store` 给 Agent 免登录落盘、用返回的相对 URL 取回（admin 身份，与写入侧同一道门），默认 24 小时后自动删除。契约见 [docs/core-api.md](docs/core-api.md) §6.2–§6.4，设计取舍见 [design.md](design.md) §17。
 
 ### Nginx 配置编辑（危险）
 
@@ -175,6 +179,9 @@ docker exec <container_name> admin_password_reset
 | `AUTHZ_DB_PATH` | `/data/authz/authz.db` | SQLite 路径（用户/会话/策略/绑定） |
 | `AUTHZ_ADMIN_PASSWORD` | `admin123` | 首次 seed 的 admin 密码；也作为 `admin_password_reset` 的重置密码 |
 | `AUTHZ_PORT_MIN` / `AUTHZ_PORT_MAX` | `2000` / `20000` | 数字前缀端口范围 |
+| `AUTHZ_APP_DOMAINS` | `1` | 内置应用保留前缀入口（`file`→100 文件浏览、`s3`→101 对象存储）总开关，`0` 关闭 |
+| `AUTHZ_APP_PREFIX_FILES` / `AUTHZ_APP_PORT_FILES` | `file` / `100` | files 应用保留前缀与虚拟端口（非法值/与入口端口冲突时该项自动禁用） |
+| `AUTHZ_APP_PREFIX_S3` / `AUTHZ_APP_PORT_S3` | `s3` / `101` | s3 应用保留前缀与虚拟端口 |
 | `AUTHZ_HTTP_PORT` / `AUTHZ_HTTPS_PORT` | `6080` / `6443` | 入口端口 |
 | `AUTHZ_HTTP_MODE` | `redirect` | 公网 HTTP 行为：`redirect` 308 到 HTTPS；`disabled` 仅回环；`serve` 仅受控测试 |
 | `AUTHZ_DISCOVERY_PORTS` | 空 | Docker Desktop 无法从监听表发现时，追加探测端口，例如 `2077,3080` |

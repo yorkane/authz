@@ -33,6 +33,19 @@ function _M.resolve(host, config)
             end
         end
     end
+    -- 内置应用保留前缀（files/s3 的虚拟入口）：**数据库真实绑定优先**——上面
+    -- bindings_by_prefix 命中就已 return，管理员显式绑定同名前缀时接管虚拟入口。
+    if label and config.app_prefixes then
+        local app_prefix = label:match("^(.-)%-") or label
+        local app = config.app_prefixes[app_prefix]
+        if app then
+            local entry = config.app_entries[app]
+            if entry then
+                return entry.port, false, "127.0.0.1",
+                    { app = app, app_page = entry.page }
+            end
+        end
+    end
     if host then
         local match = ngx.re.match(host, [[^(\d{1,5})-]])
         if match then

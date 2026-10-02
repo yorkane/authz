@@ -57,6 +57,9 @@ function _M.create(data)
     local current = config()
     if not domain then return nil, "请输入最后一级域名前缀，例如 name1", 422 end
     if not target_ip then return nil, "目标 IP 必须是合法的 IPv4 或 IPv6 地址", 422 end
+    if port and current.app_ports and current.app_ports[port] then
+        return nil, "端口 " .. port .. " 为内置应用保留", 422
+    end
     if not port or port < current.port_min or port > current.port_max then
         return nil, "端口必须在 " .. current.port_min .. "-" .. current.port_max, 422
     end
@@ -99,6 +102,9 @@ function _M.update(id, data)
     local current = config()
     if data.port ~= nil then
         local port = tonumber(data.port)
+        if port and current.app_ports and current.app_ports[port] then
+            return nil, "端口 " .. port .. " 为内置应用保留", 422
+        end
         if not port or port < current.port_min or port > current.port_max then
             return nil, "端口必须在 " .. current.port_min .. "-" .. current.port_max, 422
         end

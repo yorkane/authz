@@ -10,6 +10,7 @@ local ui = require "resty.authz.ui"
 local files = require "resty.authz.files"
 local files_upload = require "resty.authz.files_upload"
 local s3 = require "resty.authz.s3"
+local s3_config_store = require "resty.authz.s3_config_store"
 local s3_upload = require "resty.authz.s3_upload"
 local s3_scope = require "resty.authz.s3_scope"
 local nginxconf = require "resty.authz.nginxconf"
@@ -266,10 +267,37 @@ register("DELETE", "/api/files/remove", guard.wrap(with_body(function(_, data)
 end), { admin = true, csrf = true }))
 
 -- ── Object storage browser (S3-compatible private endpoint) ─────────────────
--- 全部走 config.s3：未配置时 GET /api/s3 返回 enabled=false（前端显示未配置卡片），
--- 其余操作 423。凭证（AKID/SECRET）只在签名器内部使用，任何接口都不回显。
-local function s3_cfg()
-    return require("resty.authz").config.s3
+-- 全部走「当前选中的那套配置」：未配置时 GET /api/s3 返回 enabled=false（前端显示
+-- 未配置卡片），其余操作 423。凭证（AKID/SECRET）只在签名器内部使用，任何接口都
+-- 不回显。
+-- 多套配置（s3_configs 表）上线后，env 那套退化成**回落默认项**：取配置一律经
+-- s3_config_store，禁止再直读 config.s3（那会让 ?cfg= 与页面新建的配置全部失效）。
+--- 取本次请求要用的配置。ref 来自 query ?cfg= 或 JSON body 的 cfg 字段（同名字段，
+--- 见 admin/api.js 的 appendCfg）：nil/空 → 默认项；数字或 cfg:N → 按 id；其余 → 按 name。
+--- 返回 (cfg, 原因, kind)，kind = disabled|missing|invalid —— 调用方据此定状态码。
+--- 注意 cjson.null（显式传 null）与重复参数（table）都要先归一化，否则会被当成
+--- 一个叫 "userdata: 0x…" / "table: 0x…" 的配置名，把「未指定」误报成 423 不存在。
+--- 0（env 回落项的虚拟 id）到 env 的映射在 s3_config_store.get() 内部完成，与
+--- s3_proxy.lua 的 ?cfg= 直连路径同源，本函数只做类型归一化。
+local function s3_config_by_ref(ref)
+    if ref == nil or ref == cjson.null or ref == "" then return s3_config_store.get(nil) end
+    if type(ref) == "table" then ref = ref[1] end
+    if type(ref) ~= "string" and type(ref) ~= "number" then return s3_config_store.get(nil) end
+    return s3_config_store.get(tostring(ref))
+end
+
+--- kind → (code, status)：disabled 沿用既有 code=s3_disabled/423（回归断言依赖它）；
+--- missing 是「点名点到了不存在/已停用的配置」，同为 423 但消息带名字，便于前端
+--- 区分「整套功能没开」与「我记的那个服务没了」（s3.html 据此回落默认项重载）；
+--- invalid（行存在但字段写坏）= 配置存在而网关用不了 → 502。
+local function s3_config_error(err, kind)
+    if kind == "invalid" then
+        return { error = { code = "s3_config_invalid", message = err or "存储配置非法" } }, 502
+    end
+    if kind == "missing" then
+        return { error = { code = "s3_config_missing", message = err or "存储配置不存在或已禁用" } }, 423
+    end
+    return { error = { code = "s3_disabled", message = "对象存储未配置" } }, 423
 end
 
 -- 把 s3_context 失败时的 (payload, status) 原样透传给 router（它期待的是
@@ -324,10 +352,15 @@ local function s3_auto_mkdir(cfg, bucket, dirpath, want_mkdir)
 end
 
 -- 统一的“未配置/参数非法”前置校验。返回 (cfg, bucket, path) 或 (nil, payload, status)。
+-- args 既可能是 uri_args（值全是字符串）也可能是解好包的 JSON body（可能有
+-- cjson.null / 布尔），所以 cfg 的归一化在 s3_config_by_ref 里做。
 local function s3_context(args, need_bucket)
-    local cfg = s3_cfg()
+    local cfg, err, kind = s3_config_by_ref(args.cfg)
     if not cfg then
-        return nil, { error = { code = "s3_disabled", message = "对象存储未配置" } }, 423
+        -- 三值返回不能直接 return（klib.router 只取前两个返回值）：调用方一律
+        -- 把后两位交给 payload_or_error 原样透传。
+        local payload, status = s3_config_error(err, kind)
+        return nil, payload, status
     end
     local bucket = args.bucket and s3.normalize_bucket(tostring(args.bucket)) or nil
     if need_bucket and not bucket then
@@ -340,12 +373,36 @@ local function s3_context(args, need_bucket)
     return cfg, bucket, path
 end
 
+-- 把「本次生效的配置」与「可选配置清单」挂进响应（两者都只含安全摘要，绝不含凭证）。
+-- 前端 s3.html 用它把 localStorage 里记住的 cfg 对齐到后端真实选中的那一项，并在
+-- 下拉里渲染清单；configs 直接取 s3_config_store.summary()，与配置管理页同源。
+local function s3_config_fields(cfg)
+    local summary = service.s3_config_summary()
+    -- configs 已由 service 层归一成数组或 cjson.empty_array 哨兵；这里**不能**再
+    -- 套一次 array_data —— 对 empty_array（light userdata）取 # 会直接抛错。
+    return {
+        cfg = service.s3_config_summary_of(cfg) or cjson.null,
+        configs = summary and summary.configs or cjson.empty_array,
+    }
+end
+
 register("GET", "/api/s3", guard.wrap(function(_, env)
     local args = type(env.uri_args) == "table" and env.uri_args or {}
-    local cfg = s3_cfg()
+    local cfg, cfg_err, cfg_kind = s3_config_by_ref(args.cfg)
     if not cfg then
-        -- 未配置不是错误：菜单点进来要能看到“未配置”提示，所以 200 + enabled=false。
-        return { data = { enabled = false, endpoint = "", region = "", buckets = cjson.empty_array } }
+        -- 未配置不是错误：菜单点进来要能看到“未配置”提示，所以 200 + enabled=false
+        -- （带 bucket 也一样降级 —— 回归里 "unconfigured bucket listing still degrades
+        -- to info" 钉死了这条语义）。但**点名**了不存在/写坏的配置是另一回事：
+        -- 那说明用户记的那套服务没了，必须报错让前端回落默认项，不能静默当成未配置。
+        if cfg_kind == "disabled" then
+            local fields = s3_config_fields(nil)
+            return { data = {
+                enabled = false, endpoint = "", region = "",
+                buckets = cjson.empty_array,
+                cfg = fields.cfg, configs = fields.configs,
+            } }
+        end
+        return s3_config_error(cfg_err, cfg_kind)
     end
     local bucket, path = s3.normalize_bucket(tostring(args.bucket or "")), s3.normalize_prefix(args.path)
     if args.bucket and args.bucket ~= "" and not bucket then
@@ -354,6 +411,9 @@ register("GET", "/api/s3", guard.wrap(function(_, env)
     if not path then
         return { error = { code = "invalid_path", message = "路径非法" } }, 400
     end
+    -- 多配置下 endpoint/region 必须来自**选中的那套** cfg（env 时代的
+    -- config.s3_endpoint_display 只有回落时才等于它，其余配置会回显错的服务地址）。
+    local fields = s3_config_fields(cfg)
     -- 不带 bucket：回桶列表（首页选择器用）。带 bucket：回目录内容。
     if not bucket then
         local buckets, err, status = s3.list_buckets(cfg)
@@ -371,9 +431,11 @@ register("GET", "/api/s3", guard.wrap(function(_, env)
         end
         return { data = {
             enabled = true,
-            endpoint = require("resty.authz").config.s3_endpoint_display,
-            region = require("resty.authz").config.s3_region_display,
+            endpoint = cfg.endpoint_display or "",
+            region = cfg.region,
             buckets = array_data(bucket_rows),
+            cfg = fields.cfg,
+            configs = fields.configs,
             bucket = cjson.null,
             -- 可写范围回显（空时必须是 cjson.empty_array，否则前端拿到 null）。
             writable_roots = array_data(cfg.writable_roots),
@@ -401,28 +463,25 @@ register("GET", "/api/s3", guard.wrap(function(_, env)
     listing.items = array_data(rows)
     listing.writable = s3_scope.dir_writable(cfg.writable, bucket, path)
     listing.next_token = listing.next_token or cjson.null
+    -- listing 是本次请求现建的表（来自 XML 解析），可安全加键；带上生效配置摘要
+    -- 让「切目录」与「读信息」两条路径的响应形状一致（前端只读 info，多余字段无害）。
+    listing.cfg = fields.cfg
+    listing.configs = fields.configs
     return { data = listing }
 end))
 
--- 分享链接：presigned GET。凭证不外泄，签名在 query 里，到期自动失效。
-register("GET", "/api/s3/share", guard.wrap(function(_, env)
-    local args = type(env.uri_args) == "table" and env.uri_args or {}
-    local cfg, bucket, path = s3_context(args, true)
-    if not cfg then return bucket, path end
-    local name = s3.normalize_name(args.name)
-    if not name then
-        return { error = { code = "invalid_name", message = "缺少或非法的 name 参数" } }, 400
-    end
-    local url, err = s3.presign_get(cfg, bucket, s3.join(path, name),
-        cfg.share_ttl, args.download == "1")
-    if not url then
-        return { error = { code = "s3_error", message = err } }, 502
-    end
-    return { data = { url = url, expires_in = cfg.share_ttl } }
-end))
+--- 记账用的身份名：会话取 username，机器 Key 取 Key 名（api_key 的 username 字段
+--- 存的就是 row.name，env Key 为 "env-api-key"）。source 区分「浏览器上传」与
+--- 「Key 直连」，前端流水页按这两值显示来源列。
+local function upload_identity(current, token)
+    return {
+        created_by = current and tostring(current.username or "") or "",
+        source = token and "upload" or "api",
+    }
+end
 
 -- 上传：guard 只做认证+CSRF，body 留给流式解析（resty.upload 要求未 read_body）。
-register("POST", "/api/s3/upload", guard.wrap(function(params, env)
+register("POST", "/api/s3/upload", guard.wrap(function(params, env, req, current, token)
     local args = type(env.uri_args) == "table" and env.uri_args or {}
     local cfg, bucket, path = s3_context(args, true)
     if not cfg then return bucket, path end
@@ -442,6 +501,12 @@ register("POST", "/api/s3/upload", guard.wrap(function(params, env)
     if not payload then
         return { error = { code = "upload_failed", message = err or "上传失败" } }, status or 400
     end
+    -- 记账（对象已写成功才记）：payload.data.uploaded 是 {name,size} 数组，空时是
+    -- cjson.empty_array 哨兵 userdata —— service 层已判 table，这里只管传。
+    -- 全冲突（409）/无文件（422）时 uploaded 为空，自然记 0 条。
+    -- **返回值刻意丢弃**：记账失败只落 WARN，绝不能把成功的上传改成失败响应。
+    service.record_s3_writes(cfg, bucket, path, payload.data and payload.data.uploaded,
+        upload_identity(current, token))
     return payload, status
 end, { admin = true, csrf = true }))
 
@@ -474,7 +539,16 @@ register("PUT", "/api/s3/rename", guard.wrap(function(params, env, req)
         not s3_scope.item_writable(cfg.writable, bucket, target_key) then
         return s3_read_only(cfg)
     end
-    return guard.result(s3.rename(cfg, bucket, path, name, new_name, new_path))
+    local renamed, rename_err, rename_status =
+        s3.rename(cfg, bucket, path, name, new_name, new_path)
+    if renamed then
+        -- 成功后把**源** key 的流水闭账（标 deleted）。不给目标补新记录的理由写在
+        -- api/services/uploads.lua 的 mark_renamed 注释里（目标字节非本网关写入、
+        -- 无可信 size 与归属；补记等于造伪账）。目录形态 rename 时源前缀下的记录
+        -- 也一并闭账（key_ids 会匹配 key 与 key/%）。
+        service.mark_s3_renamed(cfg, bucket, s3.join(path, name))
+    end
+    return guard.result(renamed, rename_err, rename_status)
 end, { admin = true, csrf = true }))
 
 register("DELETE", "/api/s3/remove", guard.wrap(function(params, env, req)
@@ -494,7 +568,12 @@ register("DELETE", "/api/s3/remove", guard.wrap(function(params, env, req)
     if data.recursive == true then
         -- 三值返回必须过 guard.result：klib.router 只取前两个返回值，
         -- 直接 return nil, err, status 会把 err 文案当成状态码（实测变空 200）。
-        return guard.result(s3.delete_prefix(cfg, bucket, key))
+        local removed, prefix_err, prefix_status = s3.delete_prefix(cfg, bucket, key)
+        if removed then
+            -- 递归删：整棵子树的流水都闭账（recursive=true → key 与 key/% 全标 deleted）。
+            service.mark_s3_deleted(cfg, bucket, key, true)
+        end
+        return guard.result(removed, prefix_err, prefix_status)
     end
     -- 非递归：前缀下还有对象就拒绝，避免一个误点删掉整棵树（与 files.remove 对齐）。
     local occupied, perr, pstatus = s3.has_objects_under(cfg, bucket, key)
@@ -508,6 +587,9 @@ register("DELETE", "/api/s3/remove", guard.wrap(function(params, env, req)
     if not ok then
         return guard.result(nil, err, status or 500)
     end
+    -- 单对象删除成功才闭账；recursive=false 但 key 可能是「目录标记对象」，
+    -- service 层的 SQL 会顺带匹配 key/ 与 key/%（同一个名字两种形态）。
+    service.mark_s3_deleted(cfg, bucket, key, false)
     return { data = { removed = 1, bucket = bucket, path = path, name = name } }
 end, { admin = true, csrf = true }))
 
@@ -540,6 +622,133 @@ register("POST", "/api/s3/mkdir", guard.wrap(function(params, env, req)
         return { error = { code = "mkdir_failed", message = err } }, err_status or 500
     end
     return { data = { path = key, bucket = bucket } }, 201
+end, { admin = true, csrf = true }))
+
+-- ── 多套存储服务配置（s3_configs 表）───────────────────────────────────────
+-- 回显永不带 secret_access_key（repository 的 META 列集合在 SQL 层就不选它），
+-- 页面看到的只有 has_secret 与 access_key_id_masked，所以 PATCH 的「空 = 不改」
+-- 语义才能安全成立。id=0 是 env 回落项（virtual=true）：编辑/删除 422，
+-- 「设为默认」是 no-op 成功。
+-- 注册顺序（红线）：字面量路由必须早于 /:id，否则 POST /api/s3-configs 会被
+-- /:id 系规则先吃掉（klib.router 的 sort 只把「多段参数」路由排到尾部，
+-- 同段数的字面量与 :param 仍按注册先后取第一个完整匹配）。
+register("GET", "/api/s3-configs", guard.wrap(function()
+    return { data = service.list_s3_configs() }
+end, { admin = true }))
+
+register("POST", "/api/s3-configs", guard.wrap(with_body(function(_, data)
+    -- with_body 把 callback 的三个返回值原样喂给 guard.result，所以 service 侧
+    -- 的 (item, nil, 201) 能真的落成 201（与 POST /api/users 同一手法）。
+    return service.create_s3_config(data)
+end), { admin = true, csrf = true }))
+
+-- /:id/default 与 /:id/test 都是「方法 + 段数」不同的路由，但仍排在 PATCH/DELETE
+-- /:id 之前注册：保持与 /api/menu-entries/reorder 相同的阅读顺序，避免以后
+-- 有人把 default 改成同段数的字面量路由时踩到匹配优先级。
+register("PUT", "/api/s3-configs/:id/default", guard.wrap(with_body(function(params)
+    return service.set_default_s3_config(tonumber(params.id))
+end), { admin = true, csrf = true }))
+
+register("POST", "/api/s3-configs/:id/test", guard.wrap(with_body(function(params)
+    -- 连通性测试：{ok=true,buckets=[名字数组]}；失败 502 + 原因（不回显任何凭证）。
+    return service.test_s3_config(tonumber(params.id))
+end), { admin = true, csrf = true }))
+
+register("PATCH", "/api/s3-configs/:id", guard.wrap(with_body(function(params, data)
+    return service.update_s3_config(tonumber(params.id), data)
+end), { admin = true, csrf = true }))
+
+register("DELETE", "/api/s3-configs/:id", guard.wrap(function(params)
+    return guard.result(service.delete_s3_config(tonumber(params.id)))
+end, { admin = true, csrf = true }))
+
+-- ── 上传流水（upload_records）：经网关写入的对象账本 + 过期清理 ─────────────
+register("GET", "/api/uploads", guard.wrap(function(_, env)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    -- 三值返回照旧经 guard.result（非法 state 要真出 422，而不是 {data:null} 200）。
+    return guard.result(service.list_uploads(args))
+end, { admin = true }))
+
+-- 字面量 cleanup 必须早于 DELETE /api/uploads/:id 注册（同上红线）。
+register("POST", "/api/uploads/cleanup", guard.wrap(with_body(function(_, data)
+    return service.cleanup_uploads(data)
+end), { admin = true, csrf = true }))
+
+register("DELETE", "/api/uploads/:id", guard.wrap(function(params)
+    -- 语义：立刻按记录去删对象/本地文件并把行标 deleted；失败回 502 + 原因，不静默。
+    return guard.result(service.delete_upload(tonumber(params.id)))
+end, { admin = true, csrf = true }))
+
+-- ── 本机临时保存区（store）：给 agent 的免登录落盘接口 ───────────────────────
+-- 定位：容器内 AUTHZ_STORE_DIR（默认 /data/store，宿主落在部署卷的 data/store 下）。
+-- 每次写入都在 upload_records 记一条 kind='local' 流水，expires_at 由
+-- s3_config_store.align_expiry 整点对齐，交给 maintenance 的每小时定时器回收；
+-- 想立刻回收就调 POST /api/uploads/cleanup。**这里不承诺长期保存**，需要持久的
+-- 内容走对象存储（/api/s3* + s3_configs）。
+--
+-- guard 一律不带 session_only（service 侧红线 R8）：本 API 的核心用途就是 agent 用
+-- X-API-KEY 免登录保存/取回文件。能力面不变：admin 角色 + Key 的来源 IP 白名单。
+-- 写端点保留 csrf=true —— 机器 Key 天然免 CSRF（guard 只在未出示凭证头时校验），
+-- 受影响的只有浏览器会话，与其他写端点一致。
+-- 注册顺序（红线）：本组全是字面量路由、无 :id；相对路径一律走 query（?path=），
+-- 不放进 URL 段，避免多级路径与路由段数打架。
+local function store_identity(current, token)
+    return (current and tostring(current.username or current.name or "") or ""),
+        (token and "upload" or "api")
+end
+
+register("GET", "/api/store/info", guard.wrap(function()
+    -- 目录不可用不是错误：service 回 200 + enabled=false，前端显示提示卡片。
+    return { data = service.store_info() }
+end, { admin = true }))
+
+register("GET", "/api/store/stat", guard.wrap(function(_, env)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    return guard.result(service.store_stat(args.path))
+end, { admin = true }))
+
+register("GET", "/api/store", guard.wrap(function(_, env)
+    -- 列目录：?path=<rel>，省略即保存区根。只读，不需要 CSRF。
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    return guard.result(service.store_list(args.path, args))
+end, { admin = true }))
+
+-- PUT 的字节来源必须先由 store_body_source() 取得：它按 Content-Length 预判体积，
+-- 超限当场 413，而不是先把整个请求体写进 nginx 临时文件。注意 service 的形状是
+-- put(rel, expires_hours, <字节来源>, created_by, opts) —— 第 3 个实参是字节来源，
+-- 记账用的来源字符串在第 5 个实参 opts.source 里（命名撞车是 service 层既有契约，
+-- 这里照用；改动会牵动 pump 的超限抛错路径）。overwrite 默认开：agent 反复保存
+-- 同一路径是主用途，只有显式 overwrite=0/false 才在同名时回 409。
+register("PUT", "/api/store", guard.wrap(function(params, env, req, current, token)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    local who, source = store_identity(current, token)
+    local body, body_err, body_status = service.store_body_source()
+    if not body then
+        return { error = { code = "store_body_rejected", message = tostring(body_err) } },
+            tonumber(body_status) or 400
+    end
+    local keep_existing = args.overwrite == "0" or args.overwrite == "false"
+    return guard.result(service.store_put(args.path, args.expires_hours, body, who,
+        { source = source, overwrite = not keep_existing }))
+end, { admin = true, csrf = true }))
+
+-- multipart 多文件上传：字节流由 service 内部用 resty.upload 直接解析（与
+-- files/s3 上传同一手法），所以这里**不能**先 read_body。upload 的第 3 个实参
+-- 在 service 里未使用（保留位），传 nil 占位。overwrite 语义与其他上传相反：
+-- 默认关（同名计入 skipped / 全冲突 409），要覆盖显式带 overwrite=1。
+register("POST", "/api/store/upload", guard.wrap(function(params, env, req, current, token)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    local who, source = store_identity(current, token)
+    return guard.result(service.store_upload(args.path, args.expires_hours, nil, who,
+        { source = source,
+          overwrite = args.overwrite == "1" or args.overwrite == "true" }))
+end, { admin = true, csrf = true }))
+
+register("DELETE", "/api/store", guard.wrap(function(params, env, req, current)
+    local args = type(env.uri_args) == "table" and env.uri_args or {}
+    local who = store_identity(current, nil)
+    return guard.result(service.store_remove(args.path,
+        args.recursive == "1" or args.recursive == "true", who))
 end, { admin = true, csrf = true }))
 
 register("POST", "/api/menu-entries", guard.wrap(with_body(function(_, data)

@@ -27,7 +27,7 @@
       </section>
 
       <q-card flat class="surface-card q-mt-lg">
-        <q-card-section class="surface-heading"><div><div class="surface-title">{{ t.routesTitle }}</div><div class="surface-subtitle">{{ t.routesCopy }} · {{ portMin }}–{{ portMax }}</div></div><q-badge outline color="blue-3" :label="`${bindings.length} ${t.routeCount}`"></q-badge></q-card-section>
+        <q-card-section class="surface-heading"><div><div class="surface-title">{{ t.routesTitle }}</div><div class="surface-subtitle">{{ t.routesCopy }} · {{ portMin }}–{{ portMax }}<template v-if="appEntries.length"> · 内置应用保留入口：<span v-for="(entry, idx) in appEntries" :key="entry.name">{{ idx ? ' / ' : '' }}{{ entry.prefix }}-* → {{ entry.title }}(:{{ entry.port }})</span>，端口不可绑定；策略对象用 /端口/* （如 /100/*）即可对某角色单独授权</template></div></div><q-badge outline color="blue-3" :label="`${bindings.length} ${t.routeCount}`"></q-badge></q-card-section>
         <q-separator dark></q-separator>
         <q-table flat dark :rows="bindings" :columns="bindingColumns" row-key="id" :loading="loading" :rows-per-page-options="[8, 16, 0]" class="linear-table">
           <template v-slot:body-cell-domain="props"><q-td :props="props"><div class="route-cell"><q-icon name="mdi-earth" size="18px"></q-icon><strong>{{ entryDomain(props.row) }}</strong></div></q-td></template>
@@ -328,8 +328,8 @@
     </main>
   </div>
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
-  <script src="./api.js?v=22"></script>
-  <script src="./i18n.js?v=53"></script>
+  <script src="./api.js?v=24"></script>
+  <script src="./i18n.js?v=58"></script>
   <script>
     const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref } = Vue
     
@@ -361,6 +361,12 @@
         const policyEditingId = ref(null)
         const portMin = ref(2000)
         const portMax = ref(20000)
+        // 内置应用保留前缀入口（/api/authorization 回 app_entries）；文案内联中文
+        const appEntries = ref([])
+        const reservedPortList = computed(() => appEntries.value.map(entry => entry.port))
+        const portRuleText = computed(() =>
+            `${t.value.objectPortRange} ${portMin.value}-${portMax.value}` +
+            (appEntries.value.length ? `（或内置应用保留端口 ${reservedPortList.value.join('/')}）` : ''))
         const bindingDefaults = () => ({ domain: '', target_ip: '127.0.0.1', port: 3000, menu_name: '', note: '', enabled: true, upstream_scheme: 'http', upstream_ssl_verify: true, upstream_path: '', upstream_host: '', forwarded_host: '', forwarded_proto: '', forwarded_port: '', origin_mode: 'auto', custom_origin: '', simulate_local: false, local_ip: '127.0.0.1', open_in_new: false })
         const bindingForm = reactive(bindingDefaults())
         const rewriteOpen = ref(false)
@@ -1027,7 +1033,7 @@
         const port = policyObjectPortOf(value) || policyObjectPort.value
         if (port) {
           return (port >= portMin.value && port <= portMax.value) ||
-            `${t.value.objectPortRange} ${portMin.value}-${portMax.value}`
+            reservedPortList.value.includes(port) || portRuleText.value
         }
         return t.value.objectAddressRule
       }
@@ -1038,7 +1044,7 @@
         const port = Number(raw)
         if (!Number.isInteger(port) || port < 1) return t.value.objectPortInvalid
         return (port >= portMin.value && port <= portMax.value) ||
-            `${t.value.objectPortRange} ${portMin.value}-${portMax.value}`
+            reservedPortList.value.includes(port) || portRuleText.value
       }
 
       function policyObjectPathRule (value) {
@@ -1146,6 +1152,7 @@
             isAdmin.value = Boolean(data.admin)
             portMin.value = data.port_min || 2000
             portMax.value = data.port_max || 20000
+            appEntries.value = data.app_entries || []
           } catch (loadError) {
             error.value = loadError.message
           } finally {
@@ -1274,7 +1281,7 @@
 
       onBeforeUnmount(() => unsubscribeLocale?.())
     
-      return { actionList, addRequestRewriteFilter, addRequestRewriteHeader, addRewriteCondition, addRewriteFilter, addRewriteHeader, allowCount, applicationsLoading, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, clearRequestRewrite, clearRewrite, denyCount, entryDomain, error, filterPolicyObjects, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, openRequestRewrite, openRewrite, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectLabel, policyObjectNoMatch, policyObjectOptions, policyObjectPathRule, policyObjectPort, policyObjectPortRule, policyObjectTargetRule, setPolicyObjectTarget, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, removeRequestRewriteFilter, removeRequestRewriteHeader, removeRewriteFilter, removeRewriteHeader, required, requestHeaderOpOptions, resetPolicyFields, requestRewriteBinding, requestRewriteForm, requestRewriteHasStored, requestRewriteJsonError, requestRewriteJsonText, requestRewriteOpen, requestRewriteView, rewriteActive, rewriteBodyOptions, rewriteBinding, rewriteCondFieldOptions, rewriteCondLogicOptions, rewriteCondOpOptions, rewriteCondValueRule, rewriteContentTypeRule, rewriteDetails, rewriteFilterSourceRule, rewriteForm, rewriteHasStored, rewriteHeaderNameRule, rewriteJsonError, rewriteJsonText, rewriteOpen, rewriteStatusRule, rewriteStored, rewriteView, saveBindingForm, savePolicyForm, saveRequestRewriteForm, saveRewriteForm, saving, condRequiresHeaderName, condRequiresValue, selectedPolicyObject, setPolicyMethods, sourceLabel, switchRequestRewriteView, switchRewriteView, t, toggleBinding, upstreamSchemeOptions }
+      return { actionList, addRequestRewriteFilter, appEntries, addRequestRewriteHeader, addRewriteCondition, addRewriteFilter, addRewriteHeader, allowCount, applicationsLoading, bindingAdvancedOpen, bindingColumns, bindingDomainRule, bindingEditingId, bindingForm, bindingOpen, bindings, clearRequestRewrite, clearRewrite, denyCount, entryDomain, error, filterPolicyObjects, forwardedProtoOptions, hasCustomProxy, httpActions, isAdmin, load, loading, openCreateBinding, openEditBinding, openEditPolicy, openPolicyDialog, openRequestRewrite, openRewrite, originModeOptions, policies, policyBindings, policyColumns, policyEditingId, policyFilter, policyForm, policyObjectIcon, policyObjectLabel, policyObjectNoMatch, policyObjectOptions, policyObjectPathRule, policyObjectPort, policyObjectPortRule, policyObjectTargetRule, setPolicyObjectTarget, policyObjectTitle, policyObjectValue, policyOpen, policyPrimaryBinding, policyRoleOptions, policySubjectOptions, policyUserOptions, portMax, portMin, proxyDetails, proxySummary, removeBinding, removePolicy, removeRequestRewriteFilter, removeRequestRewriteHeader, removeRewriteFilter, removeRewriteHeader, required, requestHeaderOpOptions, resetPolicyFields, requestRewriteBinding, requestRewriteForm, requestRewriteHasStored, requestRewriteJsonError, requestRewriteJsonText, requestRewriteOpen, requestRewriteView, rewriteActive, rewriteBodyOptions, rewriteBinding, rewriteCondFieldOptions, rewriteCondLogicOptions, rewriteCondOpOptions, rewriteCondValueRule, rewriteContentTypeRule, rewriteDetails, rewriteFilterSourceRule, rewriteForm, rewriteHasStored, rewriteHeaderNameRule, rewriteJsonError, rewriteJsonText, rewriteOpen, rewriteStatusRule, rewriteStored, rewriteView, saveBindingForm, savePolicyForm, saveRequestRewriteForm, saveRewriteForm, saving, condRequiresHeaderName, condRequiresValue, selectedPolicyObject, setPolicyMethods, sourceLabel, switchRequestRewriteView, switchRewriteView, t, toggleBinding, upstreamSchemeOptions }
       }
     })
     

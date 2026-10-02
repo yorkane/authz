@@ -77,6 +77,10 @@ scripts/azctl.sh ... menu
 - 给某角色/用户放行某服务：`POST /policies`（ptype=p，主体 `role:staff` 或
   `user:local:alice`，对象 `/<port>/*`，方法 `*` 或具体方法）。deny 优先于 allow，
   收紧用 `eft=deny`。
+- 内置应用保留前缀入口：`file-<节点>.<域>` 直达文件浏览页、`s3-<节点>.<域>` 直达
+  对象存储页（虚拟端口 100/101，`AUTHZ_APP_*` 可调可关）。默认只有 admin 可用；
+  要给别的角色开放就用策略对象 `/100/*`、`/101/*`（这两个端口无需也不能再绑域名）。
+  用户说「开放文件浏览给某角色」时优先走这条，不要给它新建绑定。
 - 按本地服务名配域名：`POST /applications`，`domain` 只填最后一级前缀（如 `code`），
   网关按当前请求 Host 拼 `<前缀>-<节点>.<域名>`；用户说完整域名时先确认他指的是哪个
   入口域，再决定填前缀还是精确域名。
@@ -98,6 +102,34 @@ scripts/azctl.sh ... menu
 - 菜单：`GET /menu-tree` 看现状；自定义分组/条目走 `menu-entries`；调整
   「域名服务/本地服务」组内项的名字、图标、顺序、隐藏走 `menu-services/:key`
   （key 形如 `binding:3` / `port:2077`）。
+- 配一套新的 S3 服务并设为默认：`POST /s3-configs`（明文 http 内网必须显式
+  `"allow_http":true`，否则该配置报错不可用）→ `POST /s3-configs/:id/test` 验通 →
+  `PUT /s3-configs/:id/default`。**改表即生效，不需要 reload**；表里有启用行时它覆盖
+  `AUTHZ_S3_*` env 回落项（`id=0`、只读）。见 references/api.md §12。
+
+  ```bash
+  curl -sS -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' \
+    -d '{"name":"minio-a","endpoint":"http://10.251.14.70:30080","region":"RegionOne",
+         "access_key_id":"<AKID>","secret_access_key":"<SECRET>","allow_http":true,
+         "expires_hours":24}' "$AUTHZ/_authz/api/s3-configs" | jq '.data.item.id'
+  ```
+- Agent 把报告落盘换一条可取回链接：`PUT /api/store?path=<rel>`，请求体即文件字节，
+  响应里的 `data.url` 是同源相对路径（拼上实例地址再交付），默认 24 小时后自动删除；
+  需要长期保存改走对象存储。见 references/api.md §14。
+
+  ```bash
+  curl -sS -X PUT -H "x-api-key: $AUTHZ_API_KEY" --data-binary @report.md \
+    "$AUTHZ/_authz/api/store?path=reports/report.md" | jq -r .data.url
+  ```
+- 清理过期对象：先看现状 `GET /uploads?state=active`，再 `POST /uploads/cleanup`
+  立刻跑一轮（等价每小时定时器的一轮），或 `DELETE /uploads/:id` 精确删一条。
+  `state=failed` + `last_error='config removed'` 表示配置行已删、对象不可达，要人工处理。
+  见 references/api.md §13。
+
+  ```bash
+  curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' \
+    -d '{}' "$AUTHZ/_authz/api/uploads/cleanup" | jq .data
+  ```
 
 ## 硬性规则
 

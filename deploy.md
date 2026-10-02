@@ -19,8 +19,11 @@
 域名解析规则（由外到内优先匹配）：
 
 1. **显式绑定**：管理界面配置的固定域名 → `target_ip:port`；
-2. **数字前缀子域名**（免配置）：`3000-任意域名` → 本机 `3000` 端口（范围 `AUTHZ_PORT_MIN`~`AUTHZ_PORT_MAX`）；
-3. 其余域名 → 404。
+2. **内置应用保留前缀**（虚拟绑定）：`file-任意域名` → 文件浏览页面（虚拟端口 100）、
+   `s3-任意域名` → 对象存储页面（虚拟端口 101）；不在数据库中、不占绑定端口，
+   按策略对象 `/<端口><路径>` 单独授权；`AUTHZ_APP_DOMAINS=0` 可整体关闭；
+3. **数字前缀子域名**（免配置）：`3000-任意域名` → 本机 `3000` 端口（范围 `AUTHZ_PORT_MIN`~`AUTHZ_PORT_MAX`）；
+4. 其余域名 → 404。
 
 所有代理流量默认要求登录 + Casbin 授权；后端会收到 `X-Authz-User` / `X-Authz-Source` / `X-Authz-Identity` 头。
 
@@ -80,6 +83,13 @@ AUTHZ_PORT_MAX=20000
 
 # ── 数据目录（宿主机），必须持久化 ──────────────────────
 DATA_DIR=./data
+
+# ── 本机临时保存区（Agent 落盘，可选）──────────────────
+# PUT /_authz/api/store 的容器内根目录；compose 已把 DATA_DIR 整体挂到 /data，
+# 所以宿主落在 ${DATA_DIR}/store 下，无需额外 volume。
+AUTHZ_STORE_DIR=/data/store
+# 默认保留小时数（0 = 永不过期）。到点后由网关每小时的后台清理器删除。
+AUTHZ_STORE_DEFAULT_EXPIRY_HOURS=24
 ```
 
 > 旧变量 `AUTHZ_AGENT_API_KEY` 已移除，不要再写进 `.env`；现在统一用上面的
@@ -146,6 +156,65 @@ curl -sk -o /dev/null -w "%{http_code}\n" https://127.0.0.1:6443/favicon.ico   #
 curl -sk -o /dev/null -w "%{http_code}\n" https://127.0.0.1:6443/noc.gif       # 200
 ```
 
+### 3.5 可选：多套存储服务与本机保存区
+
+两项能力都不需要额外的 volume 或额外的容器，但部署动作不同：
+
+| 能力 | 开关 | 部署动作 |
+|------|------|----------|
+| 对象存储浏览（多套服务） | 对象存储页「配置」按钮进入的配置视图写库（独立菜单入口已在迁移 v27 隐藏）；`AUTHZ_S3_*` 只作回落 | **无需重建容器**。表里有启用行即以表为准，改表即生效（查询缓存 TTL 30s + `db_rev` 失效）；纯 env 部署零迁移即可升级 |
+| 本机临时保存区（`PUT /_authz/api/store`） | 常开（entrypoint 自动 `mkdir -p ${AUTHZ_STORE_DIR:-/data/store}`） | 只需 `AUTHZ_STORE_DIR` / `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS` 两个变量；改动它们要 `--force-recreate` |
+
+保存区落盘位置：容器内 `AUTHZ_STORE_DIR`（默认 `/data/store`），宿主 `${DATA_DIR}/store`
+—— `${DATA_DIR}` 相对 compose 文件所在目录解析：本机部署目录 `/data/app/authz/` 时即
+`/data/app/authz/data/store`，241.t 测试机 `/data/app/authz-test/` 时即
+`/data/app/authz-test/data/store`（实例若把 `DATA_DIR` 指到别处，以 `docker inspect` 的
+挂载源为准）。因为 compose 已经 `${DATA_DIR:-./data}:/data` 整体挂载，**不需要为它加 volume**。
+
+> 变量注入方式有差别（容易踩）：本文 3.2 的最小 compose 用 `env_file: .env`，`.env` 里的变量会全部
+> 进容器；而仓库根目录那份 `docker-compose.yml`（开发挂载模式，与附录 B 同源）用的是**显式 `environment:`
+> 清单**，其中尚未列出 `AUTHZ_STORE_DIR` / `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS`，在那种部署下改 `.env`
+> 不生效（容器恒用默认 `/data/store` 与 24 小时）。要自定义就在该 compose 的 `environment:` 里补两行：
+> `AUTHZ_STORE_DIR: ${AUTHZ_STORE_DIR:-/data/store}` 与
+> `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS: ${AUTHZ_STORE_DEFAULT_EXPIRY_HOURS:-24}`。
+
+```yaml
+# 最小 compose 已覆盖，无需新增条目（仅作核对）
+volumes:
+  - ${DATA_DIR:-./data}:/data      # store 区 = 该卷下的 store/
+```
+
+**升级既有实例时必须同步模板**：本次能力依赖 `conf/nginx.conf.template` 里新增的
+`init_worker_by_lua_block`（每小时清理到期对象与上传暂存残留）和
+`conf/server.conf.template` 里新增的 `location ^~ /_authz/store/`（保存区取回出口）。
+部署若把宿主 `conf/` 挂到 `/etc/openresty/templates`（本机与 241.t 都是这种模式），
+镜像升级不会更新它，必须把模板同步过去再重建：
+
+```bash
+# 本机（部署目录 /data/app/authz/）
+cp conf/nginx.conf.template conf/server.conf.template /data/app/authz/conf/
+cd /data/app/authz && docker compose up -d --force-recreate
+
+# 241.t 测试机（部署目录 /data/app/authz-test/）
+rsync -a conf/ 241.t:/data/app/authz-test/conf/
+ssh 241.t 'cd /data/app/authz-test && docker compose up -d --force-recreate'
+```
+
+验证定时器与出口都已就位（三项都要通过）：
+
+```bash
+AUTHZ=http://127.0.0.1:6080
+docker exec authz grep -c maintenance /usr/local/openresty/nginx/conf/nginx.conf   # ≥1（定时器已渲染进配置）
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/store/info" | head -c 200   # enabled:true
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/s3-configs" | head -c 200   # items 数组
+```
+
+**备份口径变化（重要）**：多套存储服务配置存在 SQLite 里，其中
+`s3_configs.secret_access_key` 是**明文**（SigV4 要拿原文参与签名，摘要无法还原，
+这是有意的决策）。因此第 6 节的备份（含 `azops backup`、`cp data/authz/authz.db`）
+会连带把 S3 密钥一起复制走 —— 备份介质的保密等级由此抬升，必须按含密文件处理：
+限制可读者、不进公开对象存储、不贴进工单或聊天记录。
+
 ## 4. 部署后验证（逐项执行，全部通过才算成功）
 
 ```bash
@@ -196,7 +265,7 @@ curl -skS -D - -o /dev/null -X POST "https://127.0.0.1:${HTTPS_PORT}/_authz/logi
 | 改了 `.env` / 挂载 / 网络 | `docker compose up -d --force-recreate`（必须**重建**容器，`restart` 不会读取新环境变量） |
 | 检查容器内配置 | `docker exec authz openresty -t` |
 | 忘记 admin 密码 / 恢复初始密码 | `docker exec -e AUTHZ_ADMIN_PASSWORD="新密码" authz admin_password_reset` |
-| 备份 | 复制 `${DATA_DIR}`（含 `authz/authz.db` 与 `certs/`） |
+| 备份 | 复制 `${DATA_DIR}`（含 `authz/authz.db` 与 `certs/`）。**数据库里的 `s3_configs.secret_access_key` 是明文**（SigV4 需要原文签名），备份文件必须按含密介质处理：限制读取者、不要进公开的对象存储或工单附件 |
 | 查看日志 | `docker logs -f authz`（access 走 stdout，error 走 stderr） |
 | 容器状态核对 | `docker inspect authz --format "{{.State.Status}} {{.HostConfig.NetworkMode}}"` 应为 `running host` |
 
@@ -288,6 +357,11 @@ AUTHZ_HTTPS_PORT=6443                             # HTTPS 入口（网关终止 
 AUTHZ_HTTP_MODE=redirect                          # 默认 308 到 HTTPS；disabled 仅回环；serve 仅受控测试
 AUTHZ_PORT_MIN=2000                               # 数字前缀子域名最小端口（强制 >=2000 防回环）
 AUTHZ_PORT_MAX=20000                              # 最大端口；目标为网关自身端口返回 508 防循环
+AUTHZ_APP_DOMAINS=1                               # 内置应用保留前缀入口总开关（file→100 文件浏览、s3→101 对象存储；0 关闭）
+AUTHZ_APP_PREFIX_FILES=file                       # files 保留前缀（file-<节点>.<域> 直达文件浏览页）
+AUTHZ_APP_PORT_FILES=100                          # files 虚拟端口（策略对象 /100/* 授权；不能被域名绑定占用）
+AUTHZ_APP_PREFIX_S3=s3                            # s3 保留前缀
+AUTHZ_APP_PORT_S3=101                             # s3 虚拟端口
 AUTHZ_DISCOVERY_PORTS=                            # 追加探测端口（逗号分隔），容器读不到宿主监听表时用，如 3080,8082
 AUTHZ_DISCOVERY_TTL=30                            # 菜单服务发现缓存秒数（1-300）
 AUTHZ_DISCOVERY_CONNECT_TIMEOUT_MS=100            # 探测连接超时（10-5000ms）
@@ -300,6 +374,28 @@ AUTHZ_DB_PATH=/data/authz/authz.db                # 容器内 SQLite 路径（�
 AUTHZ_CERT_DIR=/data/certs                        # 容器内证书目录，缺失自动生成 10 年期自签证书（SAN: DNS:*）
 AUTHZ_DB_CACHE_TTL=30                             # SQLite 查询缓存秒数（1-300）
 AUTHZ_DB_CACHE_LRU_SIZE=500                       # 查询缓存条目数（50-5000）
+AUTHZ_STORE_DIR=/data/store                       # 本机「临时保存区」根目录（容器内），PUT /_authz/api/store 的落点。宿主落在 ${DATA_DIR}/store（compose 整体挂 /data，无需额外 volume）。必须可写
+AUTHZ_STORE_DEFAULT_EXPIRY_HOURS=24               # 保存区默认保留小时数（0-8760，0 = 永不过期）。到点由每小时后台清理器删除；单次请求可用 ?expires_hours= 覆盖
+# ══════════════ 对象存储（S3 兼容）══════════════
+# 完整变量与约束见 .env.example 与 doc/s3-integration.md §3。注意这一整套现在只是
+# 【回落默认配置】：对象存储页「配置」视图在 s3_configs 表里加一行启用配置，
+# 就以表为准（改表即生效，不需要重建容器）；表空时才用这里的 AUTHZ_S3_*。
+# 只有实例级调优（AUTHZ_S3_*_TIMEOUT_MS / AUTHZ_S3_KEEPALIVE_MS / AUTHZ_HOST_LAN_IP）
+# 仍然只能靠环境变量。
+# AUTHZ_S3_ENDPOINT=                              # http(s)://<host>[:<port>]，path-style、不能带路径；留空 = 回落项不存在（表里也没行时整体功能关闭）
+# AUTHZ_S3_REGION=us-east-1                       # SigV4 region
+# AUTHZ_S3_ACCESS_KEY_ID=                         # endpoint 已设时必填
+# AUTHZ_S3_SECRET_ACCESS_KEY=                     # endpoint 已设时必填（表里的那一行是明文入库，见含密告警）
+# AUTHZ_S3_ALLOW_HTTP=false                       # endpoint 是明文 http 时必须显式 true，否则启动即报错
+# AUTHZ_S3_TMP_DIR=/data/s3tmp                    # 上传中转暂存目录（容器内，与 /data 同卷最省 IO）
+# AUTHZ_S3_CONNECT_TIMEOUT_MS=2000                # 以下为实例级调优，表里的所有配置共用同一份
+# AUTHZ_S3_READ_TIMEOUT_MS=30000
+# AUTHZ_S3_SEND_TIMEOUT_MS=30000
+# AUTHZ_S3_KEEPALIVE_MS=30000
+# AUTHZ_S3_WRITABLE_PATHS=                        # 回落项的可写范围白名单：留空 = 默认 share/<本机 LAN IP>；"/" 或 "*" = 全部可写
+# AUTHZ_S3_SHARE_ROOT=/share/                     # 默认 share 挂载根
+# AUTHZ_S3_SHARE_BUCKET=                          # 非空 = share 前缀只在该桶生效
+# AUTHZ_HOST_LAN_IP=                              # 显式覆盖本机 LAN IP（非 host 网络/测试用）；探测失败且未设 = 整体降级只读
 
 # ══════════════ 会话 ══════════════
 AUTHZ_SESSION_TTL=604800                          # 会话有效期秒数，默认 7 天；管理界面修改密码后该用户全部会话失效（管理端需输入两次新密码确认）
@@ -408,7 +504,7 @@ services:
       - ./conf:/etc/openresty/templates:ro
 ```
 
-注意：开发挂载要求代码树与镜像版本匹配，否则会引入行为差异；纯镜像部署不存在这个问题。修改挂载的模板/代码后用 `openresty -t` 检查再重启；修改 `.env` 必须重建容器。
+注意：开发挂载要求代码树与镜像版本匹配，否则会引入行为差异；纯镜像部署不存在这个问题。其中 ./lualib 挂载会整体覆盖 site/lualib，宿主目录缺 lfs.so 时文件浏览会报「lfs 模块不可用」。部署前补一次：docker run --rm --entrypoint sh <image> -c "cat /usr/local/openresty/site/lualib/lfs.so" > ./lualib/lfs.so；新镜像已把 lfs.so 同时烘入内置 /usr/local/openresty/lualib/ 作 cpath 兜底，即使遗漏也不再复发。修改挂载的模板/代码后用 `openresty -t` 检查再重启；修改 `.env` 必须重建容器。
 
 ## 附录 C：部署完成检查单（供自动化核对）
 

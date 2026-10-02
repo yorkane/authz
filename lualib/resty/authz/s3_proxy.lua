@@ -22,24 +22,41 @@ local ESC_SCRIPT = "<script>document.addEventListener('keydown',function(e);" ..
     "if(e.key==='Escape'&&window.parent!==window){" ..
     "window.parent.postMessage({type:'authz-files-esc'},'*')}});</script>"
 
---- 从 /_authz/s3/<bucket>/<key...> 拆出 bucket 与 key。
+--- 从 /_authz/s3/<bucket>/<key...> 拆出 bucket、key，以及 ?cfg= 指向的存储配置引用。
+--- 第三个返回值 cfg_ref 是 query 里的原始字符串（可为 nil = 用默认配置）：多套配置
+--- 靠 query 参数区分，URL 形态 /_authz/s3/<bucket>/<key> 保持不变（现有 location
+--- 与回归断言依赖它）。
 function _M.parse_path(request_uri, script_name)
     -- 先剥掉 query：否则 ?download=1 会被当成 key 的一部分签进请求里（服务端 404）。
-    local target = tostring(request_uri or ""):match("^([^?]+)") or ""
+    local uri = tostring(request_uri or "")
+    -- ?cfg= 可以在 query 的任意位置（前端还会同时带 download / authz_preview），
+    -- 所以按 & 切开逐个键比对，不能用「必须是最后一个参数」的模式。
+    local cfg_ref
+    local query = uri:match("^[^?]*%?(.+)$")
+    if query then
+        for pair in query:gmatch("[^&]+") do
+            local name, value = pair:match("^([^=]*)=(.*)$")
+            if name and name:lower() == "cfg" then
+                cfg_ref = ngx.unescape_uri(value)
+                break
+            end
+        end
+    end
+    local target = uri:match("^([^?]+)") or ""
     target = target:match("^/_authz/s3/(.+)$") or (script_name
         and target:match("^" .. ngx.escape_uri(script_name) .. "/(.+)$"))
-    if not target then return nil, nil end
+    if not target then return nil, nil, cfg_ref end
     local raw_bucket, raw_key = target:match("^([^/]+)/(.+)$")
-    if not raw_bucket then return nil, nil end
+    if not raw_bucket then return nil, nil, cfg_ref end
     -- key 里的 %xx 要先解出来（签名要用明文 key），但解完必须再挡一次穿越：
     -- 服务端其实会把 %2e%2e 当字面量，先挡是为了日志与签名串不出现歧义。
     local bucket = s3.normalize_bucket(ngx.unescape_uri(raw_bucket))
     local key = ngx.unescape_uri(raw_key)
-    if not bucket or key == "" or key:find("[%c]") then return nil, nil end
+    if not bucket or key == "" or key:find("[%c]") then return nil, nil, cfg_ref end
     for segment in key:gmatch("[^/]+") do
-        if segment == ".." then return nil, nil end
+        if segment == ".." then return nil, nil, cfg_ref end
     end
-    return bucket, key
+    return bucket, key, cfg_ref
 end
 
 local function reject(status, message)
@@ -61,8 +78,21 @@ _M.reject = reject
 
 --- Handle the request. Terminates with ngx.exit.
 function _M.serve()
-    local cfg = require("resty.authz").config.s3
-    if not cfg then return reject(423, "对象存储未配置") end
+    -- 多套 S3 配置：?cfg=<id|name> 选一套，缺省用默认项（is_default → id 最小
+    -- 的启用行 → 环境变量回落项）。取不到配置沿用既有的 423「对象存储未配置」；
+    -- 取到但行内字段非法（配置存在但网关用不了）回 502 + 简明中文，绝不回显 secret。
+    local store = require "resty.authz.s3_config_store"
+    -- 判定顺序保持原样：先选配置（未配置 423 优先于路径 404），再解析路径。
+    local cfg_ref = ngx.req.get_uri_args().cfg
+    if type(cfg_ref) == "table" then cfg_ref = cfg_ref[1] end
+    local cfg, cfg_err, cfg_kind = store.get(cfg_ref)
+    if not cfg then
+        -- kind=disabled：表里没有启用行且 env 也没配 → 沿用既有 423 语义（回归断言依赖）。
+        -- kind=missing：调用方点名了某套配置但没有这一行/已禁用 → 仍 423，换具体消息。
+        -- kind=invalid：配置存在但行内字段非法 → 502（服务端问题，不是「未配置」）。
+        if cfg_kind == "invalid" then return reject(502, cfg_err) end
+        return reject(423, cfg_err or "对象存储未配置")
+    end
 
     local bucket, key = _M.parse_path(ngx.var.request_uri, ngx.var.script_name)
     if not bucket then return reject(404, "对象路径无效") end

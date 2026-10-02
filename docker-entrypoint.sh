@@ -60,6 +60,17 @@ mkdir -p "$(dirname "$DB_PATH")" "$CERT_DIR" /var/log/openresty
 # S3 上传暂存目录：配了 endpoint 才需要；缺目录时上传会以「暂存目录不可写」失败，
 # 在这里建好，运维只需把 AUTHZ_S3_TMP_DIR 指到 /data 下的可写路径。
 [ -n "${AUTHZ_S3_ENDPOINT:-}" ] && mkdir -p "${AUTHZ_S3_TMP_DIR:-/data/s3tmp}"
+# 本机 store 保存区：PUT /api/store 的落盘根目录，由 upload_records 记过期、
+# 每小时清理器回收。必须可写，且与 /files（只读浏览目录）语义分离：
+# 这里不承诺长期保存，默认 24 小时后删除（AUTHZ_STORE_DEFAULT_EXPIRY_HOURS）。
+mkdir -p "${AUTHZ_STORE_DIR:-/data/store}"
+
+# 权限收紧（安全审计 R1）：/data 下存明文 S3 密钥（s3_configs）与会话/密钥库，
+# store 是对外可读的临时交换区。两者默认随 umask 落成 755，同宿主其他进程都能读。
+# 每次启动收敛成 700，已有库文件收敛成 600。nginx 以 root 运行，收紧不影响读写。
+chmod 700 "$(dirname "$DB_PATH")" "${AUTHZ_STORE_DIR:-/data/store}" 2>/dev/null || true
+[ -f "$DB_PATH" ] && chmod 600 "$DB_PATH" || true
+
 
 # ── 自签默认证书 (10 年, SAN: DNS:*) ─────────────────────────────
 if [ ! -s "$CERT_FILE" ] || [ ! -s "$CERT_KEY" ]; then
