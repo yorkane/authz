@@ -25,6 +25,10 @@ env AUTHZ_STORE_DIR;
 env AUTHZ_STORE_DEFAULT_EXPIRY_HOURS;
 env AUTHZ_FILES_ROOT;
 
+# 内容出口符号链接的可信根白名单（gateway/app_content.lua 用，默认空=关闭）。
+# 解析只在 master 的 init_by_lua（config.load）里做一次，master 进程不声明也读得到；# 这里仍列入白名单是与上面几个 AUTHZ_* 保持同一约定：万一以后有代码在 worker 或定时# 器里直接读它，未声明就会静默失效。变量未设置时 nginx 只是不注入，不会报错。
+env AUTHZ_APP_TRUSTED_ROOTS;
+
 events {
     worker_connections 1024;
 }

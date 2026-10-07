@@ -122,7 +122,7 @@ function _M.handle(config)
         -- 上面这次 Casbin（object 含完整路径，可做目录级分级），并以 Lua-only 变量
         -- authz_app_content 通知内容 location 免二次鉴权。binding.app 全程不改，
         -- 否则会撞上面 prevent_loop 的 508。
-        if app_content.handle(binding) ~= false then return end
+        if app_content.handle(binding, config) ~= false then return end
         ngx.var.authz_app_entry = binding.app
         ngx.req.set_uri("/_authz/apps/" .. binding.app_page, false)
         return ngx.exec("/_authz/apps/" .. binding.app_page)

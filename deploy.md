@@ -98,6 +98,7 @@ AUTHZ_APP_PREFIX_FILES=file
 AUTHZ_APP_PORT_FILES=100
 AUTHZ_APP_PREFIX_S3=s3
 AUTHZ_APP_PORT_S3=101
+AUTHZ_APP_TRUSTED_ROOTS=                            # 内容直取的出根符号链接可信根白名单：逗号分隔的容器内绝对路径，**空=关闭**（出根链接一律 400）。命中只放宽那一级落点，不是子树免检，见 3.6
 
 # ── 本机临时保存区（Agent 落盘，可选）──────────────────
 # PUT /_authz/api/store 的容器内根目录；compose 已把 DATA_DIR 整体挂到 /data，
@@ -257,11 +258,11 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/s3-configs" | head -c
 | file | 内容根要有真实数据：`FILES_DIR -> /files` 卷 | 目录里没有那个文件 → 404 |
 | s3 | 当前生效那套存储服务配置（`s3_configs`，对象存储页「配置」里维护）的 `default_bucket` 非空 | 503 + JSON，消息区分「对象存储未配置」与「未设置默认 bucket」；`?cfg=<id\|name>` 换一套时取被选中那套的 `default_bucket` |
 
-还有一条**内容根的形状约束**，不满足会 400：直取路径逐级做 realpath，要求每一级解析后仍落在
-内容根内，所以 `FILES_DIR` 里**不能有指向根外的绝对符号链接**。这是刻意的——静态 `alias` 本身
-不做 realpath（nginx 只是把 URI 剩余段拼到 alias 后 `open()`，符号链接直接跟随），而内容根
-在部署里通常是宿主真实可写的目录树；一条 `/100/<目录>/*` 策略加上目录里一个指向 `/etc` 的
-链接就是任意文件读。链接**落在根内**（相对链接、同目录链接）不受影响。
+还有一条**内容根的形状约束**：直取路径逐级做 realpath，默认要求每一级解析后仍落在内容根内，
+**指向根外的绝对符号链接一律 400**。这是刻意的——静态 `alias` 本身不做 realpath（nginx 只是把 URI
+剩余段拼到 alias 后 `open()`，符号链接直接跟随），而内容根在部署里通常是宿主真实可写的目录树；
+一条 `/100/<目录>/*` 策略加上目录里一个指向 `/etc` 的链接就是任意文件读。链接**落在根内**
+（相对链接、同目录链接）不受影响。
 
 ```bash
 # 体检：列出内容根下的符号链接及其解析目标，自己核对哪些越界（部署后跑一次）
@@ -273,9 +274,32 @@ find "$FILES_DIR" -maxdepth 2 -type l -exec ls -l {} \; 2>/dev/null
 （`-ls` 也可以，输出自带链接目标：`find "$FILES_DIR" -maxdepth 2 -type l -ls`。要递归整棵树
 就把 `-maxdepth 2` 去掉。）
 
-有输出指向根外的绝对链接，那些路径在 `file-<域>` 下会 400（管理界面的文件浏览走另一条通道，
-不受影响）。确实需要把另一棵树挂进来时，用 volume 挂到内容根下的一个子目录，而不是在根内做
-绝对链接。
+体检里那些指向根外的绝对链接，对应路径在 `file-<域>` 下会 400（管理界面的文件浏览走另一条通道，
+不受影响）。首选仍然是把目标树用 volume 挂进内容根下的子目录；但有些出根链接是宿主本来就有的目录
+约定（本机 `/data/ChatGPT -> /home/aigc/ChatGPT/`，内容其实已由 compose 以 `:ro` 挂进容器），
+这种时候给一条**可信根白名单**比动宿主目录更省事：
+
+```bash
+# .env：逗号分隔的容器内绝对路径。**默认空 = 完全关闭**，保持上面的严格行为
+AUTHZ_APP_TRUSTED_ROOTS=/home/aigc/ChatGPT
+```
+
+三条语义边界：
+
+- **只放宽「这一级的落点」**：某一级 realpath 落在内容根外、但落在可信根内 → 这一级放行，
+  后续各级照旧校验。可信根内部再埋一条指向 `/etc` 的链接仍然 400 —— 它不是一棵免检子树。
+- **必须写容器内可见的路径**：realpath 在容器命名空间里解析，填宿主路径（把上面的值写成
+  `/data/ChatGPT`）会解析不出来，整项被丢弃、等于没配（fail-closed，不会因此放行）。通常就是
+  那条 `:ro` 挂载在容器内的目标位置。
+- **静态校验不过就丢弃该项并 warn**（`error.log` 里 `AUTHZ_APP_TRUSTED_ROOTS entry ignored`）：
+  非绝对路径、规范化后为 `/`、含 `.`/`..` 段、含空白或控制字符、超过 16 条，都不进白名单。
+  一条拼错的配置绝不会把防护面悄悄扩大。
+
+配了可信根还要保证值真的进得到进程：本仓库 `conf/nginx.conf.template` 已带
+`env AUTHZ_APP_TRUSTED_ROOTS;`，若部署用显式 `environment:` 清单（而不是 `env_file: .env` 透传），
+这个键要一起加进清单；改过 `.env` 需要 `docker compose up -d --force-recreate` 才注入。
+排障先看注入：`docker exec <容器> printenv AUTHZ_APP_TRUSTED_ROOTS`。值没进来时出根链接继续 400，
+且日志里不会有任何 warn（和「配了但被静态校验丢弃」是两种症状，后者有 warn）。
 
 注意 `AUTHZ_FILES_ROOT` **改不动内容出口的落盘目录**：`/_authz/files/` 的 `alias /files/` 写死在
 `conf/server.conf.template` 里，容器内恒为 `/files`，要换目录只能换挂载点（`${FILES_DIR}:/files`）。
@@ -339,6 +363,7 @@ curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
 curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
   "http://127.0.0.1:${HTTP_PORT}/definitely-missing.mp4"              # 404：不存在不回落到页面
 docker exec authz grep -c authz_app_content /usr/local/openresty/nginx/conf/server.conf  # >=1：模板已渲染
+docker exec authz printenv AUTHZ_APP_TRUSTED_ROOTS   # 配了可信根时确认值已注入；空=关闭，此时出根链接 400（见 3.6）
 ```
 
 临时维护提示：若必须短暂开放 HTTP 或限制管理端来源，用防火墙白名单（例如 `ufw allow from 203.0.113.5 to any port 6080` 或 `iptables -A INPUT -p tcp --dport 6080 -s 203.0.113.5 -j ACCEPT`），完成后恢复默认；不要在生产长期保留明文入口。
@@ -425,10 +450,30 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 | 用 IP 访问时登录成功却反复跳回登录页 | 老版本缺陷（已在当前镜像修复）：升级到最新镜像即可；根因是登录响应错误下发了 `Domain=.<ip>` 清理头 |
 | 管理界面报 `map is not a function` | 老版本缺陷（已在当前镜像修复）：空数据表被编码成 JSON 对象 `{}`；升级到最新镜像即可 |
 | `docker cp` 覆盖 HTML/JS 后浏览器仍是旧页面 | 镜像里每个文本资产有预压缩 `.br` 旁文件，`brotli_static on` 时它优先于明文文件被下发（`docker cp` 不会同步它）。同名 `.br`（及 `.gz`）一并删除或覆盖即可；正式修复始终走镜像重建 |
+| `file-<域>/<路径>` 返回 404 但文件确实存在 | 内容根没挂：compose 里缺 `${FILES_DIR}:/files` 这行（见 3.2）。页面能开不代表内容根已挂，这两件事独立 |
+| `file-<域>/<路径>` 返回 400「符号链接指向内容根之外」 | 路径上有指向内容根外的绝对符号链接，直取通道逐级 realpath 后拒绝（3.6 有体检命令）。首选改用 volume 把目标树挂到根内子目录；这条链接是宿主既有约定、动不了时，用 `AUTHZ_APP_TRUSTED_ROOTS` 把它的容器内落点列入可信根（3.6 末尾），配错或值没注入也是 400 |
+| `file-<域>/<路径>` 返回 400「路径非法：禁止 .. 段与控制字符」 | URL 里带了 `..` 段或 `%2e%2e`/`%2f`/`%5c`/`%00` 编码形态（含双层编码）。这是刻意的 fail-closed，客户端拼 URL 时要做规范化，别把用户输入直接拼进路径 |
+| `s3-<域>/<key>` 返回 503 | 对象存储页「配置」里那套（或 `?cfg=` 选中的那套）没有非空 `default_bucket`。表里没启用行且 env 也没配时消息是「对象存储未配置」，配了但没设默认桶是另一条消息 |
+| 内容域名所有请求都 302 到登录页 | 该身份没有命中任何策略。匿名主体是 `role:guest`，要在管理界面给 `/100<路径>` 或 `/101<key>` 写 Casbin 策略才会放行 |
+| 内容域名取到了字节但状态码是 404/403，不是 405 | 方法判定顺序是 **Casbin 先、405 后**：策略没授该方法时先被拒成 403（匿名 302）；只有 Casbin 放行了该方法，非 GET/HEAD 才回 405 |
 
 ## 8.1 从源码构建镜像（维护者）
 
 生产部署不需要构建（镜像自包含）；改了 `lualib/`、`admin/`、`conf/` 想出本地镜像时：
+
+**先问一句：这次改动 CI 是不是已经在构建了？** push 到 `main` 会自动触发
+`.github/workflows/build-and-push.yml`，产出并推送 `ghcr.io/yorkane/authz:latest`。验证通过的
+改动，生产直接 `docker pull` 拿那个产物即可——既省掉本机几十分钟的全量编译，也保证生产跑的
+就是 CI 验证过的那份。**只在本机调试、还没 push 时才需要下面的本地构建。**
+
+```bash
+# 首选：拿 CI 产物（构建成功后 ghcr 上就是最新 main）
+docker pull ghcr.io/yorkane/authz:latest
+docker run --rm --entrypoint sh ghcr.io/yorkane/authz:latest -c \
+  'grep -c <新代码标记> /usr/local/openresty/site/lualib/resty/authz/...'  # 确认内容
+```
+
+确实要本地构建时：
 
 ```bash
 cd <仓库>

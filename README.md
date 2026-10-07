@@ -185,6 +185,7 @@ docker exec <container_name> admin_password_reset
 | `AUTHZ_APP_DOMAINS` | `1` | 内置应用保留前缀入口（`file`→100 文件浏览、`s3`→101 对象存储）总开关，`0` 关闭后这两类域名回退 404 |
 | `AUTHZ_APP_PREFIX_FILES` / `AUTHZ_APP_PORT_FILES` | `file` / `100` | files 应用保留前缀与虚拟端口（非法值/与入口端口冲突时该项自动禁用）。`file-<节点>.<域>/` 是页面，带子路径的 GET/HEAD 直取内容根下的文件字节，策略对象 `/100<路径>` |
 | `AUTHZ_APP_PREFIX_S3` / `AUTHZ_APP_PORT_S3` | `s3` / `101` | s3 应用保留前缀与虚拟端口。`s3-<节点>.<域>/` 是页面，带子路径的 GET/HEAD 直取当前配置 `default_bucket` 下的对象字节，策略对象 `/101<key>` |
+| `AUTHZ_APP_TRUSTED_ROOTS` | 空 | 内容直取的出根符号链接可信根白名单：逗号分隔的**容器内**绝对路径，**空=关闭**（URI 每一级 realpath 后必须仍在内容根内，出根链接 400）。命中可信根只放宽那一级的落点，其后各级照旧校验——可信根内部再埋一条指向 `/etc` 的链接仍 400，不是子树免检 |
 | `AUTHZ_HTTP_PORT` / `AUTHZ_HTTPS_PORT` | `6080` / `6443` | 入口端口 |
 | `AUTHZ_HTTP_MODE` | `redirect` | 公网 HTTP 行为：`redirect` 308 到 HTTPS；`disabled` 仅回环；`serve` 仅受控测试 |
 | `AUTHZ_DISCOVERY_PORTS` | 空 | Docker Desktop 无法从监听表发现时，追加探测端口，例如 `2077,3080` |

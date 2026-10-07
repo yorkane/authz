@@ -12,6 +12,7 @@ ENVKEY_CONTAINER_NAME=""
 ENVKEY2_CONTAINER_NAME=""
 S3_CONTAINER_NAME=""
 APPDOM_CONTAINER_NAME=""
+TRUST_CONTAINER_NAME=""
 TMP_DIR=$(mktemp -d)
 # 文件管理测试需要可写 /files：拷贝一份 admin 目录作为可写文件根
 # （只读浏览断言仍依赖其中的 vendor 子目录）。
@@ -93,6 +94,10 @@ cleanup() {
     if [[ -n "${APPDOM_CONTAINER_NAME:-}" ]]; then
         docker exec "$APPDOM_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
         docker rm -f "$APPDOM_CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${TRUST_CONTAINER_NAME:-}" ]]; then
+        docker exec "$TRUST_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+        docker rm -f "$TRUST_CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
     if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" >/dev/null 2>&1 || true; fi
     if [[ -n "$REMOTE_PID" ]]; then kill "$REMOTE_PID" >/dev/null 2>&1 || true; fi
@@ -4671,6 +4676,79 @@ docker exec "$APPDOM_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || tru
 docker rm -f "$APPDOM_CONTAINER_NAME" >/dev/null 2>&1 || true
 APPDOM_CONTAINER_NAME=""
 fi
+
+
+# ── AUTHZ_APP_TRUSTED_ROOTS：出根符号链接的可信根白名单（独立容器）─────────────
+# 部署里常有**合法**的出根绝对链接（内容根里一条 ChatGPT -> 宿主真实目录，内容本身
+# 已由 compose 以 :ro 挂进容器），严格模式会把该目录整体 400。白名单只让「这一级落点
+# 落在可信根内」通过，其后各级照旧校验：落点再顺着一条指向 /etc 的链接跳出去，仍然
+# 400（可信根不是子树免检）；未列入白名单的出根链接与默认严格行为完全一致。
+# 可信根必须写成**容器内**可见的路径：符号链接的 target 字符串与 realpath 都在容器
+# 命名空间里解析，填宿主路径会解析不出来而整条白名单被丢弃（fail-closed）。
+TRUST_CONTAINER_NAME="authz-gateway-trust-test-$$"
+TRUST_HTTP_PORT=$(free_port)
+TRUST_HTTPS_PORT=$(free_port)
+mkdir -p "$TMP_DIR/trust-data/authz" "$TMP_DIR/trust-files/pub" "$TMP_DIR/trusted/dir"
+printf TRUST-PAYLOAD > "$TMP_DIR/trusted/dir/ok.txt"
+printf payload-trust > "$TMP_DIR/trust-files/pub/a.txt"
+ln -sfn /opt/trusted/dir/ok.txt "$TMP_DIR/trust-files/pub/out-ok"
+ln -sfn /opt/trusted/dir "$TMP_DIR/trust-files/pub/okdir"
+ln -sfn /etc/passwd "$TMP_DIR/trust-files/pub/out-evil"
+ln -sfn /opt/trusted/dir/escape-hop "$TMP_DIR/trust-files/pub/deep-link"
+ln -sfn /etc/passwd "$TMP_DIR/trusted/dir/escape-hop"
+printf payload-plain > "$TMP_DIR/trusted/dir/plain.txt"
+ln -sfn /opt/trusted/dir/plain.txt "$TMP_DIR/trust-files/pub/out-plain"
+# worker 以 nobody 跑，要能穿过 mktemp 目录遍历这两条 bind 源
+chmod a+x "$TMP_DIR"; chmod -R a+rX "$TMP_DIR/trusted" "$TMP_DIR/trust-files"
+docker run -d \
+    --name "$TRUST_CONTAINER_NAME" \
+    --network host \
+    -e NGINX_WORKER_PROCESSES=1 \
+    -e AUTHZ_HTTP_PORT="$TRUST_HTTP_PORT" \
+    -e AUTHZ_HTTPS_PORT="$TRUST_HTTPS_PORT" \
+    -e AUTHZ_HTTP_MODE=serve \
+    -e AUTHZ_ADMIN_PASSWORD=admin123 \
+    -e AUTHZ_PORT_MIN=1000 \
+    -e AUTHZ_PORT_MAX=65500 \
+    -e AUTHZ_APP_DOMAINS=1 \
+    -e AUTHZ_API_KEY="$APP_ADMIN_KEY_TOKEN" \
+    -e AUTHZ_API_KEY_ALLOWED_IPS=127.0.0.1 \
+    -e AUTHZ_APP_TRUSTED_ROOTS=/opt/trusted \
+    -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
+    -v "$TMP_DIR/trust-data:/data" \
+    -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
+    -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
+    -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
+    -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
+    -v "$TMP_DIR/trust-files:/files" -v "$TMP_DIR/trusted:/opt/trusted:ro" \
+    "$IMAGE" >/dev/null
+TRUST_ABOUT=$(docker logs "$TRUST_CONTAINER_NAME" 2>&1 | grep -c 'lua entry thread aborted' || true)
+for _ in $(seq 1 80); do
+    STATUS=$(curl -sS --max-time 2 --resolve "file-trust.test.example:$TRUST_HTTP_PORT:127.0.0.1" \
+        -o /dev/null -w '%{http_code}' "http://file-trust.test.example:$TRUST_HTTP_PORT/_authz/api/session" 2>/dev/null || true)
+    [[ "$STATUS" == "401" ]] && break
+    sleep 0.25
+done
+[[ "$STATUS" == "401" ]] || fail "trusted-root instance did not become ready"
+trust_req() {
+    curl -sS --max-time 5 --resolve "file-trust.test.example:$TRUST_HTTP_PORT:127.0.0.1" \
+        -H "x-api-key: $APP_ADMIN_KEY_TOKEN" -o "$TMP_DIR/trust-body" -w '%{http_code}' \
+        "http://file-trust.test.example:$TRUST_HTTP_PORT$1"
+}
+assert_eq "trusted-root instance serves a plain file" "$(trust_req /pub/a.txt)" "200"
+assert_eq "trusted-root plain bytes" "$(<"$TMP_DIR/trust-body")" "payload-trust"
+assert_eq "symlink into trusted root served" "$(trust_req /pub/out-ok)" "200"
+assert_eq "trusted-root bytes come from the link target" "$(<"$TMP_DIR/trust-body")" "TRUST-PAYLOAD"
+assert_eq "missing file under a trusted dir is 404 not 400" "$(trust_req /pub/okdir/nope.bin)" "404"
+assert_eq "symlink outside trusted roots still refused" "$(trust_req /pub/out-evil)" "400"
+assert_not_contains "trusted-root refusal never leaks passwd bytes" "$(<"$TMP_DIR/trust-body")" "root:x:0:0"
+assert_eq "second hop out of the trusted root refused" "$(trust_req /pub/deep-link)" "400"
+assert_not_contains "second hop never leaks passwd bytes" "$(<"$TMP_DIR/trust-body")" "root:x:0:0"
+assert_eq "trusted-root worker never aborts" \
+    "$(docker logs "$TRUST_CONTAINER_NAME" 2>&1 | grep -c 'lua entry thread aborted' || true)" "$TRUST_ABOUT"
+docker exec "$TRUST_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
+docker rm -f "$TRUST_CONTAINER_NAME" >/dev/null 2>&1 || true
+TRUST_CONTAINER_NAME=""
 
 section envkey
 if [[ "$SECTION_RUN" == "1" ]]; then

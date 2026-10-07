@@ -284,6 +284,35 @@ API Key），新放行只对「经保留前缀域名进来且已过 Casbin」的
 开了第二条绕过会话的后门。数据库里存在同名前缀的真实绑定时仍然优先（第 2 步就 return），
 管理员显式接管虚拟入口的能力保留。
 
+**符号链接校验与可信根**：内容根在部署里通常是宿主可写的真实目录树，一条目录级放行策略加上
+树里一个指向 /etc 的链接就是任意文件读，所以 files 端在 internal redirect 之前对每条候选形态
+（归一化 $uri、原始未解码串、逐层 unescape 梯）逐级 realpath，要求落点仍在内容根内；解不出来
+但确实存在（ELOOP/EACCES/悬空）同样拒绝，root 自身解析不出来才退成放行交给 nginx 404。校验比对
+的是 alias 真正 open 的 /files（files.default_root 常量），不是 AUTHZ_FILES_ROOT —— 后者只影响
+控制面浏览与写接口，改它不改 alias，拿它校验会校验到一个不相干的目录。
+
+静态 alias 不做 realpath（nginx 只把 URI 剩余段拼到 alias 后 open()，链接直接跟随），这道校验
+是唯一的兜底，因此它的默认口径保持严格。部署里确有**合法**出根链接时（本机 /data/ChatGPT ->
+/home/aigc/ChatGPT/，内容其实已由 compose 以 :ro 挂进容器；以及 compose 的 :ro 挂载被 docker
+跟随既有链接、落点其实在宿主真实路径那一类），用 AUTHZ_APP_TRUSTED_ROOTS 给一条显式白名单：
+逗号分隔的容器内绝对路径，**默认空 = 关闭**。命中可信根只放宽「这一级的落点判定」，其后各级
+继续校验，可信根内部再埋一条指向 /etc 的链接仍然 400 —— 白名单放宽的是落点集合，不是子树免检。
+解析只在 master 的 init_by_lua 做一次并缓存，且只缓存「确定仍在 root 内」的目录：可信根目录进了
+缓存会让「先骗过一级、再把链接改指别处」成为可用逃逸路径。config.load 里做的是字符串级静态校验
+（绝对路径、规范化后非 /、无 . 与 .. 段、无空白控制字符、条数上限），不合规的条目丢弃并 warn，
+不让一条拼错的配置悄悄扩大放行面；realpath 留给 app_content（那里有 fail-closed 的实现），
+解析不出来的可信根自然匹配不上，等于未挂载就不放行。
+
+
+## 5.2 上游请求构造（gateway/proxy.lua）
+
+- `authz_session` Cookie 在代理前精确剥离，业务 Cookie 保留
+- 固定头：X-Authz-User / X-Authz-Source / X-Authz-Identity；X-Forwarded-For 追加
+  remote_addr；凭证头（x-api-key/x-role-key）不透传
+- Host/Forwarded 链路头优先级：绑定显式 `upstream_host`/`forwarded_*` 覆盖 →
+  `origin_mode`（auto/preserve/rewrite/remove/custom）→ simulate_local（本机值）→
+  请求 Host
+- 配了正文改写的绑定自动向上游声明 `Accept-Encoding: identity`（绑定显式覆盖
   Accept-Encoding 时以用户为准，改写随之失效）
 - **改写优先于 proxy_set_header**：nginx 语义里 proxy_set_header 会覆盖 access 阶段
   `ngx.req.set_header` 的同名头，因此 Host/Cookie/Origin/Forwarded/X-Forwarded-*/

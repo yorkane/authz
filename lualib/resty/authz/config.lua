@@ -380,6 +380,63 @@ function _M.load()
     if c.port_max < c.port_min then c.port_max = c.port_min end
     c.http_port = tonumber(os.getenv("AUTHZ_HTTP_PORT")) or 6080
     c.https_port = tonumber(os.getenv("AUTHZ_HTTPS_PORT")) or 6443
+    -- ── 内容出口的符号链接可信根（gateway/app_content.lua 用）─────────────
+    -- 直取通道要求 <前缀>-<域>/<路径> 每一级 realpath 后仍落在内容根 /files 内，
+    -- 用来挡「根里放一个指向 /etc 的链接 = 任意文件读」。但部署里常有**合法**的
+    -- 出根链接（本机 /data/ChatGPT -> /home/aigc/ChatGPT/，内容其实已由 compose
+    -- 以 :ro 挂进容器），一律拒绝会让这类目录在 file-<域> 下整体 400。
+    -- 这里给运维一条显式白名单：逗号分隔的容器内绝对路径，realpath 后允许落在
+    -- 这些前缀下。**默认空 = 完全关闭，保持严格行为**。校验仍是逐级做，命中可信
+    -- 根只是让那一级的落点判定多一个可接受前缀，后续各级照样校验。
+    -- 安全边界（任一条不满足即丢弃该项并 warn，绝不让白名单悄悄扩大）：
+    --   * 必须是绝对路径，且规范化后不是 "/"（整盘白名单等于关掉防护）；
+    --   * 段里不允许 . 与 ..（否则 "/a/../b" 能绕成任意前缀）；
+    --   * 不允许空白与控制字符；
+    --   * 条数上限 16。
+    -- 本层只做字符串规范化与静态校验，**不**在这里 realpath：config.load() 跑在
+    -- master 的 init_by_lua，而 ffi/realpath 归 app_content 所有（它已有那份带
+    -- fail-closed 的实现）。可信根是否真实存在由 app_content 匹配时判定——解析不
+    -- 出来的可信根自然匹配不上，等于未挂载就不放行，不需要两处各实现一遍。
+    c.content_trusted_roots = {}
+    do
+        local raw = tostring(os.getenv("AUTHZ_APP_TRUSTED_ROOTS") or "")
+        local seen = {}
+        local count = 0
+        for item in raw:gmatch("[^,]+") do
+            local path = item:gsub("^%s+", ""):gsub("%s+$", "")
+            if path ~= "" then
+                local norm = path:gsub("/+", "/"):gsub("/+$", "")
+                local reason
+                if norm:sub(1, 1) ~= "/" then
+                    reason = "not an absolute path"
+                elseif norm == "/" then
+                    reason = "the whole filesystem is never trusted"
+                elseif #norm > 512 then
+                    reason = "too long"
+                elseif norm:find("%c", 1) or norm:find("%s", 1) then
+                    reason = "contains whitespace or control characters"
+                else
+                    for seg in norm:gmatch("[^/]+") do
+                        if seg == "." or seg == ".." then
+                            reason = "dot segments are not allowed"
+                            break
+                        end
+                    end
+                end
+                if reason then
+                    ngx.log(ngx.WARN, "authz: AUTHZ_APP_TRUSTED_ROOTS entry ignored (",
+                        reason, "): ", item)
+                elseif count >= 16 then
+                    ngx.log(ngx.WARN, "authz: AUTHZ_APP_TRUSTED_ROOTS entry ignored ",
+                        "(more than 16 entries): ", item)
+                elseif not seen[norm] then
+                    seen[norm] = true
+                    count = count + 1
+                    c.content_trusted_roots[count] = norm
+                end
+            end
+        end
+    end
     -- ── 内置应用保留前缀域名入口（files / s3）─────────────────────────────
     -- <前缀>-<节点>.<任意域>（或裸 <前缀>.<任意域>）不查数据库，直接映射到
     -- 本机管理页面（虚拟绑定）。绑定值与端口可在策略里单独授权（对象 /<端口>/*，
