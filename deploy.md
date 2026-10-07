@@ -298,8 +298,10 @@ AUTHZ_APP_TRUSTED_ROOTS=/home/aigc/ChatGPT
 配了可信根还要保证值真的进得到进程：本仓库 `conf/nginx.conf.template` 已带
 `env AUTHZ_APP_TRUSTED_ROOTS;`，若部署用显式 `environment:` 清单（而不是 `env_file: .env` 透传），
 这个键要一起加进清单；改过 `.env` 需要 `docker compose up -d --force-recreate` 才注入。
-排障先看注入：`docker exec <容器> printenv AUTHZ_APP_TRUSTED_ROOTS`。值没进来时出根链接继续 400，
-且日志里不会有任何 warn（和「配了但被静态校验丢弃」是两种症状，后者有 warn）。
+排障按三种症状分：`docker exec <容器> printenv AUTHZ_APP_TRUSTED_ROOTS` 看值有没有进来（没进来则
+全程无日志、出根链接继续 400）；`error.log` 里的 `entry ignored` 是静态校验丢弃了拼错的项；
+`entry unusable in this container` 是配对了但**容器内解析不出来**（填成宿主路径、或那条卷没挂上），
+该条目被丢弃并计入负缓存，每个 worker 只 warn 一次。
 
 注意 `AUTHZ_FILES_ROOT` **改不动内容出口的落盘目录**：`/_authz/files/` 的 `alias /files/` 写死在
 `conf/server.conf.template` 里，容器内恒为 `/files`，要换目录只能换挂载点（`${FILES_DIR}:/files`）。

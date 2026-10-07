@@ -87,14 +87,33 @@ end
 local trusted_real_cache = {}
 local function trusted_realpaths(list)
     if type(list) ~= "table" or #list == 0 then return nil end
+    if realpath == nil then
+        -- ffi/realpath 不可用时**不能**在这里调它：会 attempt to call a nil value,
+        -- 协程崩溃吐 500，绕开本文件承诺的「realpath 不可用一律 400」。退回 nil
+        -- （没有可信根可用），交给 confined_to_root 顶部那条既有判据统一处理。
+        return nil
+    end
     local key = table.concat(list, "\0")
     local hit = trusted_real_cache[key]
     if hit then return hit end
     local out = {}
     for _, one in ipairs(list) do
         local got = realpath(one)
-        -- 解析不出来（不存在/未挂载/ELOOP）就不进白名单：宁可放行面更小。
-        if got then out[#out + 1] = got end
+        -- 解析不出来（不存在/未挂载/ELOOP）就不进白名单：宁可放行面更小。这是
+        -- 第三类「配了但不生效」的症状（前两类：静态校验丢弃有 warn、env 没注入
+        -- 无 warn），必须留一行日志，否则运维只能拿 printenv 的结果去猜。下面的
+        -- 缓存按 list 只算一次，所以这条每个 worker 最多叫一次，不会刷屏。
+        if not got then
+            ngx.log(ngx.WARN, "authz: AUTHZ_APP_TRUSTED_ROOTS entry unusable in this ",
+                "container (missing or not mounted, not whitelisted): ", one)
+        elseif got == "/" then
+            -- 条目本身是指向 / 的链接时 realpath 得到 "/"：与 config 层拒字面
+            -- "/" 同口径丢弃，整盘永远不可信。
+            ngx.log(ngx.WARN, "authz: AUTHZ_APP_TRUSTED_ROOTS entry resolves to the ",
+                "whole filesystem, dropped: ", one)
+        else
+            out[#out + 1] = got
+        end
     end
     trusted_real_cache[key] = out
     return out
