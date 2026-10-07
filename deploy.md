@@ -291,7 +291,7 @@ AUTHZ_APP_TRUSTED_ROOTS=/home/aigc/ChatGPT
 - **必须写容器内可见的路径**：realpath 在容器命名空间里解析，填宿主路径（把上面的值写成
   `/data/ChatGPT`）会解析不出来，整项被丢弃、等于没配（fail-closed，不会因此放行）。通常就是
   那条 `:ro` 挂载在容器内的目标位置。
-- **静态校验不过就丢弃该项并 warn**（`error.log` 里 `AUTHZ_APP_TRUSTED_ROOTS entry ignored`）：
+- **静态校验不过就丢弃该项并 warn**（`docker logs` 里 `AUTHZ_APP_TRUSTED_ROOTS entry ignored`）：
   非绝对路径、规范化后为 `/`、含 `.`/`..` 段、含空白或控制字符、超过 16 条，都不进白名单。
   一条拼错的配置绝不会把防护面悄悄扩大。
 
@@ -299,7 +299,7 @@ AUTHZ_APP_TRUSTED_ROOTS=/home/aigc/ChatGPT
 `env AUTHZ_APP_TRUSTED_ROOTS;`，若部署用显式 `environment:` 清单（而不是 `env_file: .env` 透传），
 这个键要一起加进清单；改过 `.env` 需要 `docker compose up -d --force-recreate` 才注入。
 排障按三种症状分：`docker exec <容器> printenv AUTHZ_APP_TRUSTED_ROOTS` 看值有没有进来（没进来则
-全程无日志、出根链接继续 400）；`error.log` 里的 `entry ignored` 是静态校验丢弃了拼错的项；
+全程无日志、出根链接继续 400）；容器日志（`docker logs`，镜像里 `error.log` 是指向 `/dev/stderr` 的软链）里的 `entry ignored` 是静态校验丢弃了拼错的项；
 `entry unusable in this container` 是配对了但**容器内解析不出来**（填成宿主路径、或那条卷没挂上），
 该条目被丢弃并计入负缓存，每个 worker 只 warn 一次。
 
