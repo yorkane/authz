@@ -3,7 +3,8 @@
 本手册自包含：只需要 **本文件 + 镜像**，即可完成一套可用的 Authz Gateway 部署。
 不需要源代码、不需要构建；所有前端、Lua 库与 Nginx 模板都已内置在镜像中。
 
-- 镜像：`ghcr.io/yorkane/authz:latest`（也发布为 `docker.io/yorkane/authz:latest`）
+- 镜像：`ghcr.io/yorkane/authz:latest`（**只发布到 GHCR**，CI 未推送 docker.io；不要写
+  `docker.io/yorkane/authz`，该仓库不存在）
 - 能力：动态端口反向代理 + 本地认证授权（SQLite + mini-casbin）+ 管理界面
 - 依赖：Docker Engine（生产使用 Linux；需要 host 网络）+ 可选外部 Redis（仅多实例共享会话时需要）
 
@@ -21,7 +22,7 @@
 1. **显式绑定**：管理界面配置的固定域名 → `target_ip:port`；
 2. **内置应用保留前缀**（虚拟绑定）：`file-任意域名` → 文件浏览（虚拟端口 100）、
    `s3-任意域名` → 对象存储（虚拟端口 101）；**根路径渲染内置应用页面，带上子路径的
-   GET/HEAD 直接返回文件/对象字节**（file 端取 `AUTHZ_FILES_ROOT` 下的路径，s3 端取当前生效
+   GET/HEAD 直接返回文件/对象字节**（file 端取容器内 `/files` 下的路径，s3 端取当前生效
    那套存储配置 `default_bucket` 下的 key，都支持 Range/206）；不在数据库中、不占绑定端口，
    按策略对象 `/<端口><路径>` 单独授权（因此可按目录分级，如 `/100/alice/*`）；
    `AUTHZ_APP_DOMAINS=0` 可整体关闭；
@@ -87,6 +88,17 @@ AUTHZ_PORT_MAX=20000
 # ── 数据目录（宿主机），必须持久化 ──────────────────────
 DATA_DIR=./data
 
+# ── 内置应用保留前缀域名入口（默认开启，一般无需改）──────
+# file-<节点>.<域>/ 是文件浏览页，带子路径的 GET/HEAD 直取内容根下的文件字节；
+# s3-<节点>.<域>/ 是对象存储页，带子路径直取当前存储配置 default_bucket 下的对象。
+# 策略对象为 /100<路径> 与 /101<key>，可按目录或单文件用 Casbin 分级（见 3.6）。
+# 要给这两类域名直接提供文件内容，还需在 compose 里挂 FILES_DIR（见 3.2 说明）。
+AUTHZ_APP_DOMAINS=1
+AUTHZ_APP_PREFIX_FILES=file
+AUTHZ_APP_PORT_FILES=100
+AUTHZ_APP_PREFIX_S3=s3
+AUTHZ_APP_PORT_S3=101
+
 # ── 本机临时保存区（Agent 落盘，可选）──────────────────
 # PUT /_authz/api/store 的容器内根目录；compose 已把 DATA_DIR 整体挂到 /data，
 # 所以宿主落在 ${DATA_DIR}/store 下，无需额外 volume。
@@ -114,14 +126,19 @@ services:
       OPENRESTY_TEMPLATE_DIR: /usr/local/openresty/nginx/conf
     volumes:
       - ${DATA_DIR:-./data}:/data
+      # 文件浏览与保留前缀 file- 域名的内容根。**不挂这行，file-<域>/ 仍能开页面，
+      # 但任何带子路径的请求都取不到字节**（内容根为空 → 404）。要关掉文件浏览
+      # 又想保留页面，直接不挂即可；页面本身仍可用。
+      - ${FILES_DIR:-./files}:/files
 ```
 
 说明：
 
 - `env_file` 直接注入 `.env` 的全部变量；
 - 镜像内置模板位于 `/usr/local/openresty/nginx/conf/`，entrypoint 每次启动自动渲染最终配置；
-- 只需挂载 `/data`（SQLite 数据库 + 自动生成的 10 年期自签证书），其余全部来自镜像；
-- 若不使用 compose，等价 docker 命令：`docker run -d --name authz --network host --restart unless-stopped --env-file .env -e OPENRESTY_TEMPLATE_DIR=/usr/local/openresty/nginx/conf -v ./data:/data ghcr.io/yorkane/authz:latest`。
+- `/data`（SQLite 数据库 + 自动生成的 10 年期自签证书）与 `/files`（文件浏览内容根）两个卷是
+  全部必需的挂载，其余来自镜像；`FILES_DIR` 指向宿主上真实存在、你想对外暴露的目录树；
+- 若不使用 compose，等价 docker 命令：`docker run -d --name authz --network host --restart unless-stopped --env-file .env -e OPENRESTY_TEMPLATE_DIR=/usr/local/openresty/nginx/conf -v ./data:/data -v ./files:/files ghcr.io/yorkane/authz:latest`。
 
 ### 3.3 启动
 
@@ -207,11 +224,12 @@ rsync -a conf/ 241.t:/data/app/authz-test/conf/
 ssh 241.t 'cd /data/app/authz-test && docker compose up -d --force-recreate'
 ```
 
-> 241.t 那份 `docker-compose.yml` 是仓库根 compose 的**手工副本，已经漂移**：核对过它里面没有
-> `AUTHZ_APP_*` 五行（`AUTHZ_STORE_DIR` 等较早的条目还在）。该实例同样用逐条列举的显式 `environment:`
-> 清单（见 3.5 节末尾的提示），清单缺项时容器取 `:-` 后的默认值——默认值恰好与本次要打开的行为一致才勉强能用，
-> 一旦有人显式改了 `.env` 就会静默不生效。升级该实例前要把 `docker-compose.yml` 一并同步过去，不能只同步
-> `conf/` 与 `lualib/`。
+> 241.t 那份 `docker-compose.yml` 由仓库根 compose 同步而来（AGENTS.MD 的 rsync 清单已包含它），
+> 外加一份 `docker-compose.override.yml`：override 把镜像钉在本机/CI 产物 `authz:latest`
+> （`pull_policy: never`），并把 `FILES_DIR -> /files` 挂成可写（浏览页要验证批量移动/删除）。
+> 因此该实例同样是「显式 `environment:` 清单优先」的形态：新增变量必须进仓库根 compose 的清单，
+> 只在 `.env` 里加一行不生效（见 3.5 节末尾的提示）。同步时 `conf/`、`lualib/`、`docker-compose.yml`
+> 三者要一起过去，漏一个就会出现「代码新、配置旧」。
 
 验证定时器与出口都已就位（三项都要通过）：
 
@@ -236,8 +254,33 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/s3-configs" | head -c
 
 | 端 | 前提 | 不满足时的表现 |
 |------|------|----------------|
-| file | 内容根要有真实数据：`FILES_DIR -> /files` 卷（改 `AUTHZ_FILES_ROOT` 时 alias 同步改） | 目录里没有那个文件 → 404 |
+| file | 内容根要有真实数据：`FILES_DIR -> /files` 卷 | 目录里没有那个文件 → 404 |
 | s3 | 当前生效那套存储服务配置（`s3_configs`，对象存储页「配置」里维护）的 `default_bucket` 非空 | 503 + JSON，消息区分「对象存储未配置」与「未设置默认 bucket」；`?cfg=<id\|name>` 换一套时取被选中那套的 `default_bucket` |
+
+还有一条**内容根的形状约束**，不满足会 400：直取路径逐级做 realpath，要求每一级解析后仍落在
+内容根内，所以 `FILES_DIR` 里**不能有指向根外的绝对符号链接**。这是刻意的——静态 `alias` 本身
+不做 realpath（nginx 只是把 URI 剩余段拼到 alias 后 `open()`，符号链接直接跟随），而内容根
+在部署里通常是宿主真实可写的目录树；一条 `/100/<目录>/*` 策略加上目录里一个指向 `/etc` 的
+链接就是任意文件读。链接**落在根内**（相对链接、同目录链接）不受影响。
+
+```bash
+# 体检：列出内容根下的符号链接及其解析目标，自己核对哪些越界（部署后跑一次）
+cd <compose 所在目录>            # .env 里没写 FILES_DIR 时，compose 用默认值 ./files
+FILES_DIR=$(grep -m1 '^FILES_DIR=' .env | cut -d= -f2-); FILES_DIR=${FILES_DIR:-./files}
+find "$FILES_DIR" -maxdepth 2 -type l -exec ls -l {} \; 2>/dev/null
+```
+
+（`-ls` 也可以，输出自带链接目标：`find "$FILES_DIR" -maxdepth 2 -type l -ls`。要递归整棵树
+就把 `-maxdepth 2` 去掉。）
+
+有输出指向根外的绝对链接，那些路径在 `file-<域>` 下会 400（管理界面的文件浏览走另一条通道，
+不受影响）。确实需要把另一棵树挂进来时，用 volume 挂到内容根下的一个子目录，而不是在根内做
+绝对链接。
+
+注意 `AUTHZ_FILES_ROOT` **改不动内容出口的落盘目录**：`/_authz/files/` 的 `alias /files/` 写死在
+`conf/server.conf.template` 里，容器内恒为 `/files`，要换目录只能换挂载点（`${FILES_DIR}:/files`）。
+`AUTHZ_FILES_ROOT` 只影响控制面的目录浏览与写接口；直取通道的符号链接校验比对的是 `/files`
+（`files.default_root`），两者必须一致才不会出现「校验一个目录、实际读另一个目录」。
 
 授权不设第二套门：策略对象仍是 `/<虚拟端口><原始 uri>`（`/100/alice/pub/a.txt`、`/101/share/pub/v.mp4`），
 管理员按目录写 `p, role:guest, /100/alice/*, GET` 就是分级；未命中策略一律 fail-closed（匿名 302 登录、
@@ -281,6 +324,22 @@ curl -skS -D - -o /dev/null -X POST "https://127.0.0.1:${HTTPS_PORT}/_authz/logi
 ```
 
 浏览器访问 `https://<host>:6443/_authz/apps/`（公网会自动从 HTTP 跳到 HTTPS），用 `admin` + `.env` 密码登录，**登录后立即在个人资料页改密**。
+
+若部署包含保留前缀域名（`AUTHZ_APP_DOMAINS=1`，默认），再核对这三项——它们与上面的通用检查
+互相独立，全绿也不代表内容出口可用：
+
+```bash
+KEY=$(docker exec authz printenv AUTHZ_API_KEY)   # 实例级预置 Key；没有就用管理员会话 Cookie
+H='Host: file-prod.example.com'                 # 本机验证靠 Host 头指定虚拟入口，不依赖 DNS
+
+curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
+  "http://127.0.0.1:${HTTP_PORT}/"                                    # 200：根路径仍是文件浏览页
+curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
+  "http://127.0.0.1:${HTTP_PORT}/<一个确实存在的文件>"                # 200：带子路径直取字节
+curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
+  "http://127.0.0.1:${HTTP_PORT}/definitely-missing.mp4"              # 404：不存在不回落到页面
+docker exec authz grep -c authz_app_content /usr/local/openresty/nginx/conf/server.conf  # >=1：模板已渲染
+```
 
 临时维护提示：若必须短暂开放 HTTP 或限制管理端来源，用防火墙白名单（例如 `ufw allow from 203.0.113.5 to any port 6080` 或 `iptables -A INPUT -p tcp --dport 6080 -s 203.0.113.5 -j ACCEPT`），完成后恢复默认；不要在生产长期保留明文入口。
 
@@ -401,7 +460,7 @@ AUTHZ_HTTP_MODE=redirect                          # 默认 308 到 HTTPS；disab
 AUTHZ_PORT_MIN=2000                               # 数字前缀子域名最小端口（强制 >=2000 防回环）
 AUTHZ_PORT_MAX=20000                              # 最大端口；目标为网关自身端口返回 508 防循环
 AUTHZ_APP_DOMAINS=1                               # 内置应用保留前缀入口总开关（file→100、s3→101；0 关闭后这两类域名回退 404）
-AUTHZ_APP_PREFIX_FILES=file                       # files 保留前缀：file-<节点>.<域>/ 渲染文件浏览页，带子路径的 GET/HEAD 直取本机内容根（AUTHZ_FILES_ROOT，默认 /files）下的文件字节
+AUTHZ_APP_PREFIX_FILES=file                       # files 保留前缀：file-<节点>.<域>/ 渲染文件浏览页，带子路径的 GET/HEAD 直取容器内 /files 下的文件字节（换目录改 FILES_DIR 挂载，不是这个变量）
 AUTHZ_APP_PORT_FILES=100                          # files 虚拟端口：策略对象为 /100<原始 uri>（如 /100/alice/* 可按目录分级）；该端口不允许被域名绑定占用
 AUTHZ_APP_PREFIX_S3=s3                            # s3 保留前缀：s3-<节点>.<域>/ 渲染对象存储页，带子路径的 GET/HEAD 直取当前生效那套配置 default_bucket 下的对象字节（?cfg= 切换配置）
 AUTHZ_APP_PORT_S3=101                             # s3 虚拟端口：策略对象为 /101<key>（如 /101/share/pub/*）；未配置存储或 default_bucket 为空回 503
@@ -428,11 +487,31 @@ AUTHZ_STORE_DEFAULT_EXPIRY_HOURS=24               # 保存区默认保留小时�
 # AUTHZ_S3_ENDPOINT=                              # http(s)://<host>[:<port>]，path-style、不能带路径；留空 = 回落项不存在（表里也没行时整体功能关闭）
 # AUTHZ_S3_REGION=us-east-1                       # SigV4 region
 # AUTHZ_S3_ACCESS_KEY_ID=                         # endpoint 已设时必填
+| `file-<域>/<路径>` 返回 404 但文件确实存在 | 内容根没挂：compose 里缺 `${FILES_DIR}:/files` 这行（见 3.2）。页面能开不代表内容根已挂，这两件事独立 |
+| `file-<域>/<路径>` 返回 400「符号链接指向内容根之外」 | 路径上有指向内容根外的绝对符号链接，直取通道逐级 realpath 后拒绝（3.6 末尾有体检命令）。改用 volume 把目标树挂到根内子目录，而不是在根内做绝对链接 |
+| `file-<域>/<路径>` 返回 400「路径非法：禁止 .. 段与控制字符」 | URL 里带了 `..` 段或 `%2e%2e`/`%2f`/`%5c`/`%00` 编码形态（含双层编码）。这是刻意的 fail-closed，客户端拼 URL 时要做规范化，别把用户输入直接拼进路径 |
+| `s3-<域>/<key>` 返回 503 | 对象存储页「配置」里那套（或 `?cfg=` 选中的那套）没有非空 `default_bucket`。表里没启用行且 env 也没配时消息是「对象存储未配置」，配了但没设默认桶是另一条消息 |
+| 内容域名所有请求都 302 到登录页 | 该身份没有命中任何策略。匿名主体是 `role:guest`，要在管理界面给 `/100<路径>` 或 `/101<key>` 写 Casbin 策略才会放行 |
+| 内容域名取到了字节但状态码是 404/403，不是 405 | 方法判定顺序是 **Casbin 先、405 后**：策略没授该方法时先被拒成 403（匿名 302）；只有 Casbin 放行了该方法，非 GET/HEAD 才回 405 |
 # AUTHZ_S3_SECRET_ACCESS_KEY=                     # endpoint 已设时必填（表里的那一行是明文入库，见含密告警）
 # AUTHZ_S3_ALLOW_HTTP=false                       # endpoint 是明文 http 时必须显式 true，否则启动即报错
 # AUTHZ_S3_TMP_DIR=/data/s3tmp                    # 上传中转暂存目录（容器内，与 /data 同卷最省 IO）
 # AUTHZ_S3_CONNECT_TIMEOUT_MS=2000                # 以下为实例级调优，表里的所有配置共用同一份
 # AUTHZ_S3_READ_TIMEOUT_MS=30000
+**先问一句：这次改动 CI 是不是已经在构建了？** push 到 `main` 会自动触发
+`.github/workflows/build-and-push.yml`，产出并推送 `ghcr.io/yorkane/authz:latest`。验证通过的
+改动，生产直接 `docker pull` 拿那个产物即可——既省掉本机几十分钟的全量编译，也保证生产跑的
+就是 CI 验证过的那份。**只在本机调试、还没 push 时才需要下面的本地构建。**
+
+```bash
+# 首选：拿 CI 产物（构建成功后 ghcr 上就是最新 main）
+docker pull ghcr.io/yorkane/authz:latest
+docker run --rm --entrypoint sh ghcr.io/yorkane/authz:latest -c \
+  'grep -c <新代码标记> /usr/local/openresty/site/lualib/resty/authz/...'  # 确认内容
+```
+
+确实要本地构建时：
+
 # AUTHZ_S3_SEND_TIMEOUT_MS=30000
 # AUTHZ_S3_KEEPALIVE_MS=30000
 # AUTHZ_S3_WRITABLE_PATHS=                        # 回落项的可写范围白名单：留空 = 默认 share/<本机 LAN IP>；"/" 或 "*" = 全部可写
@@ -442,6 +521,14 @@ AUTHZ_STORE_DEFAULT_EXPIRY_HOURS=24               # 保存区默认保留小时�
 
 # ══════════════ 会话 ══════════════
 AUTHZ_SESSION_TTL=604800                          # 会话有效期秒数，默认 7 天；管理界面修改密码后该用户全部会话失效（管理端需输入两次新密码确认）
+- **不要随手加 `--build-arg`（如 `RESTY_J`）**。该 ARG 参与 openresty-builder 那条巨型 `RUN` 的
+  命令行，任何与上次不同的取值都会让这一层缓存失效，触发 PCRE2 / OpenSSL / OpenResty 全量重编
+  （本机实测十几分钟），且重编可能因环境差异失败——报的是 `openssl/macros.h` 里
+  `OPENSSL_API_COMPAT expresses an impossible API compatibility level` 加一大片 `Error 1`，看起来
+  像代码坏了，其实只是缓存没命中后的重编失败。CI 不传任何 build-arg，本地要复现就用默认构建；
+  确实要调并行度，先确认这一层缓存已经命中再改；
+- 构建耗时较长时用 `setsid nohup docker build ... > /data/tmp/build.log 2>&1 &` 脱离会话，
+  避免会话被打断连带杀掉构建；
 AUTHZ_LOGIN_ATTEMPTS=5                            # 同一账户（账户名+IP）连续失败多少次后锁定（>=1）
 AUTHZ_LOGIN_WINDOW=1800                           # 失败计数窗口 = 锁定时长（秒，>=60，默认 1800=30 分钟）
 AUTHZ_LOGIN_FAIL_DELAY_MS=1000                    # 登录失败后延迟多少毫秒再返回（0-10000，防暴力枚举计时）；按「账户名+IP」锁定，不影响同 IP 其他账户
@@ -563,3 +650,8 @@ curl -skS -o /dev/null -w "%{http_code}" "https://127.0.0.1:${HTTPS_PORT}/_authz
 curl -skS -o /dev/null -w "%{http_code}" "https://127.0.0.1:${HTTPS_PORT}/_authz/login"         # 200
 docker exec authz test -s /data/authz/authz.db && echo db-ok                          # db-ok
 ```
+# 保留前缀域名默认开启，这三项要与上面的通用检查分开看
+KEY=$(docker exec authz printenv AUTHZ_API_KEY)                                      # 有预置 Key 才跑
+curl -sS -o /dev/null -w "%{http_code}\n" -H 'Host: file-check.example.com' -H "x-api-key: $KEY" "http://127.0.0.1:${HTTP_PORT}/"                    # 200 页面
+curl -sS -o /dev/null -w "%{http_code}\n" -H 'Host: file-check.example.com' -H "x-api-key: $KEY" "http://127.0.0.1:${HTTP_PORT}/no-such-file"             # 404 不回落
+docker exec authz grep -c authz_app_content /usr/local/openresty/nginx/conf/server.conf                                                          # >=1 模板已渲染

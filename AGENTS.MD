@@ -44,7 +44,7 @@ TEST_ONLY=guest,envkey OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_ga
 ```
 
 - 三组脚本都占随机端口并起常驻 mock，**必须串行**；不要在脚本里用裸 `wait`。
-- 行为变更必须同步增改真实 HTTP 断言。最近基线：Router 99、Authz 998、共享会话 29。
+- 行为变更必须同步增改真实 HTTP 断言。最近基线：Router 99、Gateway 1435、共享会话 119。
   保留前缀域名的直取语义（`file-<节点>.<域>/<路径>`、`s3-<节点>.<域>/<key>`）属行为变更，
   断言落在 `test/test_authz_gateway.sh` 的 `app-domains` 段（根路径仍是页面、带路径返回字节、
   Range 206、非 GET/HEAD 405、含 `..` 400、不存在 404、按目录前缀的策略分级）与 `s3-live` 段
@@ -55,7 +55,9 @@ TEST_ONLY=guest,envkey OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_ga
 
 ```bash
 cd /home/aigc/ChatGPT/authz
-rsync -a admin conf scripts test docker-entrypoint.sh .env.example 241.t:/data/app/authz-test/
+# docker-compose.yml 也要在清单里：该实例用的就是仓库根 compose 的副本，它用逐条列举的
+# 显式 environment: 清单，新变量只进 .env.example 不进清单就不会落到容器里。
+rsync -a admin conf scripts test docker-entrypoint.sh docker-compose.yml .env.example 241.t:/data/app/authz-test/
 rsync -a lualib/resty 241.t:/data/app/authz-test/lualib/   # 勿 --delete，保留对方 lfs.so
 ssh 241.t 'cd /data/app/authz-test && sudo docker compose up -d --force-recreate'
 ssh 241.t 'cd /data/app/authz-test && sudo OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_gateway.sh'
