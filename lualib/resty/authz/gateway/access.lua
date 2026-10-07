@@ -7,6 +7,7 @@ local resolver = require "resty.authz.gateway.resolver"
 local session = require "resty.authz.session"
 local target = require "resty.authz.target"
 local util = require "resty.authz.util"
+local app_content = require "resty.authz.gateway.app_content"
 
 local _M = {}
 local escape_html = util.escape_html
@@ -114,6 +115,14 @@ function _M.handle(config)
         -- 之后 ngx.ctx 不保留，跨 location 只能靠 ngx.var：authz_app_entry 由
         -- Lua 写入，客户端伪造不了，/_authz/apps/ 的三个 location 据此放行
         -- 「URI 精确等于入口页」的请求（详见 conf/server.conf.template）。
+        --
+        -- 内容出口：带子路径的 GET/HEAD 请求（非根、非 /_authz/ 命名空间）改道
+        -- 到 /_authz/files/ 或 /_authz/s3/ 真正吐文件/对象字节；根路径与 /_authz/
+        -- 前缀仍交回这里渲染入口页。分流细节见 gateway/app_content.lua——它复用
+        -- 上面这次 Casbin（object 含完整路径，可做目录级分级），并以 Lua-only 变量
+        -- authz_app_content 通知内容 location 免二次鉴权。binding.app 全程不改，
+        -- 否则会撞上面 prevent_loop 的 508。
+        if app_content.handle(binding) ~= false then return end
         ngx.var.authz_app_entry = binding.app
         ngx.req.set_uri("/_authz/apps/" .. binding.app_page, false)
         return ngx.exec("/_authz/apps/" .. binding.app_page)

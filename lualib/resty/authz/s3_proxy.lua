@@ -94,7 +94,15 @@ function _M.serve()
         return reject(423, cfg_err or "对象存储未配置")
     end
 
-    local bucket, key = _M.parse_path(ngx.var.request_uri, ngx.var.script_name)
+    -- 取源优先级：app_content 内部重定向时写好的完整目标 URI > 客户端原始
+    -- $request_uri。ngx.req.set_uri 只改 $uri 不改 $request_uri，所以经内容域名
+    -- 直取（location / → ngx.exec）时 request_uri 仍是 /<key>，parse_path 拆不出
+    -- bucket/key。不用 $uri 兜底：$uri 已解码，再过 parse_path 的 unescape 会二次
+    -- 解码，key 含 % 时出错。必须双判 nil/空串：普通请求不经 location /，该变量
+    -- 是 nil 而非空串，只判 ~= "" 会把普通请求一起带进错误分支。
+    local forced = ngx.var.authz_app_content_uri
+    local source_uri = (forced and forced ~= "") and forced or ngx.var.request_uri
+    local bucket, key = _M.parse_path(source_uri, ngx.var.script_name)
     if not bucket then return reject(404, "对象路径无效") end
 
     local method = ngx.req.get_method()

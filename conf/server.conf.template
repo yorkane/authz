@@ -169,6 +169,13 @@ location ^~ /_authz/files/ {
     sub_filter '</head>' $authz_files_head_close;
     sub_filter_once on;
     access_by_lua_block {
+        -- 内容域名（file-<节点>.<域>）经网关认证 + Casbin 放行过来的内容请求：
+        -- 网关层已完成认证与授权（object /100<uri>，含完整路径，可做目录级分级），
+        -- 这里不再重复鉴权，也不做 guest 降级。标记是 Lua-only 变量（见 location /
+        -- 的声明），客户端伪造不了；裸打 /_authz/files/（不经网关）时它未初始化，
+        -- 仍走下面的会话 / API Key 规则。
+        local content = ngx.var.authz_app_content
+        if content and content ~= "" then return end
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
         -- 免登录放行：合法 API Key（x-api-key）直接取页面与资源，
@@ -203,6 +210,12 @@ location ^~ /_authz/s3/ {
     # CSP 与 nosniff 由 s3_proxy 自己下发（add_header 会叠加出重复头，reject() 分支也需要它们）。
     proxy_buffering off;
     access_by_lua_block {
+        -- 内容域名（s3-<节点>.<域>）经网关认证 + Casbin 放行过来的对象请求：
+        -- 网关层已完成认证与授权（object /101<uri>）并已解析 bucket，这里不再
+        -- 重复鉴权、不做 guest 降级。标记同 files 门：Lua-only 变量，裸打
+        -- /_authz/s3/ 时未初始化，仍走下面的会话 / API Key 规则。
+        local content = ngx.var.authz_app_content
+        if content and content ~= "" then return end
         local authz = require "resty.authz"
         require("resty.authz.db").open(authz.config.db_path)
         -- 免登录放行：合法 API Key 直接取对象，与文件浏览一致。
@@ -302,6 +315,19 @@ location / {
     # 内置应用保留前缀入口标记（files/s3）：只有 Lua 能写（gateway/access.lua），
     # /_authz/apps/ 的三个 location 据此认出"网关层已完成认证授权"的入口页请求。
     set $authz_app_entry "";
+    # 内容出口放行标记（files/s3 带子路径的内容请求）：同样只有 Lua 能写
+    # （gateway/app_content.lua），不从任何请求头 / map 派生，客户端伪造不了。
+    # 网关层已完成认证 + Casbin（object /100<uri> 或 /101<uri>），/_authz/files/
+    # 与 /_authz/s3/ 的 access 门据此直放，不重复鉴权、不做 guest 降级。与
+    # authz_app_entry（渲染入口页）语义分开，不可复用；目标 location 内不得再
+    # set 本变量，否则内部重定向后会被清空。
+    set $authz_app_content "";
+    # 内容直取时由 gateway/app_content.lua 写入「拼好的目标 URI（含 query）」，
+    # 供 s3_proxy 在 $request_uri 未被 ngx.req.set_uri 改写时取用：set_uri 只改
+    # $uri 不改 $request_uri，而 s3_proxy 的 parse_path 按 $request_uri 匹配，
+    # 内部重定向后拿不到 bucket/key。与 authz_app_content 同理，只有 Lua 能写，
+    # 客户端伪造不了；未赋值时为 nil（普通请求不经 location /）。
+    set $authz_app_content_uri "";
     # 发给上游的 Accept-Encoding 独立成变量：正文改写需要上游返回未压缩字节，
     # 但若用 ngx.req.set_header 直接改请求头表，nginx 的 gzip 模块会按同一个
     # 值判定「客户端不要压缩」，于是配了改写的绑定整体丢掉网关压缩。变量只影响

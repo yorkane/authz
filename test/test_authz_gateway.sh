@@ -3631,6 +3631,7 @@ docker run -d \
     -e AUTHZ_S3_SECRET_ACCESS_KEY="$AUTHZ_S3_TEST_SECRET" \
     -e AUTHZ_S3_ALLOW_HTTP=true \
     -e AUTHZ_S3_TMP_DIR=/data/s3tmp \
+    -e AUTHZ_S3_SHARE_BUCKET="$S3_B" \
     -e AUTHZ_HOST_LAN_IP=10.254.253.252 \
     -e AUTHZ_S3_SHARE_ROOT=/share/ \
     -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
@@ -3879,7 +3880,8 @@ assert_json "in-scope dir items all writable" '[.data.items[] | select(.writable
 s3req GET /_authz/api/s3 "$S3_COOKIE"
 assert_json "info echoes writable roots" '.data.writable_roots | index("share/10.254.253.252") != null | tostring' "true"
 assert_json "info echoes share prefix" '.data.share_prefix' "share/10.254.253.252"
-assert_json "info share bucket defaults to empty (any bucket)" '.data.share_bucket // ""' ""
+assert_json "info echoes the share bucket injected for the content domain" \
+    '.data.share_bucket' "$S3_B"
 assert_json "info writable_all false" '.data.writable_all | tostring' "false"
 assert_json "info buckets all read-only" '[.data.buckets[] | select(.writable != false)] | length' "0"
 # ── auto-mkdir：只补目标之上的挂载祖先，绝不把范围外变成可写 ─────────────
@@ -3934,6 +3936,101 @@ assert_eq "live guest machine key cannot rename" \
         -H 'Content-Type: application/json' \
         -d "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"keymove.txt\",\"new_name\":\"stolen.txt\"}" \
         -o /dev/null -w '%{http_code}' "$S3_URL/_authz/api/s3/rename")" "403"
+
+
+# ── s3 内容域名直取对象：s3-<节点>.<域>/<key> → 生效配置 default_bucket（空则
+#    回落 share_bucket）下的对象字节。本容器只有 env 那套（s3_config_store 的
+#    id=0 虚拟项），其 default_bucket 恒为 ""，桶来源就是 docker run 注入的
+#    AUTHZ_S3_SHARE_BUCKET；没有那个 env，域名直取一律 503。
+s3host_req() {  # method host path [cookie] [csrf] [data] [api_key] [extra]
+    local method=${1} host=${2} path=${3}
+    local cookie=${4:-} csrf=${5:-} data=${6:-} api_key=${7:-} extra=${8:-}
+    local args=(--silent --show-error --max-time 30 --request "${method}"
+        --resolve "${host}:${S3_LIVE_PORT}:127.0.0.1" -H 'Accept: application/json'
+        -D "$TMP_DIR/headers" -o "$TMP_DIR/body" -w '%{http_code}')
+    [[ -n "$cookie" ]] && args+=(-H "Cookie: $(cookie_header "$cookie")")
+    [[ -n "$csrf" ]] && args+=(-H "X-CSRF-Token: $csrf")
+    [[ -n "$api_key" ]] && args+=(-H "x-api-key: $api_key")
+    [[ -n "$extra" ]] && args+=(-H "$extra")
+    if [[ -n "$data" ]]; then args+=(-H 'Content-Type: application/json' --data "$data"); fi
+    STATUS=$(curl "${args[@]}" "http://${host}:${S3_LIVE_PORT}${path}")
+    BODY=$(<"$TMP_DIR/body")
+}
+printf 'authz-domain-payload' > "$TMP_DIR/s3-domain.txt"
+s3put "$S3_P/domain" "fixture.txt" "$TMP_DIR/s3-domain.txt" "" "1"
+assert_eq "live content-domain fixture upload 201" "$STATUS" "201"
+s3host_req GET s3-235.example / "$S3_COOKIE"
+assert_eq "s3 content host still renders the entry page at the root" "$STATUS" "200"
+assert_contains "s3 content host root is the s3 app page" "$BODY" "<title>S3</title>"
+s3host_req GET s3-235.example "/${S3_P}/domain/fixture.txt" "$S3_COOKIE"
+assert_eq "s3 domain serves an object for an admin session" "$STATUS" "200"
+assert_eq "s3 domain returns the exact object bytes" "$BODY" "authz-domain-payload"
+assert_contains "s3 domain derives text/plain from the key" "$(cat "$TMP_DIR/headers")" "Content-Type: text/plain"
+s3host_req GET s3-235.example "/${S3_P}/domain/fixture.txt" "" "" "" "$S3_LIVE_KEY"
+assert_eq "s3 domain serves an object for the admin machine key" "$STATUS" "200"
+assert_eq "s3 machine key receives the same bytes" "$BODY" "authz-domain-payload"
+s3host_req GET s3-235.example "/${S3_P}/domain/fixture.txt" "" "" "" "$S3_LIVE_GUEST_KEY"
+assert_eq "s3 domain refuses a guest key with no /101 policy" "$STATUS" "403"
+s3req POST /_authz/api/policies "$S3_COOKIE" "$S3_CSRF" \
+    '{"ptype":"p","v0":"role:guest","v1":"/101/*","v2":"GET","eft":"allow"}'
+assert_eq "live policy object accepts reserved port 101" "$STATUS" "201"
+s3req GET /_authz/api/authorization "$S3_COOKIE"
+S3_LIVE_DIR_POLICY_ID=$(jq -er '.data.policies[] | select(.v0 == "role:guest" and .v1 == "/101/*") | .id' "$TMP_DIR/body")
+s3host_req GET s3-235.example "/${S3_P}/domain/fixture.txt" "" "" "" "$S3_LIVE_GUEST_KEY"
+assert_eq "guest key reads the object after the /101 grant" "$STATUS" "200"
+assert_eq "guest key receives the granted bytes" "$BODY" "authz-domain-payload"
+s3host_req GET s3-235.example "/${S3_P}/domain/fixture.txt"
+assert_eq "anonymous reads the object after the /101 grant" "$STATUS" "200"
+assert_eq "anonymous receives the granted bytes" "$BODY" "authz-domain-payload"
+S3_HEAD_OUT=$(curl -sS --max-time 30 --head --resolve "s3-235.example:$S3_LIVE_PORT:127.0.0.1" \
+    -H "Cookie: $(cookie_header "$S3_COOKIE")" -D "$TMP_DIR/headers" -o /dev/null \
+    -w '%{http_code} %{size_download}' \
+    "http://s3-235.example:$S3_LIVE_PORT/$S3_P/domain/fixture.txt")
+assert_eq "s3 domain answers HEAD" "$(printf '%s' "$S3_HEAD_OUT" | cut -d' ' -f1)" "200"
+assert_eq "s3 domain HEAD carries no body" "$(printf '%s' "$S3_HEAD_OUT" | cut -d' ' -f2)" "0"
+assert_contains "s3 domain HEAD keeps Content-Length" "$(cat "$TMP_DIR/headers")" "Content-Length: 20"
+s3host_req GET s3-235.example "/${S3_P}/domain/fixture.txt" "$S3_COOKIE" "" "" "" "Range: bytes=0-3"
+assert_eq "s3 domain honours a Range request" "$STATUS" "206"
+assert_contains "s3 domain answers Range with Content-Range" "$(cat "$TMP_DIR/headers")" \
+    "Content-Range: bytes 0-3/20"
+assert_eq "s3 domain sends only the requested slice" "$BODY" "auth"
+s3host_req GET s3-235.example "/${S3_P}/domain/fixture.txt?download=1" "$S3_COOKIE"
+assert_eq "s3 domain answers the download query" "$STATUS" "200"
+assert_contains "s3 domain download query sets Content-Disposition" "$(cat "$TMP_DIR/headers")" \
+    "Content-Disposition: attachment"
+s3host_req GET s3-235.example "/${S3_P}/domain/missing.txt" "$S3_COOKIE"
+assert_eq "missing object on the s3 content host is 404" "$STATUS" "404"
+assert_not_contains "missing object never falls back to the entry page" "$BODY" "<title>S3</title>"
+s3host_req POST s3-235.example "/${S3_P}/domain/fixture.txt" "" "" '{"x":1}' "$S3_LIVE_KEY"
+assert_eq "s3 domain rejects POST after Casbin let the method through" "$STATUS" "405"
+assert_contains "s3 domain 405 advertises the allowed methods" "$(cat "$TMP_DIR/headers")" "Allow: GET, HEAD"
+# 方法判定顺序同本机文件通道：Casbin 先、405 后。guest Key 只有 GET 授权时 POST → 403。
+s3host_req POST s3-235.example "/${S3_P}/domain/fixture.txt" "" "" '{"x":1}' "$S3_LIVE_GUEST_KEY"
+assert_eq "guest key POST under a GET-only grant is refused by Casbin" "$STATUS" "403"
+S3_TRAVERSAL_STATUS=$(curl -sS --path-as-is --max-time 30 \
+    --resolve "s3-235.example:$S3_LIVE_PORT:127.0.0.1" -H "x-api-key: $S3_LIVE_KEY" \
+    -o "$TMP_DIR/body" -w '%{http_code}' \
+    "http://s3-235.example:$S3_LIVE_PORT/$S3_P/domain/../domain/fixture.txt")
+assert_eq "s3 domain rejects a raw dot-dot segment" "$S3_TRAVERSAL_STATUS" "400"
+S3_TRAVERSAL_STATUS=$(curl -sS --path-as-is --max-time 30 \
+    --resolve "s3-235.example:$S3_LIVE_PORT:127.0.0.1" -H "x-api-key: $S3_LIVE_KEY" \
+    -o "$TMP_DIR/body" -w '%{http_code}' \
+    "http://s3-235.example:$S3_LIVE_PORT/$S3_P/domain/%2e%2e/domain/fixture.txt")
+assert_eq "s3 domain rejects an encoded dot-dot segment" "$S3_TRAVERSAL_STATUS" "400"
+# 裸打 /_authz/s3/（不经网关：直连 127.0.0.1，网关那层没跑过）仍要会话或 Key：
+# guest 被 authorize_request 排除、又无会话 → 302 引导登录，新放行没把它变成公开。
+S3_BARE_STATUS=$(curl -sS --max-time 30 -o "$TMP_DIR/body" -w '%{http_code}' \
+    -H "x-api-key: $S3_LIVE_GUEST_KEY" \
+    "$S3_URL/_authz/s3/$S3_B/$S3_P/domain/fixture.txt")
+assert_eq "bare s3 route never accepts a guest machine key" "$S3_BARE_STATUS" "302"
+assert_not_contains "bare s3 route leaks no object bytes" "$(<"$TMP_DIR/body")" "authz-domain-payload"
+s3req DELETE "/_authz/api/policies/${S3_LIVE_DIR_POLICY_ID}" "$S3_COOKIE" "$S3_CSRF"
+assert_eq "live /101 content policy removed" "$STATUS" "200"
+s3host_req GET s3-235.example "/${S3_P}/domain/fixture.txt" "" "" "" "$S3_LIVE_GUEST_KEY"
+assert_eq "guest key loses the object once the policy is gone" "$STATUS" "403"
+s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
+    "{\"bucket\":\"$S3_B\",\"path\":\"$S3_P\",\"name\":\"domain\",\"recursive\":true}"
+assert_eq "live cleanup of the content-domain fixture" "$STATUS" "200"
 s3req DELETE "/_authz/api/api-keys/$S3_LIVE_GUEST_ID" "$S3_COOKIE" "$S3_CSRF"
 assert_eq "live section removes its guest key" "$STATUS" "200"
 s3req DELETE /_authz/api/s3/remove "$S3_COOKIE" "$S3_CSRF" \
@@ -4301,6 +4398,198 @@ request GET "$ADMIN_HOST" /_authz/api/files "" "" "" "$APP_GUEST_KEY_TOKEN"
 assert_eq "reserved grant never opens the files API for guest" "$STATUS" "403"
 request GET s3-235.example / "" "" "" "$APP_GUEST_KEY_TOKEN"
 assert_eq "guest policy on /100 does not open /101" "$STATUS" "403"
+# ── 内容直取：file-<节点>.<域>/<路径> 直接吐本机文件字节（gateway/app_content）──
+# 目录级分级必须在没有宽策略的环境里验（一条 /100/* 会让任何路径都放行）：先临时
+# 撤掉上面刚建的宽策略，断言完原样补回，并把新 id 交回段尾清理（不留孤儿策略行）。
+request DELETE "$ADMIN_HOST" "/_authz/api/policies/${APP_GUEST_POLICY_ID}" "$ADMIN_COOKIE" "$APP_CSRF"
+assert_eq "wide entry policy is lifted for the content assertions" "$STATUS" "200"
+mkdir -p "$TMP_DIR/files/guest-ok/inner" "$TMP_DIR/files/guest-deny" "$TMP_DIR/files/acl-alice/pub/deep"
+printf 'payload-ok' > "$TMP_DIR/files/guest-ok/inner/a.txt"
+printf 'payload-deny' > "$TMP_DIR/files/guest-deny/b.txt"
+printf 'only-one' > "$TMP_DIR/files/acl-alice/only.txt"
+printf 'second-one' > "$TMP_DIR/files/acl-alice/second.txt"
+printf 'pub-shallow' > "$TMP_DIR/files/acl-alice/pub/p.txt"
+printf 'pub-deep' > "$TMP_DIR/files/acl-alice/pub/deep/d.txt"
+head -c 200000 /dev/urandom > "$TMP_DIR/files/guest-ok/inner/v.mp4"
+request GET file-235.example / "$ADMIN_COOKIE"
+assert_eq "content split keeps the entry page at the root path" "$STATUS" "200"
+assert_contains "root of a content host still renders the files page" "$BODY" "<title>Files</title>"
+request GET file-235.example /guest-ok/inner/a.txt "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "file domain serves a local file for the admin key" "$STATUS" "200"
+assert_eq "file domain returns the exact file bytes" "$BODY" "payload-ok"
+assert_contains "file domain derives text/plain from the extension" "$CONTENT_TYPE" "text/plain"
+request GET file-235.example /guest-ok/inner/a.txt "$ADMIN_COOKIE"
+assert_eq "file domain serves a local file for an admin session" "$STATUS" "200"
+assert_eq "admin session receives the same bytes" "$BODY" "payload-ok"
+# HEAD 走 --head（curl 的 -X HEAD 会因服务器按语义不带正文而报 error 18，在 set -e
+# 下直接把整条回归打死）；--head 把响应头写进 -o 目标，所以正文用 size_download
+# 判是否为 0、响应头单独 -D 落盘再判。
+HEAD_OUT=$(curl -sS --max-time 5 --head --resolve "file-235.example:${HTTP_PORT}:127.0.0.1" \
+    -H "x-api-key: ${APP_ADMIN_KEY_TOKEN}" -D "$TMP_DIR/headers" -o /dev/null \
+    -w '%{http_code} %{size_download}' "http://file-235.example:${HTTP_PORT}/guest-ok/inner/a.txt")
+assert_eq "file domain answers HEAD" "$(printf '%s' "$HEAD_OUT" | cut -d' ' -f1)" "200"
+assert_eq "file domain HEAD carries no body" "$(printf '%s' "$HEAD_OUT" | cut -d' ' -f2)" "0"
+assert_contains "file domain HEAD keeps Content-Length" "$(cat "$TMP_DIR/headers")" "Content-Length: 10"
+request GET file-235.example /guest-ok/inner/v.mp4 "" "" "" "$APP_ADMIN_KEY_TOKEN" "Range: bytes=0-3"
+assert_eq "file domain honours a Range request" "$STATUS" "206"
+assert_contains "file domain answers Range with Content-Range" "$(cat "$TMP_DIR/headers")" \
+    "Content-Range: bytes 0-3/200000"
+assert_eq "file domain sends only the requested slice" "$(wc -c < "$TMP_DIR/body" | tr -d ' ')" "4"
+request GET file-235.example /guest-ok/inner/nope.mp4 "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "missing file on a content host is 404" "$STATUS" "404"
+assert_not_contains "missing file never falls back to the entry page" "$BODY" "<title>Files</title>"
+request POST file-235.example /guest-ok/inner/a.txt "" "" '{"x":1}' "$APP_ADMIN_KEY_TOKEN"
+assert_eq "file domain rejects POST" "$STATUS" "405"
+assert_contains "file domain 405 advertises the allowed methods" "$(cat "$TMP_DIR/headers")" "Allow: GET, HEAD"
+request DELETE file-235.example /guest-ok/inner/a.txt "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "file domain rejects DELETE" "$STATUS" "405"
+assert_contains "file domain DELETE 405 advertises the allowed methods" "$(cat "$TMP_DIR/headers")" \
+    "Allow: GET, HEAD"
+# 穿越必须在网关层掐死：request 不带 --path-as-is，这两条内联 curl 自己发原始路径
+#（nginx 会把 /a/../b 归一化、把 %2e%2e 解码，归一化后的 uri 看不出穿越意图）。
+TRAVERSAL_STATUS=$(curl -sS --path-as-is --max-time 5 --resolve "file-235.example:${HTTP_PORT}:127.0.0.1" \
+    -H "x-api-key: ${APP_ADMIN_KEY_TOKEN}" -o "$TMP_DIR/body" -w '%{http_code}' \
+    "http://file-235.example:${HTTP_PORT}/guest-ok/../guest-deny/b.txt")
+assert_eq "file domain rejects a raw dot-dot segment" "$TRAVERSAL_STATUS" "400"
+TRAVERSAL_STATUS=$(curl -sS --path-as-is --max-time 5 --resolve "file-235.example:${HTTP_PORT}:127.0.0.1" \
+    -H "x-api-key: ${APP_ADMIN_KEY_TOKEN}" -o "$TMP_DIR/body" -w '%{http_code}' \
+    "http://file-235.example:${HTTP_PORT}/guest-ok/%2e%2e/guest-deny/b.txt")
+assert_eq "file domain rejects an encoded dot-dot segment" "$TRAVERSAL_STATUS" "400"
+# 双重编码穿越：raw 与 d1 都看不出 ..（%252e 解一次只剩 %2e），必须解到 d2 才能
+# 在网关层掐死。漏 d2 时它由下游 nginx 的 unsafe URI 防护兜住：状态 500，而且以
+# worker 协程抛未捕获异常的形式失败（error.log: lua entry thread aborted）——
+ABORTS_BEFORE=$(docker logs "$CONTAINER_NAME" 2>&1 | grep -c 'lua entry thread aborted' || true)
+# fail-closed 成立但不符合 design.md 的 400 口径。断言状态码之外还要求网关自己的
+# JSON 错误体（bad_request），证明拒绝发生在网关层而不是下游兜底。
+TRAVERSAL_STATUS=$(curl -sS --path-as-is --max-time 5 --resolve "file-235.example:${HTTP_PORT}:127.0.0.1"     -H "x-api-key: ${APP_ADMIN_KEY_TOKEN}" -o "$TMP_DIR/body" -w '%{http_code}'     "http://file-235.example:${HTTP_PORT}/guest-ok/%252e%252e%2f%252e%252e%2fetc/passwd")
+assert_eq "file domain rejects a double-encoded dot-dot segment" "$TRAVERSAL_STATUS" "400"
+assert_contains "double-encoded traversal is refused by the gateway itself" "$(<"$TMP_DIR/body")" "bad_request"
+# 编码形态的分隔符（%2f / %5c / %00）同样在网关层 400，不落文件系统。
+for encoded_path in '/guest-ok/%2f%2e%2e%2fetc%2fpasswd' '/guest-ok/..%5c..%5cetc' '/guest-ok/a%00.txt'; do
+    TRAVERSAL_STATUS=$(curl -sS --path-as-is --max-time 5 --resolve "file-235.example:${HTTP_PORT}:127.0.0.1"         -H "x-api-key: ${APP_ADMIN_KEY_TOKEN}" -o "$TMP_DIR/body" -w '%{http_code}'         "http://file-235.example:${HTTP_PORT}${encoded_path}")
+    assert_eq "file domain refuses encoded separator form ${encoded_path}" "$TRAVERSAL_STATUS" "400"
+done
+assert_eq "gateway worker never aborts during traversal probes" \
+    "$(docker logs "$CONTAINER_NAME" 2>&1 | grep -c 'lua entry thread aborted' || true)" "$ABORTS_BEFORE"
+# ── 符号链接逃逸：静态 alias 不做 realpath 校验，链接必须由网关层逐级判落点掐掉。
+# files root 在部署里 bind 的是宿主上可写的真实目录树，一条目录级放行 + 一个指向
+# /etc 的链接 = 任意文件读，这是本功能上线的准入条件（判据与写路径 resolve_dir 同源）。
+# 链接从宿主侧建进 bind 目录：target 字符串由容器内核在跟随时解析，等价于容器内建链。
+mkdir -p "$TMP_DIR/files/guest-ok/inner/deep"
+ln -sfn /etc/passwd "$TMP_DIR/files/guest-ok/inner/escape-link"
+ln -sfn /etc "$TMP_DIR/files/guest-ok/escape-dir"
+ln -sfn /etc/passwd "$TMP_DIR/files/guest-ok/inner/deep/via-subdir-link"
+for escape_path in /guest-ok/inner/escape-link /guest-ok/escape-dir/passwd /guest-ok/inner/deep/via-subdir-link; do
+    ESCAPE_STATUS=$(curl -sS --max-time 5 --resolve "file-235.example:${HTTP_PORT}:127.0.0.1"         -H "x-api-key: ${APP_ADMIN_KEY_TOKEN}" -o "$TMP_DIR/body" -w '%{http_code}'         "http://file-235.example:${HTTP_PORT}${escape_path}")
+    assert_eq "symlink escape is refused on the content host ${escape_path}" "$ESCAPE_STATUS" "400"
+    assert_not_contains "symlink escape never leaks /etc/passwd bytes" "$(<"$TMP_DIR/body")" "root:x:0:0"
+done
+request GET file-235.example /guest-ok/inner/a.txt "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "ordinary file still served while a sibling symlink is refused" "$STATUS" "200"
+assert_eq "ordinary file bytes unaffected by the symlink guard" "$BODY" "payload-ok"
+# ── 文件名字面量编码：内容出口必须用原始未解码路径拼 target（内部重定向后 nginx
+# 还会再解一次码）。用解过一次的 $uri 拼接会让字节被解码两次——pct%2520name.txt
+# 会命中名字带空格的那个文件（这是回归锁，旧实现两条分支语义同时错）。
+mkdir -p "$TMP_DIR/files/content-enc" "$TMP_DIR/files/content-enc/空格 目录"
+printf 'SPACE-FILE' > "$TMP_DIR/files/content-enc/pct name.txt"
+printf 'PERCENT-FILE' > "$TMP_DIR/files/content-enc/pct%20name.txt"
+printf 'CN-FILE' > "$TMP_DIR/files/content-enc/报告.md"
+printf 'INDIR-FILE' > "$TMP_DIR/files/content-enc/空格 目录/内容.txt"
+request GET file-235.example "/content-enc/pct%20name.txt" "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "percent-escaped space opens the space-named file" "$STATUS" "200"
+assert_eq "percent-escaped space bytes" "$BODY" "SPACE-FILE"
+request GET file-235.example "/content-enc/pct%2520name.txt" "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "double-escaped percent opens the literal-percent file" "$STATUS" "200"
+assert_eq "double-escaped percent bytes (no double decode)" "$BODY" "PERCENT-FILE"
+request GET file-235.example "/content-enc/%E6%8A%A5%E5%91%8A.md" "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "utf-8 percent-encoded name served" "$STATUS" "200"
+assert_eq "utf-8 percent-encoded bytes" "$BODY" "CN-FILE"
+request GET file-235.example "/content-enc/%E7%A9%BA%E6%A0%BC%20%E7%9B%AE%E5%BD%95/%E5%86%85%E5%AE%B9.txt"     "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "directory name with space and utf-8 served" "$STATUS" "200"
+assert_eq "nested space/utf-8 bytes" "$BODY" "INDIR-FILE"
+# Casbin 的 object 用解码后的 uri：上面四条同属 /100/content-enc/* 一条目录策略。
+
+# ── 分级授权：目录级（* 跨斜杠）与精确单文件，三条策略同时在场 ─────────────
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$APP_CSRF" \
+    '{"ptype":"p","v0":"role:guest","v1":"/100/guest-ok/*","v2":"GET","eft":"allow"}'
+assert_eq "directory-scoped policy is accepted on the content host" "$STATUS" "201"
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$APP_CSRF" \
+    '{"ptype":"p","v0":"role:guest","v1":"/100/acl-alice/pub/*","v2":"GET","eft":"allow"}'
+assert_eq "pub directory policy is accepted on the content host" "$STATUS" "201"
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$APP_CSRF" \
+    '{"ptype":"p","v0":"role:guest","v1":"/100/acl-alice/only.txt","v2":"GET","eft":"allow"}'
+assert_eq "single-file policy is accepted on the content host" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+APP_DIR_POLICY_ID=$(jq -er '.data.policies[] | select(.v0 == "role:guest" and .v1 == "/100/guest-ok/*") | .id' "$TMP_DIR/body")
+APP_PUB_POLICY_ID=$(jq -er '.data.policies[] | select(.v0 == "role:guest" and .v1 == "/100/acl-alice/pub/*") | .id' "$TMP_DIR/body")
+APP_FILE_POLICY_ID=$(jq -er '.data.policies[] | select(.v0 == "role:guest" and .v1 == "/100/acl-alice/only.txt") | .id' "$TMP_DIR/body")
+request GET file-235.example /guest-ok/inner/a.txt "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest key reads a file inside the granted directory" "$STATUS" "200"
+assert_eq "guest key receives the granted bytes" "$BODY" "payload-ok"
+request GET file-235.example /guest-ok/inner/nope.mp4 "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "granted directory answers 404 not 403 for a missing file" "$STATUS" "404"
+request GET file-235.example /guest-deny/b.txt "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest key is refused outside the granted directory" "$STATUS" "403"
+assert_not_contains "refused guest key never leaks the outside bytes" "$BODY" "payload-deny"
+request GET file-235.example /guest-ok/inner/a.txt
+assert_eq "anonymous reads a file inside the granted directory" "$STATUS" "200"
+assert_eq "anonymous receives the granted bytes" "$BODY" "payload-ok"
+request GET file-235.example /guest-deny/b.txt
+assert_eq "anonymous outside the granted directory is guided to login" "$STATUS" "302"
+assert_not_contains "refused anonymous never leaks the outside bytes" "$BODY" "payload-deny"
+# * 跨斜杠：目录条目对任意深度的子目录同样放行。
+request GET file-235.example /acl-alice/pub/p.txt "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "directory grant covers a shallow object" "$STATUS" "200"
+assert_eq "shallow object bytes" "$BODY" "pub-shallow"
+request GET file-235.example /acl-alice/pub/deep/d.txt "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "directory grant crosses slashes" "$STATUS" "200"
+assert_eq "deep object bytes" "$BODY" "pub-deep"
+# 精确到单文件：同目录的另一个文件必须 403。
+request GET file-235.example /acl-alice/only.txt "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "exact-file grant serves the named file" "$STATUS" "200"
+assert_eq "exact-file grant bytes" "$BODY" "only-one"
+request GET file-235.example /acl-alice/second.txt "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "exact-file grant refuses its sibling in the same directory" "$STATUS" "403"
+# 方法判定顺序：Casbin 在前、405 在后。策略只授 GET 时 POST 得到 403（不是 405）；
+# 只有 Casbin 放行了该方法，才轮到内容出口回 405（上面 admin Key 的 405 就是这条路径）。
+request POST file-235.example /guest-ok/inner/a.txt "" "" '{"x":1}' "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest key POST under a GET-only grant is refused by Casbin" "$STATUS" "403"
+request PUT file-235.example /guest-ok/inner/a.txt "" "" '{"x":1}' "$APP_GUEST_KEY_TOKEN"
+assert_eq "guest key PUT under a GET-only grant is refused by Casbin" "$STATUS" "403"
+request DELETE "$ADMIN_HOST" "/_authz/api/policies/${APP_DIR_POLICY_ID}" "$ADMIN_COOKIE" "$APP_CSRF"
+assert_eq "directory-scoped content policy removed" "$STATUS" "200"
+request DELETE "$ADMIN_HOST" "/_authz/api/policies/${APP_PUB_POLICY_ID}" "$ADMIN_COOKIE" "$APP_CSRF"
+assert_eq "pub directory content policy removed" "$STATUS" "200"
+request DELETE "$ADMIN_HOST" "/_authz/api/policies/${APP_FILE_POLICY_ID}" "$ADMIN_COOKIE" "$APP_CSRF"
+assert_eq "single-file content policy removed" "$STATUS" "200"
+# 补回宽策略并把新 id 交给段尾原有的清理断言（本段之后的断言仍依赖这条策略）。
+request POST "$ADMIN_HOST" /_authz/api/policies "$ADMIN_COOKIE" "$APP_CSRF" \
+    '{"ptype":"p","v0":"role:guest","v1":"/100/*","v2":"GET","eft":"allow"}'
+assert_eq "wide entry policy is restored for the later assertions" "$STATUS" "201"
+request GET "$ADMIN_HOST" /_authz/api/authorization "$ADMIN_COOKIE"
+APP_GUEST_POLICY_ID=$(jq -er '.data.policies[] | select(.v0 == "role:guest" and .v1 == "/100/*") | .id' "$TMP_DIR/body")
+# ── 裸打 /_authz/files/（不经网关）不能因为内容域名放行而变成公开 ───────────
+request GET "$ADMIN_HOST" /_authz/files/guest-ok/inner/a.txt
+assert_eq "bare files route still guides anonymous visitors to login" "$STATUS" "302"
+request GET "$ADMIN_HOST" /_authz/files/guest-ok/inner/a.txt "" "" "" "$APP_GUEST_KEY_TOKEN"
+assert_eq "bare files route never accepts a guest machine key" "$STATUS" "302"
+request GET "$ADMIN_HOST" /_authz/files/guest-ok/inner/a.txt "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "bare files route still serves for an admin machine key" "$STATUS" "200"
+assert_eq "bare files route admin key receives the bytes" "$BODY" "payload-ok"
+# ── s3 域名在未配置对象存储时必须明确 503（不是 500，也不回落入口页）────────
+request GET s3-235.example /some/key.txt "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "s3 domain without any storage configuration answers 503" "$STATUS" "503"
+assert_contains "s3 unconfigured error answers JSON" "$CONTENT_TYPE" "application/json"
+assert_json "s3 unconfigured error names s3_not_configured" '.error.code' "s3_not_configured"
+assert_not_contains "s3 unconfigured never falls back to the entry page" "$BODY" "<title>S3</title>"
+# ── query 透传：本机文件通道是静态 alias（不下发 Content-Disposition），口径是
+#    「带 query 不破坏、状态码与字节一致」。
+request GET file-235.example "/guest-ok/inner/a.txt?download=1" "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "download query still serves the local file" "$STATUS" "200"
+assert_eq "download query leaves the bytes untouched" "$BODY" "payload-ok"
+request GET file-235.example "/guest-ok/inner/a.txt?authz_preview=1" "" "" "" "$APP_ADMIN_KEY_TOKEN"
+assert_eq "preview query still serves the local file" "$STATUS" "200"
+assert_eq "preview query leaves the bytes untouched" "$BODY" "payload-ok"
 # 数据库真实绑定优先于虚拟入口：显式绑定 file 前缀后接管。
 request POST "$ADMIN_HOST" /_authz/api/applications "$ADMIN_COOKIE" "$APP_CSRF" \
     "{\"domain\":\"file\",\"port\":$UPSTREAM_PORT,\"enabled\":true}"

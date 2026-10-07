@@ -24,9 +24,12 @@
    支持多级子域名（`3000-a.b.c.example.com`），端口范围默认 `2000-20000`；
    该免配置入口默认按“模拟本机访问”处理（上游 Host 为 `127.0.0.1:<port>`，来源头为 `127.0.0.1`）
 2. **显式绑定**：管理界面配置固定域名到目标 IP + 端口的映射（存 SQLite，目标 IP 默认 `127.0.0.1`）
-3. **内置应用保留前缀**（虚拟绑定，不在数据库中）：`file-任意域名` → 文件浏览页面、
-   `s3-任意域名` → 对象存储页面（默认端口 100/101，可用 `AUTHZ_APP_*` 调整或整体关闭）；
-   认证与授权仍走网关策略（对象 `/<端口><路径>`，如 `/100/*`），保留端口不允许被域名绑定占用
+3. **内置应用保留前缀**（虚拟绑定，不在数据库中）：`file-任意域名` → 文件浏览、
+   `s3-任意域名` → 对象存储（默认端口 100/101，可用 `AUTHZ_APP_*` 调整或整体关闭）。
+   **根路径渲染内置应用页面；带上子路径的 GET/HEAD 直接返回文件/对象字节**（file 端相对内容根
+   `AUTHZ_FILES_ROOT`，s3 端相对当前生效那套存储配置的 `default_bucket`，支持 Range/206）；
+   认证与授权仍走网关策略（对象 `/<端口><路径>`，file 是 `/100/alice/pub/a.txt`、s3 是
+   `/101/share/pub/v.mp4` 这种形态，因此可以按目录分级），保留端口不允许被域名绑定占用
 4. 其余域名 → 404
 
 所有代理流量需登录 + Casbin 策略授权；后端收到 `X-Authz-User` 头。管理菜单会读取本机监听端口，
@@ -179,9 +182,9 @@ docker exec <container_name> admin_password_reset
 | `AUTHZ_DB_PATH` | `/data/authz/authz.db` | SQLite 路径（用户/会话/策略/绑定） |
 | `AUTHZ_ADMIN_PASSWORD` | `admin123` | 首次 seed 的 admin 密码；也作为 `admin_password_reset` 的重置密码 |
 | `AUTHZ_PORT_MIN` / `AUTHZ_PORT_MAX` | `2000` / `20000` | 数字前缀端口范围 |
-| `AUTHZ_APP_DOMAINS` | `1` | 内置应用保留前缀入口（`file`→100 文件浏览、`s3`→101 对象存储）总开关，`0` 关闭 |
-| `AUTHZ_APP_PREFIX_FILES` / `AUTHZ_APP_PORT_FILES` | `file` / `100` | files 应用保留前缀与虚拟端口（非法值/与入口端口冲突时该项自动禁用） |
-| `AUTHZ_APP_PREFIX_S3` / `AUTHZ_APP_PORT_S3` | `s3` / `101` | s3 应用保留前缀与虚拟端口 |
+| `AUTHZ_APP_DOMAINS` | `1` | 内置应用保留前缀入口（`file`→100 文件浏览、`s3`→101 对象存储）总开关，`0` 关闭后这两类域名回退 404 |
+| `AUTHZ_APP_PREFIX_FILES` / `AUTHZ_APP_PORT_FILES` | `file` / `100` | files 应用保留前缀与虚拟端口（非法值/与入口端口冲突时该项自动禁用）。`file-<节点>.<域>/` 是页面，带子路径的 GET/HEAD 直取内容根下的文件字节，策略对象 `/100<路径>` |
+| `AUTHZ_APP_PREFIX_S3` / `AUTHZ_APP_PORT_S3` | `s3` / `101` | s3 应用保留前缀与虚拟端口。`s3-<节点>.<域>/` 是页面，带子路径的 GET/HEAD 直取当前配置 `default_bucket` 下的对象字节，策略对象 `/101<key>` |
 | `AUTHZ_HTTP_PORT` / `AUTHZ_HTTPS_PORT` | `6080` / `6443` | 入口端口 |
 | `AUTHZ_HTTP_MODE` | `redirect` | 公网 HTTP 行为：`redirect` 308 到 HTTPS；`disabled` 仅回环；`serve` 仅受控测试 |
 | `AUTHZ_DISCOVERY_PORTS` | 空 | Docker Desktop 无法从监听表发现时，追加探测端口，例如 `2077,3080` |

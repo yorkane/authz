@@ -568,6 +568,91 @@ curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/js
 每个文件都写 `.upload-*` 暂存名再原子改名，中断不会留下半截目标文件；超过 6 小时的
 暂存残留由同一个每小时定时器扫掉。
 
+### 6.6 保留前缀域名的文件与对象直取（内容出口，非控制面 API）
+
+这不是控制面 API，而是一条**内容出口**：网关的两个内置应用保留前缀域名（虚拟端口 100/101，
+默认开启，部署侧前提见 `deploy.md` §3.6）除了渲染内置应用页面，还能直接吐文件与对象字节。
+Agent 可以把它当成一条带鉴权的静态资源链接来用，不需要先进管理壳，也不需要额外的 API Key 角色。
+规则是「根路径 = 页面，带子路径 = 字节」：
+
+| 域名形态 | 根路径 | 带子路径的 GET/HEAD |
+|---|---|---|
+| `file-<节点>.example.com`（虚拟端口 100） | 文件浏览页 | `AUTHZ_FILES_ROOT`（默认容器内 `/files`）下该路径的字节 |
+| `s3-<节点>.example.com`（虚拟端口 101） | 对象存储页 | 当前生效那套存储配置的 `default_bucket` 下该 key 的字节 |
+
+```text
+https://file-235.example.com/alice/pub/a.txt          # 本机文件
+https://s3-235.example.com/share/pub/data/v.mp4       # S3 对象
+```
+
+**认证**与代理流量走同一套：浏览器带 `authz_session` Cookie，脚本带 `x-api-key` 请求头
+（实例级 Key 或数据库 Key，见 §2.2）。完全不带凭证时以 `role:guest` 参与授权 —— 命中策略就
+匿名放行，没命中就 302 到登录页。之所以复用网关那套身份、而不是给内容单开一条匿名通道：
+匿名可读的边界必须由管理员显式画，否则保留前缀域名会变成整个内容根的公开镜像。
+
+**授权**：Casbin 的策略对象是 `/<虚拟端口><原始 uri>`，与页面入口共用同一个命名空间，
+因此分级粒度自然落在**目录**上。下面这组策略的效果是「alice 的公开目录对匿名开放、bob 的不开」：
+
+```bash
+# 放行 file 域下 alice/pub 整棵子树（匿名 GET）
+curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H "Content-Type: application/json" \
+  "$AUTHZ/_authz/api/policies" \
+  -d '{"ptype":"p","v0":"role:guest","v1":"/100/alice/pub/*","v2":"GET","eft":"allow"}'
+# bob 目录不放行 = 不写 /100/bob/* 这条（默认 fail-closed）；要显式拒绝再加一条 eft=deny
+# 对象存储同理，按 key 前缀分级
+curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H "Content-Type: application/json" \
+  "$AUTHZ/_authz/api/policies" \
+  -d '{"ptype":"p","v0":"role:guest","v1":"/101/share/pub/*","v2":"GET","eft":"allow"}'
+```
+
+`v1` 里带的是**虚拟端口**而不是 6080/6443：100/101 不允许被域名绑定占用
+（`POST /applications` 返回 422，见 §5），它们只作为策略对象的前缀存在。
+
+**状态码**（以下都是直取路径、即带子路径的请求；根路径仍按页面返回 200/302）：
+
+| 状态码 | 触发条件 |
+|---|---|
+| `200` | 命中策略且内容存在，整体返回 |
+| `206` | 带 `Range` 请求头的分段返回 |
+| `400` | JSON 错误：URI 含 `..` 段或控制字符 |
+| `403` | 已登录或带合法 Key，但该身份对 `/100<路径>`、`/101<key>` 无策略 |
+| `404` | 本机文件不存在 / S3 对象不存在。**不会**回落成 200 的页面 —— 播放器与外部系统需要明确的「文件不存在」，一条 200 的 HTML 只会把排障引向「格式不支持」 |
+| `405` | 方法不是 GET/HEAD，响应头带 `Allow: GET, HEAD`（写操作只走 §6.1 那组控制面接口） |
+| `503` | 仅 s3 域，JSON：取不到生效的存储配置（消息「对象存储未配置」），或该配置的 `default_bucket` 为空（消息点名未设置默认 bucket） |
+
+匿名（完全无凭证）未命中策略时是 `302` 跳登录页而不是 403，与其它网关入口保持一致。
+
+**s3 域的 bucket 语义**：路径第一段是 **key**，不是桶名 —— 桶取当前生效那套存储配置
+（`s3_configs`，见 §6.2）的 `default_bucket`；带 `?cfg=<id|name>` 时改用另一套配置，
+桶取**被选中那套**的 `default_bucket`。这样 URL 里永远不出现桶名，换一套服务不必改链接；
+两者都没配就 503，不会静默换一个桶。
+
+**query 参数**：
+
+| 参数 | 作用 |
+|---|---|
+| `?download=1` | `Content-Disposition: attachment`，强制下载 |
+| `?authz_preview=1` | inline 预览；HTML 正文在沙箱 CSP + nosniff 下渲染（与 `/_authz/store/`、`/_authz/s3/` 同款） |
+| `?cfg=<id 或 name>` | 仅 s3 域：切换存储服务配置，桶随之取被选中那套的 `default_bucket` |
+| `Range: bytes=...` | 请求头（不是 query），支持 206 分段，视频拖动依赖它 |
+
+```bash
+# 带 Key 分段取对象，并核对状态码
+curl -sS -o /dev/null -w "%{http_code}\n" -H "x-api-key: $AUTHZ_API_KEY" \
+  -H "Range: bytes=0-1023" "https://s3-235.example.com/share/pub/data/v.mp4?cfg=backup"
+```
+
+**Agent 安全提醒**：
+
+- 不要把 URL 路径当可信输入。它直接决定读哪个文件、哪个 key，拼进 `<video src>` 或写进工单
+  前先做前缀白名单校验 —— 网关会拒掉 `..`，但拒不掉「用户本来就该读那个目录」的越权读取意图，
+  边界由 Casbin 策略与调用方的拼接逻辑共同守。
+- 不要在 URL 里塞凭证。认证只走 `x-api-key` 请求头或会话 Cookie；Key 写进 query 会进访问日志、
+  Referer 和浏览历史，等同于泄露。要对外分发长效公开链接，应由管理员用 `role:guest` 策略对
+  具体目录放行后产生，而不是发一条带凭证的 URL。
+- 这条直取**不是新增的控制面 API**：不新增路由、不需要额外 API Key 角色，非 `admin` 的 Key
+  能否取到内容完全由同一套 Casbin 策略决定，不要为它申请或签发新凭证。
+
 ## 7. Agent 安全要求
 
 - 不在日志、终端输出、任务结果或错误信息中打印 API Key。

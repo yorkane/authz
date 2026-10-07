@@ -19,9 +19,12 @@
 域名解析规则（由外到内优先匹配）：
 
 1. **显式绑定**：管理界面配置的固定域名 → `target_ip:port`；
-2. **内置应用保留前缀**（虚拟绑定）：`file-任意域名` → 文件浏览页面（虚拟端口 100）、
-   `s3-任意域名` → 对象存储页面（虚拟端口 101）；不在数据库中、不占绑定端口，
-   按策略对象 `/<端口><路径>` 单独授权；`AUTHZ_APP_DOMAINS=0` 可整体关闭；
+2. **内置应用保留前缀**（虚拟绑定）：`file-任意域名` → 文件浏览（虚拟端口 100）、
+   `s3-任意域名` → 对象存储（虚拟端口 101）；**根路径渲染内置应用页面，带上子路径的
+   GET/HEAD 直接返回文件/对象字节**（file 端取 `AUTHZ_FILES_ROOT` 下的路径，s3 端取当前生效
+   那套存储配置 `default_bucket` 下的 key，都支持 Range/206）；不在数据库中、不占绑定端口，
+   按策略对象 `/<端口><路径>` 单独授权（因此可按目录分级，如 `/100/alice/*`）；
+   `AUTHZ_APP_DOMAINS=0` 可整体关闭；
 3. **数字前缀子域名**（免配置）：`3000-任意域名` → 本机 `3000` 端口（范围 `AUTHZ_PORT_MIN`~`AUTHZ_PORT_MAX`）；
 4. 其余域名 → 404。
 
@@ -172,11 +175,15 @@ curl -sk -o /dev/null -w "%{http_code}\n" https://127.0.0.1:6443/noc.gif       #
 挂载源为准）。因为 compose 已经 `${DATA_DIR:-./data}:/data` 整体挂载，**不需要为它加 volume**。
 
 > 变量注入方式有差别（容易踩）：本文 3.2 的最小 compose 用 `env_file: .env`，`.env` 里的变量会全部
-> 进容器；而仓库根目录那份 `docker-compose.yml`（开发挂载模式，与附录 B 同源）用的是**显式 `environment:`
-> 清单**，其中尚未列出 `AUTHZ_STORE_DIR` / `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS`，在那种部署下改 `.env`
-> 不生效（容器恒用默认 `/data/store` 与 24 小时）。要自定义就在该 compose 的 `environment:` 里补两行：
-> `AUTHZ_STORE_DIR: ${AUTHZ_STORE_DIR:-/data/store}` 与
-> `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS: ${AUTHZ_STORE_DEFAULT_EXPIRY_HOURS:-24}`。
+> 进容器；而仓库根目录那份 `docker-compose.yml`（开发挂载模式，与附录 B 同源）除了 `env_file` 还带一份
+> **逐条列举的显式 `environment:` 清单**，每一项都写成 `${VAR:-默认值}` 的形式。显式清单优先于 `env_file`，
+> 所以**清单列到的变量以清单为准**：新增变量必须同时进 `.env` 和这份清单，只在 `.env` 里加一行、清单里不写，
+> 容器用的仍然是清单里 `:-` 后面那个默认值（compose 不会替你猜）；清单**没列到**的变量才由 `env_file` 直接注入。
+> 两种写法混在同一份 compose 里，正是最容易看走眼的地方。核实过的现状：`AUTHZ_STORE_DIR` /
+> `AUTHZ_STORE_DEFAULT_EXPIRY_HOURS` 已在清单内（`docker-compose.yml:150-151`），内置应用保留前缀那五条
+> `AUTHZ_APP_DOMAINS` / `AUTHZ_APP_PREFIX_FILES` / `AUTHZ_APP_PORT_FILES` / `AUTHZ_APP_PREFIX_S3` /
+> `AUTHZ_APP_PORT_S3` 也已在清单内（`docker-compose.yml:44-48`），这几项改 `.env` 就能生效；反过来，将来新增的
+> 变量若只写进 `.env.example` 而没同步进清单，仓库根 compose 模式下就不生效，别按 `env_file` 的行为下结论。
 
 ```yaml
 # 最小 compose 已覆盖，无需新增条目（仅作核对）
@@ -200,6 +207,12 @@ rsync -a conf/ 241.t:/data/app/authz-test/conf/
 ssh 241.t 'cd /data/app/authz-test && docker compose up -d --force-recreate'
 ```
 
+> 241.t 那份 `docker-compose.yml` 是仓库根 compose 的**手工副本，已经漂移**：核对过它里面没有
+> `AUTHZ_APP_*` 五行（`AUTHZ_STORE_DIR` 等较早的条目还在）。该实例同样用逐条列举的显式 `environment:`
+> 清单（见 3.5 节末尾的提示），清单缺项时容器取 `:-` 后的默认值——默认值恰好与本次要打开的行为一致才勉强能用，
+> 一旦有人显式改了 `.env` 就会静默不生效。升级该实例前要把 `docker-compose.yml` 一并同步过去，不能只同步
+> `conf/` 与 `lualib/`。
+
 验证定时器与出口都已就位（三项都要通过）：
 
 ```bash
@@ -214,6 +227,36 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/s3-configs" | head -c
 这是有意的决策）。因此第 6 节的备份（含 `azops backup`、`cp data/authz/authz.db`）
 会连带把 S3 密钥一起复制走 —— 备份介质的保密等级由此抬升，必须按含密文件处理：
 限制可读者、不进公开对象存储、不贴进工单或聊天记录。
+
+### 3.6 可选：用保留前缀域名直取文件与对象
+
+`file-<节点>.<域>/<路径>` 与 `s3-<节点>.<域>/<key>` 把内置应用的两个域名变成内容出口：
+根路径仍是应用页面，带子路径的 GET/HEAD 直接吐字节（Range/206、`?download=1`、`?authz_preview=1` 都可用）。
+这条能力默认开启、不需要额外开关，但**两个部署前提**要落到 compose 上，缺一个就只有页面能用：
+
+| 端 | 前提 | 不满足时的表现 |
+|------|------|----------------|
+| file | 内容根要有真实数据：`FILES_DIR -> /files` 卷（改 `AUTHZ_FILES_ROOT` 时 alias 同步改） | 目录里没有那个文件 → 404 |
+| s3 | 当前生效那套存储服务配置（`s3_configs`，对象存储页「配置」里维护）的 `default_bucket` 非空 | 503 + JSON，消息区分「对象存储未配置」与「未设置默认 bucket」；`?cfg=<id\|name>` 换一套时取被选中那套的 `default_bucket` |
+
+授权不设第二套门：策略对象仍是 `/<虚拟端口><原始 uri>`（`/100/alice/pub/a.txt`、`/101/share/pub/v.mp4`），
+管理员按目录写 `p, role:guest, /100/alice/*, GET` 就是分级；未命中策略一律 fail-closed（匿名 302 登录、
+已登录或带 Key 但无权 403）。之所以不为直取另立一套鉴权：内容端点和页面端点共用同一个策略命名空间，
+管理员在管理界面看到的授权面就是实际生效的授权面，少一处需要记住的例外。直取只对「经保留前缀域名进来」
+的请求生效，直接打内部路径 `/_authz/files/...`、`/_authz/s3/...` 的门完全不变（仍要会话或 API Key）。
+
+```bash
+# 根路径 = 页面；带路径 = 直取字节。两者都要求该身份对相应策略对象放行
+curl -sS -o /dev/null -w "%{http_code} %{content_type}\n" -H "Host: file-235.example.com" \
+  -H "Cookie: $AUTHZ_COOKIE" "http://127.0.0.1:6080/alice/pub/a.txt"   # 200 text/plain
+curl -sS -o /dev/null -w "%{http_code}\n" -H "Host: file-235.example.com" \
+  -H "Cookie: $AUTHZ_COOKIE" -H "Range: bytes=0-1023" \
+  "http://127.0.0.1:6080/alice/pub/a.txt"                              # 206
+```
+
+上面的 `-H "Host: ..."` 只是本机验证手段（入口端口不区分域名时靠它指定虚拟入口）；真实访问由 DNS 把
+`file-<节点>.<域>` 指到网关。给外部系统当下载链接时不要把凭证塞进 URL——认证走会话 Cookie 或
+`x-api-key` 请求头，契约见 `docs/core-api.md` §6.6。
 
 ## 4. 部署后验证（逐项执行，全部通过才算成功）
 
@@ -357,11 +400,11 @@ AUTHZ_HTTPS_PORT=6443                             # HTTPS 入口（网关终止 
 AUTHZ_HTTP_MODE=redirect                          # 默认 308 到 HTTPS；disabled 仅回环；serve 仅受控测试
 AUTHZ_PORT_MIN=2000                               # 数字前缀子域名最小端口（强制 >=2000 防回环）
 AUTHZ_PORT_MAX=20000                              # 最大端口；目标为网关自身端口返回 508 防循环
-AUTHZ_APP_DOMAINS=1                               # 内置应用保留前缀入口总开关（file→100 文件浏览、s3→101 对象存储；0 关闭）
-AUTHZ_APP_PREFIX_FILES=file                       # files 保留前缀（file-<节点>.<域> 直达文件浏览页）
-AUTHZ_APP_PORT_FILES=100                          # files 虚拟端口（策略对象 /100/* 授权；不能被域名绑定占用）
-AUTHZ_APP_PREFIX_S3=s3                            # s3 保留前缀
-AUTHZ_APP_PORT_S3=101                             # s3 虚拟端口
+AUTHZ_APP_DOMAINS=1                               # 内置应用保留前缀入口总开关（file→100、s3→101；0 关闭后这两类域名回退 404）
+AUTHZ_APP_PREFIX_FILES=file                       # files 保留前缀：file-<节点>.<域>/ 渲染文件浏览页，带子路径的 GET/HEAD 直取本机内容根（AUTHZ_FILES_ROOT，默认 /files）下的文件字节
+AUTHZ_APP_PORT_FILES=100                          # files 虚拟端口：策略对象为 /100<原始 uri>（如 /100/alice/* 可按目录分级）；该端口不允许被域名绑定占用
+AUTHZ_APP_PREFIX_S3=s3                            # s3 保留前缀：s3-<节点>.<域>/ 渲染对象存储页，带子路径的 GET/HEAD 直取当前生效那套配置 default_bucket 下的对象字节（?cfg= 切换配置）
+AUTHZ_APP_PORT_S3=101                             # s3 虚拟端口：策略对象为 /101<key>（如 /101/share/pub/*）；未配置存储或 default_bucket 为空回 503
 AUTHZ_DISCOVERY_PORTS=                            # 追加探测端口（逗号分隔），容器读不到宿主监听表时用，如 3080,8082
 AUTHZ_DISCOVERY_TTL=30                            # 菜单服务发现缓存秒数（1-300）
 AUTHZ_DISCOVERY_CONNECT_TIMEOUT_MS=100            # 探测连接超时（10-5000ms）

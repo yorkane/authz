@@ -45,6 +45,10 @@ TEST_ONLY=guest,envkey OPENRESTY_TEST_IMAGE=authz:latest bash test/test_authz_ga
 
 - 三组脚本都占随机端口并起常驻 mock，**必须串行**；不要在脚本里用裸 `wait`。
 - 行为变更必须同步增改真实 HTTP 断言。最近基线：Router 99、Authz 998、共享会话 29。
+  保留前缀域名的直取语义（`file-<节点>.<域>/<路径>`、`s3-<节点>.<域>/<key>`）属行为变更，
+  断言落在 `test/test_authz_gateway.sh` 的 `app-domains` 段（根路径仍是页面、带路径返回字节、
+  Range 206、非 GET/HEAD 405、含 `..` 400、不存在 404、按目录前缀的策略分级）与 `s3-live` 段
+  （bucket 取生效配置的 `default_bucket`、`?cfg=` 切换、未配置/未设默认桶 503）。
 - 所有回归测试一律在 241.t 上跑；**除非用户明确要求，不向本机生产实例部署新代码或镜像**。
 
 ### 241.t 测试实例（共享会话 reader）

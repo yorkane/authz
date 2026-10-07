@@ -127,8 +127,8 @@ Python 等价验证: `hmac.new(salt.encode(), prev, hashlib.sha256).digest()`。
 | AUTHZ_HTTP_MODE | redirect | `redirect`=HTTP 308 到 HTTPS；`disabled`=只监听 127.0.0.1；`serve`=明文服务（仅受控环境） |
 | AUTHZ_PORT_MIN / AUTHZ_PORT_MAX | 2000 / 20000 | `<端口>-<域名>` 数字前缀动态路由允许的端口范围 |
 | AUTHZ_APP_DOMAINS | 1 | 内置应用保留前缀域名入口总开关（`0` 关闭，file/s3 域名回退 404） |
-| AUTHZ_APP_PREFIX_FILES / AUTHZ_APP_PORT_FILES | file / 100 | files 应用的保留前缀与虚拟端口 |
-| AUTHZ_APP_PREFIX_S3 / AUTHZ_APP_PORT_S3 | s3 / 101 | s3 应用的保留前缀与虚拟端口 |
+| AUTHZ_APP_PREFIX_FILES / AUTHZ_APP_PORT_FILES | file / 100 | files 应用的保留前缀与虚拟端口。根路径渲染页面，带子路径的 GET/HEAD 直取 `AUTHZ_FILES_ROOT` 下的文件字节（§5.1） |
+| AUTHZ_APP_PREFIX_S3 / AUTHZ_APP_PORT_S3 | s3 / 101 | s3 应用的保留前缀与虚拟端口。根路径渲染页面，带子路径的 GET/HEAD 直取当前配置 `default_bucket` 下的对象字节（§5.1） |
 | AUTHZ_DISCOVERY_PORTS | 空 | 服务发现追加探测端口（Docker Desktop 等容器监听表不可见时） |
 | AUTHZ_DISCOVERY_TTL / _CONNECT_TIMEOUT_MS / _READ_TIMEOUT_MS | 30 / 100 / 200 | 本机 HTTP 服务探测缓存与超时 |
 
@@ -228,11 +228,13 @@ resolver（gateway/resolver.lua）按序命中：
    `s3`→101/s3.html（env 可改/可关，见 §4）。**数据库真实绑定优先于虚拟入口**：
    管理员显式绑定同名前缀时在上一步就被接管。命中时返回保留端口 +
    `binding.app` 标记，认证与 Casbin 照常（对象 `/<端口><uri>`，端口虽在
-   PORT_MIN 之下但策略对象白名单放行——这就是「单独配置授权」的落点），
-   通过后 `ngx.var.authz_app_entry` 置位并 internal redirect 到
-   `/_authz/apps/<页面>`（不代理上游）；页面静态资源在 `/_authz/apps/` 的
-   access 钩子（gateway/app_entry.lua）里按同一端口对象复用同一套策略。
-   该端口不允许被域名绑定占用（applications 服务拒绝 422）。
+   PORT_MIN 之下但策略对象白名单放行——这就是「单独配置授权」的落点）。
+   此后按 URI 分流（见本节末尾「保留前缀域名的内容路径分流」）：根路径 `/` 走页面，`ngx.var.authz_app_entry`
+   置位并 internal redirect 到 `/_authz/apps/<页面>`（不代理上游），页面静态
+   资源在 `/_authz/apps/` 的 access 钩子（gateway/app_entry.lua）里按同一端口
+   对象复用同一套策略；带子路径的内容请求改写 URI 到 `/_authz/files/` 或
+   `/_authz/s3/`，复用既有 location 与其流式代理。该端口不允许被域名绑定
+   占用（applications 服务拒绝 422）。
 4. 数字前缀：`^(\d{1,5})-` 且端口在 PORT_MIN~MAX → 端口，且默认
    `simulate_local=true`（目标固定 127.0.0.1：上游 Host/Forwarded 头按本机访问
    构造，兼容只认本地来源的本地应用）
@@ -249,6 +251,39 @@ resolver（gateway/resolver.lua）按序命中：
   `origin_mode`（auto/preserve/rewrite/remove/custom）→ simulate_local（本机值）→
   请求 Host
 - 配了正文改写的绑定自动向上游声明 `Accept-Encoding: identity`（绑定显式覆盖
+**保留前缀域名的内容路径分流（直取语义）**：虚拟入口命中后不再只有「渲染页面」一种出口，
+gateway/access.lua 按原始 URI 分流两条路径：
+
+- **根路径 `/`**：与既往逐字相同 —— `ngx.var.authz_app_entry` 置位 + internal redirect
+  到 `/_authz/apps/<页面>`，页面与它的静态资源都靠 `gateway/app_entry.lua` 按同一端口对象
+  复用同一套策略。这条保持不变是为了不让既有入口页与其资源加载因这次改动而回归。
+- **带子路径**（GET/HEAD）：改写 URI 到 `/_authz/files/<路径>`（files 入口）或
+  `/_authz/s3/<bucket>/<key>`（s3 入口，bucket 取当前生效那套存储配置的 `default_bucket`，
+  `?cfg=<id|name>` 换一套时取被选中那套），再 `ngx.exec` 进**既有**的那两条 location。
+  这是本设计的关键取舍：Range 206 分段、Content-Type 推断、`?download=1` 的
+  `Content-Disposition`、`?authz_preview=1` 的沙箱 CSP + nosniff、s3 的 SigV4 代签与
+  连接复用，全部已经在 `/_authz/files/`（静态 alias + `open_file_cache`）与
+  `/_authz/s3/`（`content_by_lua` + `s3_proxy.lua`）里被真实回归覆盖。另写一条字节流通道
+  等于把同一套语义在两个地方各自漂移一遍，收益只是省一次内部跳转。
+
+内容路径上的三类拒绝各自说清一件事：非 GET/HEAD → 405 + `Allow: GET, HEAD` —— 直取是只读
+语义，写操作永远走控制面那组接口，回 405 而不是 404 是让调用方一眼看清「这条路不支持写」，
+而不是以为路径写错了；URI 含 `..` 段或控制字符 → 400（在进文件系统与签名器之前就拒，与
+`store_proxy.lua`、`s3_proxy.lua` 同口径）；
+路径不存在 → 404 而不是回落成 200 的 SPA 页面 —— 直取端点是给 `<video src>` 和外部系统
+当链接用的，一个 200 的 HTML 会让播放器报「格式不支持」而不是「文件不存在」，把排障引到
+错误方向；s3 端取不到存储配置或该配置 `default_bucket` 为空 → 503 + JSON，消息区分
+「对象存储未配置」与「未设置默认 bucket」，两者运维动作不同（前者去配一套服务，后者只需补一个桶名）。
+
+**为什么授权落点完全不变**：分流只改 URI 的去向，Casbin 的 enforce 仍发生在改写之前、
+用的仍是 `/<虚拟端口><原始 uri>`（`/100/alice/pub/a.txt`、`/101/share/pub/v.mp4`）。于是
+「按目录分级」自然成立：管理员给 `/100/alice/*` 放行就能匿名读 alice 的公开目录，不写
+`/100/bob/*` 则 bob 目录继续 fail-closed（匿名 302 到登录页，已登录或带 Key 但无权 403）。
+内部路径 `/_authz/files/...`、`/_authz/s3/...` 自身的鉴权门一字未改（仍要会话或合法非 guest
+API Key），新放行只对「经保留前缀域名进来且已过 Casbin」的请求生效 —— 否则等于给内部路径
+开了第二条绕过会话的后门。数据库里存在同名前缀的真实绑定时仍然优先（第 2 步就 return），
+管理员显式接管虚拟入口的能力保留。
+
   Accept-Encoding 时以用户为准，改写随之失效）
 - **改写优先于 proxy_set_header**：nginx 语义里 proxy_set_header 会覆盖 access 阶段
   `ngx.req.set_header` 的同名头，因此 Host/Cookie/Origin/Forwarded/X-Forwarded-*/
