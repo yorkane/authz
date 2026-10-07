@@ -3,7 +3,7 @@ const { createApp, computed, onBeforeUnmount, onMounted, reactive, ref, watch } 
 // 内置页面：菜单条目里的 builtin 键映射到这些内嵌应用。
 const builtInApps = {
   users: 'users.html?v=7',
-  authorization: 'authorization.html?v=16',
+  authorization: 'authorization.html?v=17',
   menuEditor: 'menu-editor.html?v=12',
   files: 'files.html?v=20',
   s3: 's3.html?v=6',

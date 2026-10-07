@@ -819,7 +819,7 @@ assert_contains_all "app.js renders the stored menu tree" "$BODY" \
     "setInterval(loadTree, 30000)" \
     'event?.ctrlKey || event?.metaKey || Number(node.open_in_new) === 1' \
     "window.open(url, '_blank', 'noopener,noreferrer')" \
-    "authorization.html?v=16" \
+    "authorization.html?v=17" \
     "menuEditor: 'menu-editor.html" \
     "function nodeUrl (node)" \
     "groupOpen[group.id]"
@@ -967,6 +967,17 @@ assert_contains_all "authorization page policy and binding forms" "$BODY" \
     'bindingForm.upstream_ssl_verify' \
     'bindingForm.upstream_path'
 assert_contains "binding form keeps proxy settings compact" "$BODY" 'q-expansion-item v-model="bindingAdvancedOpen"'
+
+# 内置应用保留入口（file/s3）必须出现在策略对象下拉里：100 与 101 在 port_min 之下，
+# 自动发现与「直接端口」两条来源都不会列出它们，缺这几行等于界面上无法给 /100/<目录>/* 授权。
+assert_contains_all "policy object dropdown lists built-in app entries" "$BODY" \
+    "const builtinPorts = new Set()" \
+    "function appEntryByPort (port)" \
+    "value: 'app:' + entry.name" \
+    "builtinPorts.has(app.port)" \
+    "appEntryByPort(props.row.object_port)" \
+    "appEntryByPort, appEntries," \
+    "const keys = { files: 'appFilesName', s3: 'appS3Name' }"
 request GET "$ADMIN_HOST" /_authz/apps/authorization.html "$ADMIN_COOKIE"
 assert_contains_all "binding rows expose the response rewrite editor" "$BODY" \
     'openRewrite' \
