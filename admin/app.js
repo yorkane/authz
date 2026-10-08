@@ -5,7 +5,7 @@ const builtInApps = {
   users: 'users.html?v=7',
   authorization: 'authorization.html?v=17',
   menuEditor: 'menu-editor.html?v=12',
-  files: 'files.html?v=20',
+  files: 'files.html?v=21',
   s3: 's3.html?v=6',
   // S3 服务配置管理页（多套存储服务 + 上传记录清理）。
   s3Configs: 's3-configs.html?v=1',

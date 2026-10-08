@@ -3040,6 +3040,39 @@ assert_eq "file listing missing directory 404" "$STATUS" "404"
 request GET "$ADMIN_HOST" /_authz/api/files
 assert_eq "file listing requires session" "$STATUS" "401"
 
+# ── 内容出口绝对前缀（content_base）：files 页「新窗口打开」的链接来源 ──────────
+# 同一套 /_authz/api/files 在真实域名 Host 下要回一条 https?://file-<节点>.<zone>/
+# 的绝对前缀（域名按当前请求 Host 拼，与菜单/绑定链接同一惯例）；前端据此把
+# 「新窗口打开」做成指向内容出口域名的 <a target="_blank">，链接能直接分享、也能喂
+# 给播放器或 curl，不再只是管理壳里有意义的同源相对地址。
+request GET file-235.example /_authz/api/files "$ADMIN_COOKIE"
+assert_eq "files listing on a content host" "$STATUS" "200"
+assert_json "content base uses the reserved files entry domain" '.data.content_base' "http://file-235.example/"
+request GET file-235.example "/_authz/api/files?path=vendor" "$ADMIN_COOKIE"
+assert_json "content base survives a subdirectory listing" '.data.content_base' "http://file-235.example/"
+# 单标签主机（admin.test.example 的 host 仍可拼接）与 IP 访问的区别在拼不出域名时
+# 必须整字段缺席而不是回空串：前端靠「有没有这个字段」决定走绝对还是相对地址。
+request GET admin.test.example /_authz/api/files "$ADMIN_COOKIE"
+assert_eq "files listing on the admin host" "$STATUS" "200"
+assert_json "content base follows the request host" '.data.content_base' "http://file-admin.test.example/"
+# 前端接线：绝对地址来自 adapter.openUrl，锚点走真实 <a target=_blank>（可复制链接、
+# 不被弹窗拦截、长下载不当窗口）；拼不出域名时组件回退相对 fileUrl。
+request GET "$ADMIN_HOST" '/_authz/apps/browser.js' "$ADMIN_COOKIE"
+assert_contains_all "open-in-tab renders a real anchor on the content domain" "$BODY" \
+    "const url = (adapter.openUrl && adapter.openUrl(item)) || fileUrl(item)" \
+    "anchor.target = '_blank'" \
+    "anchor.rel = 'noopener'" \
+    "anchor.click()"
+request GET "$ADMIN_HOST" /_authz/apps/files.html "$ADMIN_COOKIE"
+assert_contains_all "files adapter exposes the absolute content URL" "$BODY" \
+    "contentBase = data.content_base || ''" \
+    "openUrl (item) {" \
+    "if (!item || item.type === 'dir' || !contentBase) return ''" \
+    "return contentBase + sub" \
+    "browser.js?v=17"
+request GET "$ADMIN_HOST" /_authz/apps/app.js "$ADMIN_COOKIE"
+assert_contains "console shell points at the bumped files page" "$BODY" "files.html?v=21"
+
 
 fi
 section files-manage

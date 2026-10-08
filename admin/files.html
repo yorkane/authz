@@ -28,7 +28,7 @@
   <script src="./vendor/quasar-umd.js?v=3.5.41-2.26.0-2"></script>
   <script src="./i18n.js?v=60"></script>
   <script src="./api.js?v=24"></script>
-  <script src="./browser.js?v=16"></script>
+  <script src="./browser.js?v=17"></script>
   <script>
     // files 端点 adapter：接口路径与字段与旧版完全一致（/_authz/files*），
     // 只是把「当前目录/内容根」放进闭包变量，供 itemUrl/itemPath 使用。
@@ -37,6 +37,7 @@
 
     let rootPath = ''     // 内容根的服务器绝对路径（list 接口对 admin 返回），复制路径用
     let currentPath = ''  // 当前浏览目录；list 成功后才渲染行，时序上一定已更新
+    let contentBase = ''   // 内容出口绝对前缀（list 回显）
 
     const adapter = {
       storagePrefix: 'authz-files', // localStorage 命名空间（旧键 files_* 作废）
@@ -47,6 +48,7 @@
         return window.adminApi.files(path).then(data => {
           rootPath = data.root || ''
           currentPath = path
+          contentBase = data.content_base || ''
           return data
         })
       },
@@ -75,6 +77,16 @@
         if (opts.preview) url += '?authz_preview=1'
         else if (opts.download) url += '?download=1'
         return url
+      },
+      // 新窗口打开用的绝对内容出口地址：https://file-<节点>.<zone>/<路径>。这条链接
+      // 不依赖管理壳，可以直接复制分享、也能喂给播放器或 curl；权限仍由 Casbin 的
+      // /100<路径> 判（未授权时匿名会被引导登录）。拼不出域名（IP / 单标签主机访问）
+      // 或目录时回空串，组件退回同源的相对 fileUrl，行为与改造前逐字一致。
+      openUrl (item) {
+        if (!item || item.type === 'dir' || !contentBase) return ''
+        const sub = (currentPath === '' ? item.name : currentPath + '/' + item.name)
+          .split('/').map(s => encodeURIComponent(s)).join('/')
+        return contentBase + sub
       },
       itemPath (item) {
         // 复制服务端绝对路径：内容根 + 当前目录 + 文件名（容器视角完整路径）。

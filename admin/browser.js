@@ -877,9 +877,24 @@
         else detailText.value = null
       }
 
+      // 新窗口打开走真实锚点而不是 window.open：浏览器会把它当普通链接
+      // 对待（能右键复制链接、能被弹窗拦截器放过、长下载也不会被当成窗口）。
+      // 地址优先取 adapter.openUrl 给的**绝对**内容出口地址（files 页是
+      // https://file-<节点>.<zone>/<路径>），这样打开的就是可以直接转给别人、
+      // 也能被播放器与命令行直接消费的那条链接，而不是只在管理壳里有意义的
+      // 同源相对地址；adapter 没提供或后端拼不出域名（IP / 单标签主机访问）
+      // 时回落到相对 fileUrl，行为与改造前一致。
       function openInTab (item) {
         if (!item) return
-        window.open(fileUrl(item), '_blank', 'noopener')
+        const url = (adapter.openUrl && adapter.openUrl(item)) || fileUrl(item)
+        if (!url) return
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.target = '_blank'
+        anchor.rel = 'noopener'
+        document.body.appendChild(anchor)
+        anchor.click()
+        anchor.remove()
       }
 
       // 下载走 adapter 的 download URL（files 靠 anchor.download 直接落盘；

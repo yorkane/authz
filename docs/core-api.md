@@ -608,6 +608,15 @@ curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H "Content-Type: application/js
 `v1` 里带的是**虚拟端口**而不是 6080/6443：100/101 不允许被域名绑定占用
 （`POST /applications` 返回 422，见 §5），它们只作为策略对象的前缀存在。
 
+**管理界面怎么给这条链接**：文件浏览页的「新窗口打开」不是拼字符串猜域名，而是用
+`GET /_authz/api/files` 回显的 `content_base` 字段（形如 `https://file-235.example.com/`）。它由
+服务端按**当前请求 Host** 经 `domain.link` 拼出 `<file 前缀>-<节点>.<zone>`，与菜单/绑定链接同一
+惯例，因此同一套部署经多个泛域名入口访问时，链接始终落在用户实际进入的那个 zone；
+scheme 与 Cookie 的 `Secure` 用同一判据（`X-Forwarded-Proto` 优先，其次 `$https`）。用 IP 或
+单标签主机访问、或内置入口被 `AUTHZ_APP_DOMAINS=0` 关闭时，该字段**整个缺席**（不是空串），
+前端据此退回同源的 `/_authz/files/...` 相对地址 —— 所以它是可选字段，调用方要按「有没有」
+而不是「空不空」判断。
+
 **状态码**（以下都是直取路径、即带子路径的请求；根路径仍按页面返回 200/302）：
 
 | 状态码 | 触发条件 |

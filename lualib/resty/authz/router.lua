@@ -15,6 +15,7 @@ local s3_upload = require "resty.authz.s3_upload"
 local s3_scope = require "resty.authz.s3_scope"
 local nginxconf = require "resty.authz.nginxconf"
 local guest = require "resty.authz.guest"
+local domain = require "resty.authz.domain"
 
 local router = require("klib.router").new("/_authz")
 
@@ -49,6 +50,28 @@ end
 local function optional_text(value)
     if value == nil or value == cjson.null then return nil end
     return value
+end
+-- 内容出口（file-/s3- 保留前缀域名）的绝对前缀。files 页的「新窗口打开」用它
+-- 拼一条可以直接分享、能被外部程序打开的字节链接：同源的 /_authz/files/ 相对
+-- 地址离开管理壳就没有上下文，也看不出内容在哪台机器上。域名沿用现有惯例，由
+-- domain.link 从**当前请求 Host** 拼出 <前缀>-<节点>.<zone>（IP / 单标签主机拼
+-- 不出来时回 nil，前端自动退回相对地址，行为与改造前一致）。scheme 与 Cookie 的
+-- Secure 用同一判据（X-Forwarded-Proto 优先，其次 $https），免得在 TLS 入口下
+-- 回吐 http:// 链接再被外层跳一次。
+local function request_scheme()
+    local forwarded = tostring(ngx.var.http_x_forwarded_proto or ""):lower()
+    local first = forwarded:match("^%s*([^,;%s]+)")
+    if first == "https" then return "https" end
+    if first == "http" then return "http" end
+    return ngx.var.https == "on" and "https" or "http"
+end
+local function content_entry_base(app_name)
+    local config = require("resty.authz").config
+    local entry = config.app_entries and config.app_entries[app_name]
+    if not entry then return nil end
+    local host = domain.link(entry.prefix, domain.display_host())
+    if not host or host == "" then return nil end
+    return request_scheme() .. "://" .. host .. "/"
 end
 
 -- ── Auth pages ──────────────────────────────────────────────────────────────
@@ -225,6 +248,9 @@ register("GET", "/api/files", guard.wrap(function(_, env)
             message = err or "无法读取目录",
         } }, status or 400
     end
+    -- 内容出口绝对前缀；没有启用内置 files 入口、或请求 Host 不可用时整个字段
+    -- 缺席（而不是回空串）：前端用「有没有这个字段」决定走绝对链接还是相对地址。
+    listing.content_base = content_entry_base("files")
     return { data = listing }
 end))
 
