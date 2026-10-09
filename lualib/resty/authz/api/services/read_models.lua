@@ -11,6 +11,21 @@ local common = require "resty.authz.api.common"
 local validation = require "resty.authz.api.validation"
 local menu_overrides = require "resty.authz.repository.menu_overrides"
 local domain = require "resty.authz.domain"
+local session = require "resty.authz.session"
+
+--- 共享会话健康快照，只给管理员。
+-- 为什么必须也挂在 API Key 分支：Redis 的 AUTH/db 配错时，本实例上任何会话都
+-- 认证不过去，"唯一输出该状态的端点要求先认证成功"就等于把最该被看见的
+-- state="config" 藏起来了；x-api-key 不经过会话存储，是唯一还活着的路。
+-- 非 admin 一律省略：last_error 里是上游 Redis 的原始报错文本，不给低权限方。
+-- pcall 包住：取不到（未启用共享会话 / 老会话模块）就静默省略该字段，
+-- 不能让一个健康信息把 /api/session 打成 500。
+local function session_status(subject)
+    if not common.is_admin(subject) then return nil end
+    local ok, status = pcall(function() return session.shared_status() end)
+    if not ok then return nil end
+    return status
+end
 
 local _M = {}
 
@@ -192,7 +207,7 @@ end
 
 function _M.session(subject)
     if subject.kind == "api_key" then
-        return {
+        local out = {
             authenticated = true,
             auth_type = "api_key",
             api_key_id = subject.id,
@@ -205,6 +220,11 @@ function _M.session(subject)
             last_login_at = cjson.null,
             updated_at = subject.updated_at,
         }
+        -- 机器 Key 也要看得见 Redis 健康（见 session_status 的注释）。
+        -- 条件插入而不是置 null：未启用共享会话的部署响应形状必须一字不变。
+        local key_shared = session_status(subject)
+        if key_shared then out.shared_session = key_shared end
+        return out
     end
     local timestamps
     if subject.source == "local" then
@@ -213,7 +233,7 @@ function _M.session(subject)
         timestamps = remote_users.timestamps(subject.source, subject.username)
     end
     timestamps = timestamps or {}
-    return {
+    local out = {
         authenticated = true,
         username = subject.username,
         source = subject.source,
@@ -225,6 +245,11 @@ function _M.session(subject)
         last_login_at = timestamps.last_login_at or cjson.null,
         updated_at = timestamps.updated_at,
     }
+    -- 共享会话（Redis）健康：运维与 agent 用它判断"现在是不是在降级服务、
+    -- 还欠多少条没补写"。只在启用共享会话时出现，非共享部署响应形状不变。
+    local shared = session_status(subject)
+    if shared then out.shared_session = shared end
+    return out
 end
 
 function _M.users(subject)

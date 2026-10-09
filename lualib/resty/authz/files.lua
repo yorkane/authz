@@ -75,6 +75,15 @@ function _M.list(root, rel)
     local directory = root .. (clean == "" and "" or "/" .. clean)
     local root_attr = lfs.attributes(directory)
     if not root_attr or root_attr.mode ~= "directory" then
+        -- 断链要单独说话：浏览根是容器里的 bind mount，软链接的**绝对目标**如果没
+        -- 以同样的绝对路径挂进容器，lfs.attributes 就返回 nil（容器命名空间里压根
+        -- 没有那个路径），表现成"这个目录不存在"，而宿主机上它明明能 cd 进去。
+        -- 把 target 报出来，运维一眼就知道是该补挂载而不是路径写错。
+        local link_attr = lfs.symlinkattributes(directory)
+        if link_attr and link_attr.mode == "link" then
+            return nil, "符号链接目标在容器内不可达（未挂载该绝对路径）：" ..
+                tostring(link_attr.target or ""), 404
+        end
         return nil, "目录不存在", 404
     end
 
@@ -87,7 +96,8 @@ function _M.list(root, rel)
                 truncated = true
                 break
             end
-            local attr = lfs.attributes(directory .. "/" .. name)
+            local full = directory .. "/" .. name
+            local attr = lfs.attributes(full)
             if attr then
                 local is_dir = attr.mode == "directory"
                 count = count + 1
@@ -102,6 +112,27 @@ function _M.list(root, rel)
                 else
                     files = files + 1
                     bytes = bytes + (attr.size or 0)
+                end
+            else
+                -- 跟随失败不代表条目不存在：软链接自身是存在的（symlinkattributes
+                -- 读得到 mode=link），只是目标在容器命名空间里没挂载。旧版在这里
+                -- 直接丢掉条目，用户在界面上看不到任何东西，也无从判断"为什么这个
+                -- 目录点不进去" —— 它连出现在列表里过都没有。保留为 link + broken，
+                -- 让界面能显示并说明原因。
+                local link_attr = lfs.symlinkattributes(full)
+                if link_attr and link_attr.mode == "link" then
+                    count = count + 1
+                    items[count] = {
+                        name = name,
+                        -- type 用 dir：断链的软链接语义上是"进不去的目录"，点击
+                        -- 应触发进入并由后端给出准确原因，而不是被当文件去预览。
+                        type = "dir",
+                        broken = true,
+                        -- 目标原样报出（含结尾斜杠），运维据此判断要挂哪个绝对路径。
+                        link_target = tostring(link_attr.target or ""),
+                        size = 0,
+                        mtime = link_attr.modification or 0,
+                    }
                 end
             end
         end

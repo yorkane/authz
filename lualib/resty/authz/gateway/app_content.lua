@@ -24,8 +24,9 @@
 --     files root 在部署里 bind 的是宿主上真实可写的目录树（本机 /data 与
 --     /home/aigc/ChatGPT），「目录里被放一个指向 /etc 的符号链接」是必须防的现实
 --     威胁：本功能正是按目录给 guest 放行（p, role:guest, /100/<目录前缀>/*, GET），
---     一条规则 + 一个链接 = 任意文件读。所以直取路径的每一级都必须 realpath 后
---     仍落在 root 内，见 _M.confined_to_root（判据与 files.resolve_dir、
+--     一条规则 + 一个链接 = 任意文件读。所以直取路径的每一级都必须 realpath 后**与
+--     拼接串逐字相等**（不跟随任何符号链接，只认实体目录；实体 bind 进 root 自然
+--     放行），见 _M.confined_to_root（判据与 files.resolve_dir、
 --     store.ensure_parents 同源；那两处保护的分别是写路径与保存区写路径）。
 local cjson = require "cjson.safe"
 local s3_config_store = require "resty.authz.s3_config_store"
@@ -77,58 +78,6 @@ local function remember_dir(path)
     end
 end
 
-local function starts_with_root(path, root)
-    return path == root or path:sub(1, #root + 1) == root .. "/"
-end
-
--- 可信根（config.content_trusted_roots，来自 AUTHZ_APP_TRUSTED_ROOTS）：realpath
--- 解析后的前缀集合，worker 级惰性算一次并缓存（config 在 init_by_lua 之后不再变，
--- 运行期内这些目录若被删/换挂载，realpath 结果只是匹配不上，不会误放行）。
-local trusted_real_cache = {}
-local function trusted_realpaths(list)
-    if type(list) ~= "table" or #list == 0 then return nil end
-    if realpath == nil then
-        -- ffi/realpath 不可用时**不能**在这里调它：会 attempt to call a nil value,
-        -- 协程崩溃吐 500，绕开本文件承诺的「realpath 不可用一律 400」。退回 nil
-        -- （没有可信根可用），交给 confined_to_root 顶部那条既有判据统一处理。
-        return nil
-    end
-    local key = table.concat(list, "\0")
-    local hit = trusted_real_cache[key]
-    if hit then return hit end
-    local out = {}
-    for _, one in ipairs(list) do
-        local got = realpath(one)
-        -- 解析不出来（不存在/未挂载/ELOOP）就不进白名单：宁可放行面更小。这是
-        -- 第三类「配了但不生效」的症状（前两类：静态校验丢弃有 warn、env 没注入
-        -- 无 warn），必须留一行日志，否则运维只能拿 printenv 的结果去猜。下面的
-        -- 缓存按 list 只算一次，所以这条每个 worker 最多叫一次，不会刷屏。
-        if not got then
-            ngx.log(ngx.WARN, "authz: AUTHZ_APP_TRUSTED_ROOTS entry unusable in this ",
-                "container (missing or not mounted, not whitelisted): ", one)
-        elseif got == "/" then
-            -- 条目本身是指向 / 的链接时 realpath 得到 "/"：与 config 层拒字面
-            -- "/" 同口径丢弃，整盘永远不可信。
-            ngx.log(ngx.WARN, "authz: AUTHZ_APP_TRUSTED_ROOTS entry resolves to the ",
-                "whole filesystem, dropped: ", one)
-        else
-            out[#out + 1] = got
-        end
-    end
-    trusted_real_cache[key] = out
-    return out
-end
-
-local function in_trusted(resolved, trusted)
-    if not trusted then return false end
-    for _, one in ipairs(trusted) do
-        if resolved == one or resolved:sub(1, #one + 1) == one .. "/" then
-            return true
-        end
-    end
-    return false
-end
-
 --- 相对路径（不含前导 /）解析出的磁盘落点是否始终留在 root 内。
 --- 返回 true；或 (false, 原因)；或 (nil, 原因) 表示 root 本身不可用（此时下游
 --- 必然 404，没有可跟随的链接，调用方按 404 语义放行即可）。
@@ -137,11 +86,12 @@ end
 --- 「先埋链接再猜文件名」留窗口。realpath 失败分两种：该级不存在（交回 nginx
 --- 走 404，前面各级已校验过）与存在但解析不出来（ELOOP/EACCES/悬空链接，
 --- 一律 fail-closed 拒绝）。
---- trusted 是可选的「已 realpath 的可信前缀数组」（trusted_realpaths 产出）：
---- 某一级落点在 root 之外但落在可信根之内时放行，**后续各级仍继续校验**（可信
---- 根内部再埋一个指向 /etc 的链接照样在这一级被拒），命中可信根只是给那一级的
---- 落点判定多一个可接受前缀，不是对该子树免检。nil / 空 = 关闭，退化为纯 root 校验。
-function _M.confined_to_root(root, rel, trusted)
+--- **信任只以实体为准，一律不跟随符号链接**：每一级的 realpath 结果必须与刚拼接出的
+--- probe 逐字相等（父级 current 是上一轮实测过的实体路径，probe==realpath(probe) 恰好
+--- 等价于「segment 本身不是指向别处的符号链接」）。只要路径任一级是链接——无论指向 root
+--- 内、root 外、还是一个挂载点——都在这一级拒绝。运维想放行的目录应作为**实体 bind 挂进
+--- /files**：挂载落点本身是实体目录，realpath 原地不动，照常通过。
+function _M.confined_to_root(root, rel)
     if realpath == nil then
         -- ffi/realpath 在 OpenResty（LuaJIT 内建 ffi）里必然可用；真取不到时
         -- 宁可整条内容出口 400，也绝不退成"不校验"。退化到 lfs 逐级 lstat会把根内
@@ -168,15 +118,13 @@ function _M.confined_to_root(root, rel, trusted)
                 -- 该级不存在：后面的段无从解析，nginx 会回 404。
                 return true
             end
-            local in_root = starts_with_root(resolved, root_real)
-            if not in_root and not in_trusted(resolved, trusted) then
-                return false, "符号链接指向内容根之外: " .. segment
+            -- 严格实体判定：这一级的 realpath 必须与拼接串 probe 逐字相等，即 segment
+            -- 不是指向别处的符号链接（current 已是上一轮实测的实体）。root 内、root 外、
+            -- 指向挂载点，一视同仁：凡链接一律拒。只缓存已实测为实体的中间目录。
+            if resolved ~= probe then
+                return false, "路径含符号链接，内容出口只信任实体目录: " .. segment
             end
-            -- 只缓存**确定落在 root 内**的目录。validated_dirs 的语义是「以后各级直接
-            -- 采信、不再 realpath」，它的前提是 root 内目录不会被原地换成指向外部的链接；
-            -- 可信根是 root 外的树，不受这个前提保护，缓存它会让「先放行再换链接」变成
-            -- 一条可用的逃逸路径，所以命中可信根的各级每次都实测。
-            if index < #segments and in_root then remember_dir(resolved) end
+            if index < #segments then remember_dir(probe) end
             -- realpath 可能折叠了 . 与 .. 或换出链接名；统一用解析结果推进，
             -- 保证下一级 stat 的是真实路径而不是还没解析的拼接串。
             current = resolved
@@ -285,7 +233,6 @@ end
 --- 分流顺序不可调换：先判根路径、再判 /_authz/ 命名空间，之后才是方法白名单、
 --- 路径合法性、符号链接校验、内容出口。binding.app 全程只读不改（丢失它会撞
 --- prevent_loop 的 508）。
---- config 用于取 content_trusted_roots（出根符号链接的可信白名单，默认空=关闭）。
 function _M.handle(binding, config)
     local uri = ngx.var.uri or "/"
     if uri == "/" then return false end
@@ -324,7 +271,6 @@ function _M.handle(binding, config)
         -- 真正去 open 的目录，校验对象必须与它一致（AUTHZ_FILES_ROOT 只影响控制
         -- 面浏览与写接口，改它不会改 alias，拿它校验会校验到一个不相干的目录）。
         local root = files.default_root
-        local trusted = trusted_realpaths(config and config.content_trusted_roots)
         local seen = {}
         local candidates = {}
         local function add(candidate)
@@ -340,7 +286,7 @@ function _M.handle(binding, config)
         end
         for _, candidate in ipairs(ladder) do add(candidate) end
         for _, candidate in ipairs(candidates) do
-            local confined, reason = _M.confined_to_root(root, candidate, trusted)
+            local confined, reason = _M.confined_to_root(root, candidate)
             if confined == false then
                 return json_error(400, "bad_request", "路径非法：" .. tostring(reason))
             end

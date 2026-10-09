@@ -358,8 +358,35 @@ NocoBase OAuth 的 `/api/idpOAuth/me` 只提供标准身份 claim，不使用 Ba
 - 会话命中后，实例仍用本地 `users` / `remote_users` 校验该身份存在且启用；
   本地没有或已禁用即清除登录信息（主实例删 Redis 键，只读实例仅清除本机状态）；
 - Redis 中确实没有该会话（登出/过期）时，实例立即清除登录信息；
-  **Redis 不可达时同样失败关闭**（清除 Cookie、返回未登录），不再回退本地 SQLite，
-  避免已撤销的 bearer token 复活；
+- **Redis 网络故障（连接失败/读写超时/拒绝连接）走容错降级，不再拖垮整个网关**：
+  熔断器状态放在 `ngx.shared.authz_shared_session` 共享字典（跨 worker 生效，任一 worker
+  探测到故障即全体生效），OPEN 窗口初始 5s、按连续失败次数指数退避、上限 60s；
+  OPEN 期间完全不尝试连 Redis（零网络等待，请求不再串行等 connect/read 超时），
+  窗口到期后半开放行一次探测。AUTH 失败与 SELECT db 失败归类为**配置错误**，
+  不参与降级读——配置错误必须暴露，不能被静默绕过；
+- **降级读**（默认开启，`AUTHZ_SESSION_SHARED_FALLBACK=true`）：熔断 OPEN 且属网络故障时，
+  会话校验改读本机 SQLite `sessions` 镜像（每次成功从 Redis 读到共享会话时按节流窗口 upsert，
+  本机签发与其他实例签发都有镜像），已登录用户继续可用。判据是该行的 `verified_at`
+  （最近一次经 Redis 确认存在的时刻）落在 grace（降级宽限期，`AUTHZ_SESSION_FALLBACK_GRACE`，
+  默认 4 小时）之内；Redis 一直不恢复则自动停止降级、退回登录页。
+  设 `AUTHZ_SESSION_SHARED_FALLBACK=false` 恢复严格 fail-closed（清除 Cookie、
+  writer 登录 503，即旧行为：避免已撤销的 bearer token 复活）；
+- **待写重试队列**：Redis 不可达期间，本该落到 Redis 的动作按发生顺序入 SQLite 表
+  `session_pending`（`op=save/delete/delete_all`，字段含 `token`/`username`/`source`/`csrf`/
+  `expires_at`/`attempts`/`created_at`）。撤销类（`delete`/`delete_all`）永不丢弃；`save` 类
+  有行数上限，超限则登录返回 503——宁可显式失败也不静默丢共享会话。重放定时器
+  `lualib/resty/authz/shared_session_sync.lua` 在 `init_worker` 里启动：每个 worker 都挂看守定时器，
+  owner 锁保证同一时刻只有一个 worker 重放，owner 崩溃后锁一过期即由其他 worker 接管
+  （不等 reload）。默认每 15s 一轮按 id 升序重放（`save`→SETEX 签名信封、`delete`→DEL、
+  `delete_all`→SCAN 后按身份删）；成功后在同一事务里批量删除已重放的行，碰到第一条失败就
+  累加 `attempts` 并停止本轮以保持顺序（撤销只会晚到，绝不会乱序反超）。熔断 OPEN 时
+  本轮直接返回，不做网络尝试；
+- reader 实例在 Redis 故障期间**仍拒绝创建新登录**（保持单 writer 不变量）；writer 实例
+  登录可用，会话先在本机生效、Redis 恢复后自动补齐到 Redis；
+- **已知限制（必须告知使用方）**：Redis 故障期间 A 实例上的撤销（登出、改密、删用户）
+  在 B 实例上不会即时生效，最长受 grace（默认 4 小时）约束；本地禁用用户/角色仍立即生效
+  （共享会话命中后仍查本地 `users` / `remote_users`）。安全边界要求更高的部署应设
+  `AUTHZ_SESSION_SHARED_FALLBACK=false`；
 - 登录、全局登出、密码重置、用户禁用等写/撤销操作必须进入 `read-write` 主实例；
   只有主实例会执行 `SETEX/DEL/SCAN`，只读实例绝不尝试写共享键；
 - 每条共享记录都是 `<JSON>.<HMAC-SHA256 hex>` 签名信封（密钥 `AUTHZ_SESSION_SIGNING_KEY`，
@@ -381,18 +408,32 @@ AUTHZ_SESSION_REDIS_DB=0
 AUTHZ_SESSION_REDIS_PREFIX=authz              # 多套集群共用时用于隔离
 AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>  # >=32 字符，所有共享实例必须一致；
                                                   # 缺失或过短会在启动时直接报错
+AUTHZ_SESSION_SHARED_FALLBACK=true              # 默认 true：网络故障时熔断 + 降级读本机镜像 + 待写队列
+AUTHZ_SESSION_RETRY_INTERVAL_MS=15000            # 待写队列重放周期（毫秒，钳制 1000..600000），owner 锁串行
+AUTHZ_SESSION_FALLBACK_GRACE=14400              # 降级宽限期（秒，钳 60..604800）：撤销跨实例生效的最大延迟
 ```
 
 Redis 键格式：`<prefix>:session:<64位hex token>`，值为 JSON，TTL 与会话有效期
-（`AUTHZ_SESSION_TTL`）一致。`docker-compose.yml` 已透传上述变量；修改环境变量
-必须重建容器。
+（`AUTHZ_SESSION_TTL`）一致。修改环境变量必须重建容器。本机生产用 `env_file: .env`
+（deploy.md 3.2 同款），新变量直接生效；仓库根目录那份开发挂载 compose 用**显式 `environment:`
+清单**（目前只列了 REDIS_* 那 7 项），要让这三个新变量可配，需要在它的 `environment:` 里补
+`AUTHZ_SESSION_SHARED_FALLBACK` / `AUTHZ_SESSION_FALLBACK_GRACE` / `AUTHZ_SESSION_RETRY_INTERVAL_MS`
+三行（仓库根 docker-compose.yml 的 environment: 清单已带上，默认 true / 14400 / 15000；
+部署若用自制清单，这三个键要一起加，否则容器恒用默认值）。
 
 > 键值实际存储为签名信封 `<JSON>.<64位hex HMAC>`，人工用 `redis-cli GET` 排查时
 > 看到的即为此格式，属正常现象。
 
+运维判断 Redis 是否健康，不用看日志猜：`GET /_authz/api/session`（x-api-key 即可）在共享模式启用时
+返回 `shared_session` 段——`state=down` 表示网络故障中（`degraded=true` 即正在靠本机镜像降级服务，
+`down_remaining_ms` 是本熔断窗口剩余时间），`state=config` 表示 AUTH/SELECT db 配错（不降级，必须人工修），
+`pending` 三类计数在非 0 时说明还有动作等 Redis 恢复后重放。字段含义见 `docs/core-api.md` §6.5。
+
 真实回归覆盖：双实例 + 独立带 ACL 的 Redis 容器，验证 writer 写入、reader 只读
 （登录被拒且 ACL 层面写入被 `NOPERM` 拒绝）、载荷不含角色、Redis 键删除后清除
-登录、本地无身份时清除登录、密码重置跨实例撤销以及 Redis 故障失败关闭，位于
+登录、本地无身份时清除登录、密码重置跨实例撤销，以及 Redis 故障时的容错降级
+（熔断后降级读本机镜像、writer 登录仍可用、reader 仍拒建登录、待写队列在恢复后按序
+重放）与 `AUTHZ_SESSION_SHARED_FALLBACK=false` 的严格失败关闭，位于
 `test/test_shared_session.sh`（共享会话独立回归）。
 
 ## 7. Admin UI 规则
@@ -474,11 +515,12 @@ bash test/run_tests.sh authz:latest
 |---|---|
 | `test/test_klib_router_ctxvar.sh` | Router/ctxvar、JSON、错误脱敏、merge 返回与原子性 |
 | `test/test_authz_gateway.sh` | 登录、API、CSRF、身份隔离、远端记录、OAuth、动态代理、HTTPS Cookie 与绑定级响应改写 |
-| `test/test_shared_session.sh` | 共享会话 (Redis 单写多读、ACL、故障关闭) |
+| `test/test_shared_session.sh` | 共享会话 (Redis 单写多读、ACL、网络故障容错降级与待写队列重放、严格 fail-closed) |
 | `test/run_tests.sh` | 镜像基础库、WebDAV、FancyIndex、JWT/旧 SSO 兼容 |
 
 截至本文更新，最近基线为 Router 99、Authz 998（含实例级 Key、guest 套件与
-TEST_ONLY/KEEP_GOING 分诊）、共享会话 29、基础镜像 17。数量不是固定契约；
+TEST_ONLY/KEEP_GOING 分诊）、共享会话（含容错降级与待写队列重放；本轮功能新增的断言数以脚本
+末尾汇总为准）、基础镜像 17。数量不是固定契约；
 任何行为变更必须增加或调整能验证真实 HTTP 结果的断言。
 
 三个脚本都会占用随机端口并起常驻 mock，**必须串行执行**；并发跑会互相抢端口并污染日志。

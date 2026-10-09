@@ -44,7 +44,7 @@
   一套绑定在所有 / 多级泛域入口下都能代理与显示菜单，永不因入口域名不同而各建一份；
   历史遗留的完整域名（非泛域精确入口）仍原样精确匹配；
 - 公网入口默认把 HTTP 永久重定向到 HTTPS（`AUTHZ_HTTP_MODE=redirect`）；需要临时暴露管理端时用防火墙白名单限制来源；
-- 多实例可启用共享会话模式（Redis），但只允许一个实例 `read-write`，其余实例 `read-only`；角色/策略仍各自本地管理，详见 `docs/maintenance-handbook.md` 6.1；
+- 多实例可启用共享会话模式（Redis），但只允许一个实例 `read-write`，其余实例 `read-only`；角色/策略仍各自本地管理。Redis 网络故障时默认容错降级（熔断 + 读本机会话镜像 + 待写队列恢复后重放），不会整体掉登录，`AUTHZ_SESSION_SHARED_FALLBACK=false` 可恢复严格 fail-closed；详见 `docs/maintenance-handbook.md` 6.2；
 - 目标 IP 默认 `127.0.0.1`，也可填写其他机器的 IPv4 或 IPv6 地址；上游协议可选择 HTTP 或 HTTPS，HTTPS 可选择是否忽略 SSL 证书校验；
 - 不同前缀可以绑定同一个端口，最终域名必须唯一，重复提交返回 `409`；
 - 可填写 `menu-name` 覆盖左侧菜单名称；配置绑定后，该端口不再依赖主动探测的菜单名称；
@@ -185,7 +185,6 @@ docker exec <container_name> admin_password_reset
 | `AUTHZ_APP_DOMAINS` | `1` | 内置应用保留前缀入口（`file`→100 文件浏览、`s3`→101 对象存储）总开关，`0` 关闭后这两类域名回退 404 |
 | `AUTHZ_APP_PREFIX_FILES` / `AUTHZ_APP_PORT_FILES` | `file` / `100` | files 应用保留前缀与虚拟端口（非法值/与入口端口冲突时该项自动禁用）。`file-<节点>.<域>/` 是页面，带子路径的 GET/HEAD 直取内容根下的文件字节，策略对象 `/100<路径>` |
 | `AUTHZ_APP_PREFIX_S3` / `AUTHZ_APP_PORT_S3` | `s3` / `101` | s3 应用保留前缀与虚拟端口。`s3-<节点>.<域>/` 是页面，带子路径的 GET/HEAD 直取当前配置 `default_bucket` 下的对象字节，策略对象 `/101<key>` |
-| `AUTHZ_APP_TRUSTED_ROOTS` | 空 | 内容直取的出根符号链接可信根白名单：逗号分隔的**容器内**绝对路径，**空=关闭**（URI 每一级 realpath 后必须仍在内容根内，出根链接 400）。命中可信根只放宽那一级的落点，其后各级照旧校验——可信根内部再埋一条指向 `/etc` 的链接仍 400，不是子树免检 |
 | `AUTHZ_HTTP_PORT` / `AUTHZ_HTTPS_PORT` | `6080` / `6443` | 入口端口 |
 | `AUTHZ_HTTP_MODE` | `redirect` | 公网 HTTP 行为：`redirect` 308 到 HTTPS；`disabled` 仅回环；`serve` 仅受控测试 |
 | `AUTHZ_DISCOVERY_PORTS` | 空 | Docker Desktop 无法从监听表发现时，追加探测端口，例如 `2077,3080` |
@@ -281,7 +280,7 @@ docker exec <container_name> admin_password_reset
 ```bash
 bash test/test_klib_router_ctxvar.sh  # 真实 OpenResty Router 回归
 bash test/test_authz_gateway.sh      # 隔离 Authz/API/动态代理回归
-bash test/test_shared_session.sh     # 共享会话 (Redis 单写多读) 回归
+bash test/test_shared_session.sh     # 共享会话 (Redis 单写多读 / 故障容错降级 / 待写队列重放) 回归
 bash test/run_tests.sh <image>       # 镜像基础功能回归
 ```
 
@@ -495,7 +494,7 @@ GHCR 推送使用内置 `GITHUB_TOKEN`，无需额外配置。
     ├── run_tests.sh            # 基础功能测试脚本
     ├── test_authz_gateway.sh   # Authz Gateway/API 隔离测试矩阵
     ├── test_klib_router_ctxvar.sh # 真实 OpenResty Router 回归
-    ├── test_shared_session.sh  # 共享会话 (Redis 单写多读) 回归
+    ├── test_shared_session.sh  # 共享会话 (Redis 单写多读 / 故障容错降级) 回归
     ├── conf/
     │   └── nginx.conf          # 测试用 nginx 配置
     ├── html/                   # FancyIndex 测试文件

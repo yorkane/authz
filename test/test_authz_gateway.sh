@@ -634,7 +634,7 @@ assert_eq "API key schema and api role policy seeded" "$(report_get api_keys)" "
 assert_eq "legacy user policy migrated to local identity" "$(report_get legacy_policy)" "user:local:legacy_user"
 assert_eq "retired viewer role folded into guest everywhere" "$(report_get viewer_retired)" "yes"
 assert_eq "database migrations have an ordered version ledger" "$(report_get ledger)" \
-    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new|21:menu_entry_s3_browser|22:menu_entry_nginx_conf_hidden|23:s3_configs|24:upload_records|25:menu_entry_s3_configs|26:retire_s3_share_ttl|27:hide_menu_s3_configs"
+    "1:create_current_schema|2:upgrade_legacy_columns_and_timestamps|3:expand_api_key_role_catalog|4:scope_remote_username_uniqueness_by_provider|5:canonicalize_policy_principals|6:create_menu_entries|7:treeify_menu_entries_and_seed_layout|8:api_keys_loopback_only|9:bindings_header_overrides|10:menu_entry_files_browser|11:remove_omniscript_fix_files_icon|12:menu_entry_nginx_conf|13:menu_group_domain_services|14:menu_service_overrides|15:mark_builtin_system_group|16:bindings_response_rewrite|17:bindings_request_rewrite|18:retire_viewer_role_into_guest|19:api_keys_token_prefix|20:bindings_open_in_new|21:menu_entry_s3_browser|22:menu_entry_nginx_conf_hidden|23:s3_configs|24:upload_records|25:menu_entry_s3_configs|26:retire_s3_share_ttl|27:hide_menu_s3_configs|28:shared_session_resilience"
 
 cookie_header() {
     awk '
@@ -3356,6 +3356,30 @@ request PUT "$ADMIN_HOST" /_authz/api/files/rename "$ADMIN_COOKIE" "$CSRF" \
 assert_eq "write through a symlinked directory is refused" "$STATUS" "400"
 rm -f "$TMP_DIR/files/aliendir"
 
+# 断链软链接（绝对目标未挂进容器）：条目不得被静默丢弃，必须保留为可点的目录，
+# 并带 broken/link_target；进入它由 files.list 给出可运维定位的 404 原因。
+ln -s /outside/nope "$TMP_DIR/files/brokenlink"
+request GET "$ADMIN_HOST" /_authz/api/files "$ADMIN_COOKIE"
+assert_eq "listing with a broken symlink succeeds" "$STATUS" "200"
+assert_json "broken symlink stays visible in the listing" \
+    '[.data.items[] | select(.name == "brokenlink")] | length' "1"
+assert_json "broken symlink is typed as a dir" \
+    '[.data.items[] | select(.name == "brokenlink") | .type] | first' "dir"
+assert_json "broken symlink carries the broken flag" \
+    '[.data.items[] | select(.name == "brokenlink") | .broken] | first' "true"
+assert_json "broken symlink reports the unmounted target" \
+    '[.data.items[] | select(.name == "brokenlink") | .link_target] | first' "/outside/nope"
+request GET "$ADMIN_HOST" "/_authz/api/files?path=brokenlink" "$ADMIN_COOKIE"
+assert_eq "entering a broken symlink is 404" "$STATUS" "404"
+assert_json "broken symlink explains the unreachable container path" '.error.message | test("容器内不可达") | tostring' "true"
+assert_json "broken symlink error names the target" '.error.message | endswith("/outside/nope") | tostring' "true"
+request DELETE "$ADMIN_HOST" /_authz/api/files/remove "$ADMIN_COOKIE" "$CSRF" \
+    '{"path":"","name":"brokenlink","recursive":true}'
+assert_eq "broken symlink delete is refused" "$STATUS" "400"
+[[ -L "$TMP_DIR/files/brokenlink" ]] \
+    && pass "broken symlink survived the refused delete" || fail "broken symlink was removed"
+rm -f "$TMP_DIR/files/brokenlink"
+
 # 机器 Key（x-api-key）免登录直连文件写接口：写端点的能力边界是 admin 角色 +
 # Key 的来源约束，不再要求浏览器会话（session_only 已去掉），CSRF 只约束会话请求。
 # Key 由本段自建自删：TEST_ONLY 单跑时前序段不会创建共享 Key。
@@ -4710,31 +4734,32 @@ docker rm -f "$APPDOM_CONTAINER_NAME" >/dev/null 2>&1 || true
 APPDOM_CONTAINER_NAME=""
 
 ensure APP_ADMIN_KEY_TOKEN
-# ── AUTHZ_APP_TRUSTED_ROOTS：出根符号链接的可信根白名单（同段独立容器）──────────
-# 部署里常有**合法**的出根绝对链接（内容根里一条 ChatGPT -> 宿主真实目录，内容本身
-# 已由 compose 以 :ro 挂进容器），严格模式会把该目录整体 400。白名单只让「这一级落点
-# 落在可信根内」通过，其后各级照旧校验：落点再顺一条指向 /etc 的链接跳出去仍然 400
-# （可信根不是子树免检）；未列入白名单的出根链接与默认严格行为完全一致。
-# 可信根必须写成**容器内**可见的路径：realpath 在容器命名空间里解析，填宿主路径会
-# 解析不出来而整项作废（fail-closed），这条链路上要有 warn 可查，见最后两行断言。
-TRUST_CONTAINER_NAME="authz-gateway-trust-test-$$"
+# ── 内容出口零符号链接信任：只认实体目录（严格模型，独立容器）───────────────
+# 判据（gateway/app_content.lua confined_to_root）：直取路径每一级的 realpath 必须与
+# 拼接串逐字相等，即内容出口不跟随任何符号链接。出根、入根、指向 /etc、指向 /data、
+# 指向一个挂载点、根内相对链接，只要该级是链接一律 400，消息
+# 「路径含符号链接，内容出口只信任实体目录: <段>」；该级存在但解不出来（悬空/ELOOP/
+# EACCES）报「无法解析真实路径」；该级不存在交回 nginx 404。曾经的可信根白名单与
+# 挂载点自动可信都已取消——外部目录放行的唯一姿势是**实体 bind 挂进 /files**。
+TRUST_CONTAINER_NAME="authz-gateway-strict-test-$$"
 TRUST_HTTP_PORT=$(free_port)
 TRUST_HTTPS_PORT=$(free_port)
-mkdir -p "$TMP_DIR/trust-data/authz" "$TMP_DIR/trust-files/pub" "$TMP_DIR/trusted/dir" "$TMP_DIR/trusted-sibling"
-printf TRUST-PAYLOAD > "$TMP_DIR/trusted/dir/ok.txt"
-printf payload-trust > "$TMP_DIR/trust-files/pub/a.txt"
-printf SIBLING-SECRET > "$TMP_DIR/trusted-sibling/secret.txt"
-ln -sfn /opt/trusted/dir/ok.txt "$TMP_DIR/trust-files/pub/out-ok"
-ln -sfn /opt/trusted/dir "$TMP_DIR/trust-files/pub/okdir"
-ln -sfn /etc/passwd "$TMP_DIR/trust-files/pub/out-evil"
-ln -sfn /opt/trusted/dir/escape-hop "$TMP_DIR/trust-files/pub/deep-link"
-ln -sfn /etc/passwd "$TMP_DIR/trusted/dir/escape-hop"
-# 与可信根共享字符串前缀的兄弟目录：前缀匹配必须认路径分隔符，不能顺手放行
-ln -sfn /opt/trusted-sibling/secret.txt "$TMP_DIR/trust-files/pub/out-sibling"
-ln -sfn /etc/passwd "$TMP_DIR/trusted-sibling/passwd"
-ln -sfn /opt/trusted-sibling/passwd "$TMP_DIR/trust-files/pub/out-sibling-etc"
-# worker 以 nobody 跑，要能穿过 mktemp 目录解析可信根里的链接目标
-chmod a+x "$TMP_DIR"; chmod -R a+rX "$TMP_DIR/trusted" "$TMP_DIR/trusted-sibling" "$TMP_DIR/trust-files"
+mkdir -p "$TMP_DIR/trust-data/authz"
+mkdir -p "$TMP_DIR/strict-files/pub" "$TMP_DIR/strict-files/realsub"
+printf payload-strict > "$TMP_DIR/strict-files/pub/a.txt"
+printf INNER-OK > "$TMP_DIR/strict-files/realsub/x.txt"
+mkdir -p "$TMP_DIR/strict-real"
+printf EXTREAL-CONTENT > "$TMP_DIR/strict-real/realfake.txt"
+mkdir -p "$TMP_DIR/strict-mnt"
+printf EXTREAL-CONTENT > "$TMP_DIR/strict-mnt/realfake.txt"
+ln -sfn /etc/passwd "$TMP_DIR/strict-files/pub/escape-passwd"
+ln -sfn /data "$TMP_DIR/strict-files/pub/escape-data"
+ln -sfn /mnt/extra "$TMP_DIR/strict-files/pub/escape-mount"
+ln -sfn /nope/nowhere "$TMP_DIR/strict-files/pub/broken"
+ln -sfn ../realsub "$TMP_DIR/strict-files/pub/inner-link"
+ln -sfn /opt/trusted-sibling/secret.txt "$TMP_DIR/strict-files/pub/out-sibling"
+chmod a+x "$TMP_DIR" "$TMP_DIR/strict-files" "$TMP_DIR/strict-files/pub"
+chmod -R a+rX "$TMP_DIR/strict-files" "$TMP_DIR/strict-real" "$TMP_DIR/strict-mnt"
 docker run -d \
     --name "$TRUST_CONTAINER_NAME" \
     --network host \
@@ -4748,47 +4773,53 @@ docker run -d \
     -e AUTHZ_APP_DOMAINS=1 \
     -e AUTHZ_API_KEY="$APP_ADMIN_KEY_TOKEN" \
     -e AUTHZ_API_KEY_ALLOWED_IPS=127.0.0.1 \
-    -e AUTHZ_APP_TRUSTED_ROOTS=/opt/trusted,/opt/not-mounted \
     -e OPENRESTY_TEMPLATE_DIR=/etc/openresty/templates \
     -v "$TMP_DIR/trust-data:/data" \
     -v "$REPO_DIR/admin:/usr/local/openresty/nginx/html/admin:ro" \
     -v "$TMP_DIR/templates:/etc/openresty/templates:ro" \
     -v "$REPO_DIR/docker-entrypoint.sh:/docker-entrypoint.sh:ro" \
     -v "$LUALIB_MOUNT:/usr/local/openresty/site/lualib:ro" \
-    -v "$TMP_DIR/trust-files:/files" -v "$TMP_DIR/trusted:/opt/trusted:ro" \
-    -v "$TMP_DIR/trusted-sibling:/opt/trusted-sibling:ro" \
+    -v "$TMP_DIR/strict-files:/files" \
+    -v "$TMP_DIR/strict-real:/files/realmount:ro" \
+    -v "$TMP_DIR/strict-mnt:/mnt/extra:ro" \
     "$IMAGE" >/dev/null
 TRUST_ABOUT=$(docker logs "$TRUST_CONTAINER_NAME" 2>&1 | grep -c 'lua entry thread aborted' || true)
 for _ in $(seq 1 80); do
-    STATUS=$(curl -sS --max-time 2 --resolve "file-trust.test.example:$TRUST_HTTP_PORT:127.0.0.1" \
-        -o /dev/null -w '%{http_code}' "http://file-trust.test.example:$TRUST_HTTP_PORT/_authz/api/session" 2>/dev/null || true)
+    STATUS=$(curl -sS --max-time 2 --resolve "file-strict.test.example:$TRUST_HTTP_PORT:127.0.0.1" \
+        -o /dev/null -w '%{http_code}' "http://file-strict.test.example:$TRUST_HTTP_PORT/_authz/api/session" 2>/dev/null || true)
     [[ "$STATUS" == "401" ]] && break
     sleep 0.25
 done
-[[ "$STATUS" == "401" ]] || fail "trusted-root instance did not become ready"
+[[ "$STATUS" == "401" ]] || fail "strict-content instance did not become ready"
+docker exec "$TRUST_CONTAINER_NAME" mkdir -p /opt/trusted-sibling
+docker exec "$TRUST_CONTAINER_NAME" sh -c "printf SIBLING-SECRET > /opt/trusted-sibling/secret.txt && chmod 755 /opt /opt/trusted-sibling && chmod 644 /opt/trusted-sibling/secret.txt"
 trust_req() {
-    curl -sS --max-time 5 --resolve "file-trust.test.example:$TRUST_HTTP_PORT:127.0.0.1" \
+    curl -sS --max-time 5 --resolve "file-strict.test.example:$TRUST_HTTP_PORT:127.0.0.1" \
         -H "x-api-key: $APP_ADMIN_KEY_TOKEN" -o "$TMP_DIR/trust-body" -w '%{http_code}' \
-        "http://file-trust.test.example:$TRUST_HTTP_PORT$1"
+        "http://file-strict.test.example:$TRUST_HTTP_PORT$1"
 }
-assert_eq "trusted-root instance serves a plain file" "$(trust_req /pub/a.txt)" "200"
-assert_eq "trusted-root plain bytes" "$(<"$TMP_DIR/trust-body")" "payload-trust"
-assert_eq "symlink into trusted root served" "$(trust_req /pub/out-ok)" "200"
-assert_eq "trusted-root bytes come from the link target" "$(<"$TMP_DIR/trust-body")" "TRUST-PAYLOAD"
-assert_eq "missing file under a trusted dir is 404 not 400" "$(trust_req /pub/okdir/nope.bin)" "404"
-assert_eq "symlink outside trusted roots still refused" "$(trust_req /pub/out-evil)" "400"
-assert_not_contains "trusted-root refusal never leaks passwd bytes" "$(<"$TMP_DIR/trust-body")" "root:x:0:0"
-assert_eq "second hop out of the trusted root refused" "$(trust_req /pub/deep-link)" "400"
-assert_not_contains "second hop never leaks passwd bytes" "$(<"$TMP_DIR/trust-body")" "root:x:0:0"
-assert_eq "trusted-root string-prefix sibling refused" "$(trust_req /pub/out-sibling)" "400"
-assert_not_contains "sibling file never served" "$(<"$TMP_DIR/trust-body")" "SIBLING-SECRET"
-assert_eq "sibling passwd link refused" "$(trust_req /pub/out-sibling-etc)" "400"
-assert_not_contains "sibling passwd never leaks" "$(<"$TMP_DIR/trust-body")" "root:x:0:0"
-# 解析不出来的可信根（未挂载）必须留 warn：它是「配了但不生效」唯一的可观测点
-assert_contains "unusable trusted root is reported" \
-    "$(docker logs "$TRUST_CONTAINER_NAME" 2>&1)" \
-    "entry unusable in this container"
-assert_eq "trusted-root worker never aborts" \
+trust_msg() { jq -r '.error.message // empty' "$TMP_DIR/trust-body" 2>/dev/null || true; }
+assert_eq "strict: plain real file served" "$(trust_req /pub/a.txt)" "200"
+assert_eq "strict: plain bytes" "$(<"$TMP_DIR/trust-body")" "payload-strict"
+assert_eq "strict: real subdir served (not a link)" "$(trust_req /realsub/x.txt)" "200"
+assert_eq "strict: real subdir bytes" "$(<"$TMP_DIR/trust-body")" "INNER-OK"
+assert_eq "strict: operator real bind mount served" "$(trust_req /realmount/realfake.txt)" "200"
+assert_eq "strict: bind-mount bytes come from the mounted tree" "$(<"$TMP_DIR/trust-body")" "EXTREAL-CONTENT"
+assert_eq "strict: intra-root relative link refused" "$(trust_req /pub/inner-link/x.txt)" "400"
+assert_contains "strict: relative link refusal names the segment" "$(trust_msg)" "只信任实体目录: inner-link"
+assert_not_contains "strict: relative link never serves target bytes" "$(<"$TMP_DIR/trust-body")" "INNER-OK"
+assert_eq "strict: link to /etc refused" "$(trust_req /pub/escape-passwd)" "400"
+assert_not_contains "strict: /etc link leaks no passwd bytes" "$(<"$TMP_DIR/trust-body")" "root:x:0:0"
+assert_eq "strict: link to /data (authz state) refused" "$(trust_req /pub/escape-data)" "400"
+assert_not_contains "strict: /data link leaks no sqlite bytes" "$(<"$TMP_DIR/trust-body")" "SQLite format"
+assert_eq "strict: link to a real mount point refused (auto-trust gone)" "$(trust_req /pub/escape-mount/realfake.txt)" "400"
+assert_contains "strict: mount-point link refusal names the segment" "$(trust_msg)" "只信任实体目录: escape-mount"
+assert_eq "strict: string-prefix sibling via link refused" "$(trust_req /pub/out-sibling)" "400"
+assert_not_contains "strict: sibling secret never served" "$(<"$TMP_DIR/trust-body")" "SIBLING-SECRET"
+assert_eq "strict: broken link is 400 (unresolvable)" "$(trust_req /pub/broken)" "400"
+assert_contains "strict: broken link reports unresolvable path" "$(trust_msg)" "无法解析真实路径: broken"
+assert_eq "strict: missing path is 404 not 400" "$(trust_req /pub/no-such-file)" "404"
+assert_eq "strict: worker never aborts during content guard" \
     "$(docker logs "$TRUST_CONTAINER_NAME" 2>&1 | grep -c 'lua entry thread aborted' || true)" "$TRUST_ABOUT"
 docker exec "$TRUST_CONTAINER_NAME" chmod -R a+rwx /data >/dev/null 2>&1 || true
 docker rm -f "$TRUST_CONTAINER_NAME" >/dev/null 2>&1 || true

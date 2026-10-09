@@ -98,7 +98,6 @@ AUTHZ_APP_PREFIX_FILES=file
 AUTHZ_APP_PORT_FILES=100
 AUTHZ_APP_PREFIX_S3=s3
 AUTHZ_APP_PORT_S3=101
-AUTHZ_APP_TRUSTED_ROOTS=                            # 内容直取的出根符号链接可信根白名单：逗号分隔的容器内绝对路径，**空=关闭**（出根链接一律 400）。命中只放宽那一级落点，不是子树免检，见 3.6
 
 # ── 本机临时保存区（Agent 落盘，可选）──────────────────
 # PUT /_authz/api/store 的容器内根目录；compose 已把 DATA_DIR 整体挂到 /data，
@@ -258,50 +257,47 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/s3-configs" | head -c
 | file | 内容根要有真实数据：`FILES_DIR -> /files` 卷 | 目录里没有那个文件 → 404 |
 | s3 | 当前生效那套存储服务配置（`s3_configs`，对象存储页「配置」里维护）的 `default_bucket` 非空 | 503 + JSON，消息区分「对象存储未配置」与「未设置默认 bucket」；`?cfg=<id\|name>` 换一套时取被选中那套的 `default_bucket` |
 
-还有一条**内容根的形状约束**：直取路径逐级做 realpath，默认要求每一级解析后仍落在内容根内，
-**指向根外的绝对符号链接一律 400**。这是刻意的——静态 `alias` 本身不做 realpath（nginx 只是把 URI
-剩余段拼到 alias 后 `open()`，符号链接直接跟随），而内容根在部署里通常是宿主真实可写的目录树；
-一条 `/100/<目录>/*` 策略加上目录里一个指向 `/etc` 的链接就是任意文件读。链接**落在根内**
-（相对链接、同目录链接）不受影响。
+还有一条**内容根的形状约束**：直取路径逐级做 realpath，要求每一级的解析结果与拼接串**逐字相等**
+—— 也就是**内容出口不跟随任何符号链接，只信任实体目录**。出根、入根、指向 `/etc`、指向
+`/data`、指向挂载点、根内相对链接，只要路径任一级是链接就在该级 400，消息「路径含符号链接，
+内容出口只信任实体目录: <段>」；该级存在但 realpath 解不出来（悬空链接、ELOOP、EACCES）报
+「无法解析真实路径」；该级不存在则交回 nginx 走 404。这是刻意的——静态 `alias` 本身不做 realpath
+（nginx 只是把 URI 剩余段拼到 alias 后 `open()`，符号链接直接跟随），而内容根在部署里通常是
+宿主真实可写的目录树；一条 `/100/<目录>/*` 策略加上目录里一个指向 `/etc` 的链接就是任意文件读，
+而 `/data` 正是 authz 自己的凭据库（用户、API Key、会话都在其中的 SQLite 里），绝不能从内容出口外泄。
 
 ```bash
-# 体检：列出内容根下的符号链接及其解析目标，自己核对哪些越界（部署后跑一次）
+# 体检：列出内容根下的符号链接及其解析目标（部署后跑一次）
 cd <compose 所在目录>            # .env 里没写 FILES_DIR 时，compose 用默认值 ./files
 FILES_DIR=$(grep -m1 '^FILES_DIR=' .env | cut -d= -f2-); FILES_DIR=${FILES_DIR:-./files}
-find "$FILES_DIR" -maxdepth 2 -type l -exec ls -l {} \; 2>/dev/null
+find "$FILES_DIR" -maxdepth 2 -type l -ls
 ```
 
-（`-ls` 也可以，输出自带链接目标：`find "$FILES_DIR" -maxdepth 2 -type l -ls`。要递归整棵树
-就把 `-maxdepth 2` 去掉。）
+（输出自带链接目标；要递归整棵树就把 `-maxdepth 2` 去掉。）体检列出的链接**现在全部会在
+`file-<域>` 下 400** —— 管理界面的文件浏览走另一条通道，不受这条判据影响。需要经 file 域名浏览的，
+一律改成实体 bind 挂载，链接本身从内容根里删掉。
 
-体检里那些指向根外的绝对链接，对应路径在 `file-<域>` 下会 400（管理界面的文件浏览走另一条通道，
-不受影响）。首选仍然是把目标树用 volume 挂进内容根下的子目录；但有些出根链接是宿主本来就有的目录
-约定（本机 `/data/ChatGPT -> /home/aigc/ChatGPT/`，内容其实已由 compose 以 `:ro` 挂进容器），
-这种时候给一条**可信根白名单**比动宿主目录更省事：
+**没有符号链接白名单，也没有「挂载点自动放行」**：这两套曾经的机制都已取消。只要允许某一条链接
+被跟随，「逐字相等」这条判据就不再闭合，配置会沿「先放一条、再放一片」漂移，最终又回到任意文件读。
+想让 `file-<域>` 浏览内容根以外的目录，唯一正确姿势是把目标树作为**实体 bind 直接挂进 `/files` 下的
+一个子目录**：挂载落点本身是真实目录，realpath 原地不动，照常通过。
 
-```bash
-# .env：逗号分隔的容器内绝对路径。**默认空 = 完全关闭**，保持上面的严格行为
-AUTHZ_APP_TRUSTED_ROOTS=/home/aigc/ChatGPT
+NFS/外部大盘的完整正例（本机把公共 NFS `/nas2` 经 file 域名浏览）：宿主先把 `/nas2` 正常挂载好，
+compose 里把它原样 bind 进内容根下的子目录：
+
+```yaml
+# docker-compose.yml（volumes）
+      - /data:/files                # 内容根（宿主 /data）
+      - /nas2/:/files/nas2data:ro   # 目标树实体 bind 进内容根下的子目录
 ```
 
-三条语义边界：
+两个要点：容器内的 `/files/nas2data` 必须是**真实目录**（bind 的落点天然是实体，不能是软链接），
+所以内容根 `/data` 里**不要**预先放 `nas2 -> /nas2/` 这类链接 —— 它既会被 docker 解析成宿主路径去挂，
+内容出口也拒绝跟随任何链接；放行的目录只以实体 bind 的形式出现在 `/files` 下。
 
-- **只放宽「这一级的落点」**：某一级 realpath 落在内容根外、但落在可信根内 → 这一级放行，
-  后续各级照旧校验。可信根内部再埋一条指向 `/etc` 的链接仍然 400 —— 它不是一棵免检子树。
-- **必须写容器内可见的路径**：realpath 在容器命名空间里解析，填宿主路径（把上面的值写成
-  `/data/ChatGPT`）会解析不出来，整项被丢弃、等于没配（fail-closed，不会因此放行）。通常就是
-  那条 `:ro` 挂载在容器内的目标位置。
-- **静态校验不过就丢弃该项并 warn**（`docker logs` 里 `AUTHZ_APP_TRUSTED_ROOTS entry ignored`）：
-  非绝对路径、规范化后为 `/`、含 `.`/`..` 段、含空白或控制字符、超过 16 条，都不进白名单。
-  一条拼错的配置绝不会把防护面悄悄扩大。
-
-配了可信根还要保证值真的进得到进程：本仓库 `conf/nginx.conf.template` 已带
-`env AUTHZ_APP_TRUSTED_ROOTS;`，若部署用显式 `environment:` 清单（而不是 `env_file: .env` 透传），
-这个键要一起加进清单；改过 `.env` 需要 `docker compose up -d --force-recreate` 才注入。
-排障按三种症状分：`docker exec <容器> printenv AUTHZ_APP_TRUSTED_ROOTS` 看值有没有进来（没进来则
-全程无日志、出根链接继续 400）；容器日志（`docker logs`，镜像里 `error.log` 是指向 `/dev/stderr` 的软链）里的 `entry ignored` 是静态校验丢弃了拼错的项；
-`entry unusable in this container` 是配对了但**容器内解析不出来**（填成宿主路径、或那条卷没挂上），
-该条目被丢弃并计入负缓存，每个 worker 只 warn 一次。
+改过 `.env` 或 compose 后 `docker compose up -d --force-recreate` 才生效，再用 file 域名直取该子目录下
+的一个真实文件核验应回 200（目录本身无 autoindex，回 403 属正常）。若同名路径上旧的链接还留着，
+第一次请求就会在链接那一级 400，按消息里的段名把链接删掉即可。
 
 注意 `AUTHZ_FILES_ROOT` **改不动内容出口的落盘目录**：`/_authz/files/` 的 `alias /files/` 写死在
 `conf/server.conf.template` 里，容器内恒为 `/files`，要换目录只能换挂载点（`${FILES_DIR}:/files`）。
@@ -365,7 +361,6 @@ curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
 curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
   "http://127.0.0.1:${HTTP_PORT}/definitely-missing.mp4"              # 404：不存在不回落到页面
 docker exec authz grep -c authz_app_content /usr/local/openresty/nginx/conf/server.conf  # >=1：模板已渲染
-docker exec authz printenv AUTHZ_APP_TRUSTED_ROOTS   # 配了可信根时确认值已注入；空=关闭，此时出根链接 400（见 3.6）
 ```
 
 临时维护提示：若必须短暂开放 HTTP 或限制管理端来源，用防火墙白名单（例如 `ufw allow from 203.0.113.5 to any port 6080` 或 `iptables -A INPUT -p tcp --dport 6080 -s 203.0.113.5 -j ACCEPT`），完成后恢复默认；不要在生产长期保留明文入口。
@@ -420,12 +415,40 @@ AUTHZ_SESSION_REDIS_PREFIX=authz    # 多套集群共用同一 Redis 时用于�
 # 共享记录 HMAC-SHA256 签名密钥（>=32 字符，所有共享实例必须一致）。
 # 生成: openssl rand -hex 32
 AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
+# 可选：Redis 网络故障时的容错降级、降级宽限期与待写队列重放周期
+AUTHZ_SESSION_SHARED_FALLBACK=true          # false = 严格 fail-closed（Redis 不可用即清 Cookie、writer 登录 503）
+AUTHZ_SESSION_RETRY_INTERVAL_MS=15000       # 待写队列重放定时器周期（毫秒，钳制 1000..600000）
+AUTHZ_SESSION_FALLBACK_GRACE=14400          # 降级宽限期（秒，钳 60..604800）：也是跨实例撤销生效的最大延迟
 ```
 
 语义：
 
 - 会话命中后仍会用本地 `users` / `remote_users` 校验身份，本地不存在或已禁用即仅清除本机登录；
-- Redis 中会话不存在或 Redis 不可达时立即失败关闭，不从 SQLite 恢复旧 token；
+- Redis 网络故障（连接失败/读写超时/拒绝连接）**不再拖垮网关**：熔断器（跨 worker，状态放在
+  `ngx.shared.authz_shared_session` 共享字典）进入 OPEN 窗口，初始 5s、按连续失败次数指数退避、上限 60s；
+  OPEN 期间完全不尝试连 Redis（零网络等待，不再像以前那样每个请求串行等 connect/read 超时），
+  窗口到期后半开放行一次探测。AUTH 失败与 SELECT db 失败归类为**配置错误**，不参与降级读——
+  配置错误必须暴露，不能被静默绕过；
+- **降级读**（`AUTHZ_SESSION_SHARED_FALLBACK=true`，默认）：熔断 OPEN 且属网络故障时，会话校验改读本机
+  SQLite `sessions` 镜像（每次成功从 Redis 读到共享会话时按节流窗口 upsert，本机签发与其他实例签发
+  都有镜像），已登录用户继续可用；判据是该行的 `verified_at`（最近一次经 Redis 确认存在的时刻）落在
+  grace（降级宽限期，`AUTHZ_SESSION_FALLBACK_GRACE`，默认 4 小时）之内；Redis 一直不恢复则自动停止
+  降级、退回登录页；
+- **待写重试队列**：Redis 不可达期间，本该落到 Redis 的动作按发生顺序入 SQLite 表 `session_pending`
+  （`op=save/delete/delete_all`，字段含 `token`/`username`/`source`/`csrf`/`expires_at`/`attempts`/`created_at`）。
+  撤销类（`delete`/`delete_all`）永不丢弃；`save` 类有行数上限，超限则登录返回 503——宁可显式失败，
+  也不静默丢共享会话。重放定时器 `lualib/resty/authz/shared_session_sync.lua` 在 `init_worker`
+  里启动：每个 worker 都挂看守定时器，owner 锁保证同一时刻只有一个 worker 重放，owner 崩溃后
+  锁一过期即由其他 worker 接管（不等 reload）。默认每 15s 一轮按 id 升序重放（`save`→SETEX
+  签名信封、`delete`→DEL、`delete_all`→SCAN 后按身份删），成功后在同一事务里批量删除已重放的
+  行；碰到第一条失败就累加 `attempts` 并停止本轮以保持顺序（撤销只会晚到，不会乱序反超）。
+  熔断 OPEN 时本轮直接返回，不做网络尝试；
+- reader（只读）实例在 Redis 故障期间**仍拒绝创建新登录**，保持单 writer 不变量；writer 实例登录可用，
+  会话先在本机生效、Redis 恢复后自动补齐到 Redis；
+- **已知限制**：Redis 故障期间 A 实例上的撤销（登出、改密、删用户）在 B 实例上不会即时生效，
+  最长受 grace（降级宽限期，`AUTHZ_SESSION_FALLBACK_GRACE`，默认 4 小时）约束；本地禁用用户/角色
+  仍立即生效（共享会话命中后仍查本地 `users` / `remote_users`）。
+  对撤销时效要求更高的部署应设 `AUTHZ_SESSION_SHARED_FALLBACK=false`，恢复严格 fail-closed；
 - 登录、全局登出、密码重置和用户禁用必须进入 `read-write` 主实例；reader 的 Redis ACL 只授予 `GET`/`PING`；
 - 共享记录以 `<JSON>.<HMAC-SHA256 hex>` 信封存储，HMAC 覆盖 `token + JSON`；
   reader 对未签名、伪造或篡改的记录一律按未登录处理。因此即使共享 Redis
@@ -433,6 +456,39 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
   签名密钥泄漏等同于会话密钥泄漏，与其他 secret 同等保管；
 - 网络白名单和传输保护（TLS 或内网）完成前保持 `AUTHZ_SESSION_SHARED=false`；
   有 ACL 时仍应配置 reader 只读账号，HMAC 是叠加防线而非 ACL 的替代。
+
+Redis 健康状况不用猜：共享模式启用时 `GET /_authz/api/session` 的响应带 `shared_session` 段，给出
+`state`（`ok`/`down`/`config`，另有 `unknown` = 共享字典缺失）、`down_remaining_ms`、`failures`、`last_error`、
+`fallback` 与 `degraded`（当前是否正在降级服务），字段含义见 `docs/core-api.md` §6.5。
+
+**升级既有实例时必须同步模板**：本能力依赖 `conf/nginx.conf.template` 里新增的
+`lua_shared_dict authz_shared_session 1m`（跨 worker 的熔断状态与降级 grace 键）和
+`init_worker_by_lua_block` 里的 `shared_session_sync.start()`（待写队列重放定时器）。
+生产部署把宿主机 `conf/` 目录挂到 `/etc/openresty/templates`（本机 `NGINX_TEMPLATE_DIR=/data/app/data/authz/conf`，
+241.t 同理），**只改仓库模板或换镜像都不会更新它**，必须把两个 template 一并同步过去再重启容器：
+
+```bash
+# 本机（宿主机模板目录 /data/app/data/authz/conf）
+# 注意 /data/app/data 是 root:root 0755，非 root 用户穿不过去，cp 要带 sudo
+sudo cp conf/nginx.conf.template conf/server.conf.template /data/app/data/authz/conf/
+docker restart authz
+
+# 241.t 测试机（部署目录 /data/app/authz-test/）
+rsync -a conf/ 241.t:/data/app/authz-test/conf/
+ssh 241.t 'cd /data/app/authz-test && docker restart authz-test'
+```
+
+同一台机器还要顺带核对 `docker-compose.yml`：241.t 那份是仓库根 compose 的手工副本且已漂移（缺
+`AUTHZ_APP_*` 五行），只同步 `conf/` 不会把新变量带进容器，原因见 3.5 节末尾的提示。
+
+两个模板都要同步：缺 `lua_shared_dict` 则熔断状态与 grace 键无处存放，缺 `start()` 则待写队列
+永远不会被重放（Redis 恢复后 pending 一直堆在库里）。模板改动只需 `docker restart`；同时改了
+`.env` 才需要 `docker compose up -d --force-recreate`。验证两处都已渲染进配置：
+
+```bash
+docker exec authz grep -c authz_shared_session /usr/local/openresty/nginx/conf/nginx.conf   # >=1
+docker exec authz grep -c shared_session_sync /usr/local/openresty/nginx/conf/nginx.conf    # >=1
+```
 
 ## 8. 故障排查速查
 
@@ -442,6 +498,7 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 | 登录页 200 但代理 403 | 正常：代理目标需要登录 + 授权；先登录，再在管理界面配置策略 |
 | 代理 404（绑定域名） | 绑定未启用或域名拼写不一致；管理界面 → 授权管理 → 域名绑定 |
 | 子域之间登录态丢失 | 未设置 `AUTHZ_COOKIE_DOMAIN`（注意以 `.` 开头的父域），或需要启用 7.1 共享会话 |
+| 共享会话模式下集体掉登录 / writer 登录 503 | 先看 `GET /_authz/api/session` 的 `shared_session.state`：`down` = Redis 网络故障（默认配置下已自动降级，不该掉登录；若仍掉登录说明降级被 `AUTHZ_SESSION_SHARED_FALLBACK=false` 关闭，或该会话已超出 grace——Redis 挂了太久，默认 4 小时），`config` = AUTH/SELECT db 失败（密码、ACL 或 `AUTHZ_SESSION_REDIS_DB` 配错，需人工修），`unknown` = 共享字典缺失（模板未同步，见 7.1）；`pending.total` 非 0 表示有待写动作等重放 |
 | Cookie 不生效 / 反复跳登录 | 外层是 HTTPS 但 `AUTHZ_COOKIE_SECURE=false`，或反代未透传 `X-Forwarded-Proto` |
 | 上游是 HTTPS 自签证书 | 在对应域名绑定的高级代理中关闭"验证 SSL 证书" |
 | 绑定的"改写请求"没生效 | 三种操作按 remove → append → set 顺序生效。Host、Cookie、Origin、X-Forwarded-\*、X-Authz-User/Source/Identity 等托管头可以改写（网关把改写值写进 proxy_set_header 引用的变量，上游看到的就是最终值）；替换与追加同名互斥（保存 422），删除+追加=先删后加。追加 Cookie 用 "; " 并入透传值（网关自身的 authz_session 永远先被剥离），追加普通头产生第二行请求头。分帧/hop-by-hop 头与网关凭据头（X-Authz-Key/X-API-Key/X-Role-Key）保存即 422 |
@@ -453,7 +510,7 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 | 管理界面报 `map is not a function` | 老版本缺陷（已在当前镜像修复）：空数据表被编码成 JSON 对象 `{}`；升级到最新镜像即可 |
 | `docker cp` 覆盖 HTML/JS 后浏览器仍是旧页面 | 镜像里每个文本资产有预压缩 `.br` 旁文件，`brotli_static on` 时它优先于明文文件被下发（`docker cp` 不会同步它）。同名 `.br`（及 `.gz`）一并删除或覆盖即可；正式修复始终走镜像重建 |
 | `file-<域>/<路径>` 返回 404 但文件确实存在 | 内容根没挂：compose 里缺 `${FILES_DIR}:/files` 这行（见 3.2）。页面能开不代表内容根已挂，这两件事独立 |
-| `file-<域>/<路径>` 返回 400「符号链接指向内容根之外」 | 路径上有指向内容根外的绝对符号链接，直取通道逐级 realpath 后拒绝（3.6 有体检命令）。首选改用 volume 把目标树挂到根内子目录；这条链接是宿主既有约定、动不了时，用 `AUTHZ_APP_TRUSTED_ROOTS` 把它的容器内落点列入可信根（3.6 末尾），配错或值没注入也是 400 |
+| `file-<域>/<路径>` 返回 400「路径含符号链接，内容出口只信任实体目录: <段>」 | 路径上有符号链接：内容出口不跟随任何链接（出根、入根、指向 `/etc`、指向 `/data`、指向挂载点、根内相对链接都算），3.6 有体检命令。解法=把该链接的目标树作为**实体 bind** 挂进 `/files` 下的子目录，并去掉链接本身；报「无法解析真实路径」是同一条解法（该级是断链或解析不出来） |
 | `file-<域>/<路径>` 返回 400「路径非法：禁止 .. 段与控制字符」 | URL 里带了 `..` 段或 `%2e%2e`/`%2f`/`%5c`/`%00` 编码形态（含双层编码）。这是刻意的 fail-closed，客户端拼 URL 时要做规范化，别把用户输入直接拼进路径 |
 | `s3-<域>/<key>` 返回 503 | 对象存储页「配置」里那套（或 `?cfg=` 选中的那套）没有非空 `default_bucket`。表里没启用行且 env 也没配时消息是「对象存储未配置」，配了但没设默认桶是另一条消息 |
 | 内容域名所有请求都 302 到登录页 | 该身份没有命中任何策略。匿名主体是 `role:guest`，要在管理界面给 `/100<路径>` 或 `/101<key>` 写 Casbin 策略才会放行 |
@@ -486,6 +543,14 @@ docker build --progress=plain -t authz:latest .
 ```
 
 - OpenResty 全家桶编译层都有缓存，日常只改代码时构建只需几秒；
+- **不要随手加 `--build-arg`（如 `RESTY_J`）**。该 ARG 参与 openresty-builder 那条巨型 `RUN` 的
+  命令行，任何与上次不同的取值都会让这一层缓存失效，触发 PCRE2 / OpenSSL / OpenResty 全量重编
+  （本机实测十几分钟），且重编可能因环境差异失败——报的是 `openssl/macros.h` 里
+  `OPENSSL_API_COMPAT expresses an impossible API compatibility level` 加一大片 `Error 1`，看起来
+  像代码坏了，其实只是缓存没命中后的重编失败。CI 不传任何 build-arg，本地要复现就用默认构建；
+  确实要调并行度，先确认这一层缓存已经命中再改；
+- 构建耗时较长时用 `setsid nohup docker build ... > /data/tmp/build.log 2>&1 &` 脱离会话，
+  避免会话被打断连带杀掉构建；
 - 代码变更打进镜像后需 `docker compose up -d --force-recreate`（或 restart）生效；
   若用开发挂载（附录 B）则改代码只需 restart，无需重建镜像；
 - 验证镜像内容：`docker exec <c> grep -c <新代码标记> /usr/local/openresty/site/lualib/...`。
@@ -534,31 +599,11 @@ AUTHZ_STORE_DEFAULT_EXPIRY_HOURS=24               # 保存区默认保留小时�
 # AUTHZ_S3_ENDPOINT=                              # http(s)://<host>[:<port>]，path-style、不能带路径；留空 = 回落项不存在（表里也没行时整体功能关闭）
 # AUTHZ_S3_REGION=us-east-1                       # SigV4 region
 # AUTHZ_S3_ACCESS_KEY_ID=                         # endpoint 已设时必填
-| `file-<域>/<路径>` 返回 404 但文件确实存在 | 内容根没挂：compose 里缺 `${FILES_DIR}:/files` 这行（见 3.2）。页面能开不代表内容根已挂，这两件事独立 |
-| `file-<域>/<路径>` 返回 400「符号链接指向内容根之外」 | 路径上有指向内容根外的绝对符号链接，直取通道逐级 realpath 后拒绝（3.6 末尾有体检命令）。改用 volume 把目标树挂到根内子目录，而不是在根内做绝对链接 |
-| `file-<域>/<路径>` 返回 400「路径非法：禁止 .. 段与控制字符」 | URL 里带了 `..` 段或 `%2e%2e`/`%2f`/`%5c`/`%00` 编码形态（含双层编码）。这是刻意的 fail-closed，客户端拼 URL 时要做规范化，别把用户输入直接拼进路径 |
-| `s3-<域>/<key>` 返回 503 | 对象存储页「配置」里那套（或 `?cfg=` 选中的那套）没有非空 `default_bucket`。表里没启用行且 env 也没配时消息是「对象存储未配置」，配了但没设默认桶是另一条消息 |
-| 内容域名所有请求都 302 到登录页 | 该身份没有命中任何策略。匿名主体是 `role:guest`，要在管理界面给 `/100<路径>` 或 `/101<key>` 写 Casbin 策略才会放行 |
-| 内容域名取到了字节但状态码是 404/403，不是 405 | 方法判定顺序是 **Casbin 先、405 后**：策略没授该方法时先被拒成 403（匿名 302）；只有 Casbin 放行了该方法，非 GET/HEAD 才回 405 |
 # AUTHZ_S3_SECRET_ACCESS_KEY=                     # endpoint 已设时必填（表里的那一行是明文入库，见含密告警）
 # AUTHZ_S3_ALLOW_HTTP=false                       # endpoint 是明文 http 时必须显式 true，否则启动即报错
 # AUTHZ_S3_TMP_DIR=/data/s3tmp                    # 上传中转暂存目录（容器内，与 /data 同卷最省 IO）
 # AUTHZ_S3_CONNECT_TIMEOUT_MS=2000                # 以下为实例级调优，表里的所有配置共用同一份
 # AUTHZ_S3_READ_TIMEOUT_MS=30000
-**先问一句：这次改动 CI 是不是已经在构建了？** push 到 `main` 会自动触发
-`.github/workflows/build-and-push.yml`，产出并推送 `ghcr.io/yorkane/authz:latest`。验证通过的
-改动，生产直接 `docker pull` 拿那个产物即可——既省掉本机几十分钟的全量编译，也保证生产跑的
-就是 CI 验证过的那份。**只在本机调试、还没 push 时才需要下面的本地构建。**
-
-```bash
-# 首选：拿 CI 产物（构建成功后 ghcr 上就是最新 main）
-docker pull ghcr.io/yorkane/authz:latest
-docker run --rm --entrypoint sh ghcr.io/yorkane/authz:latest -c \
-  'grep -c <新代码标记> /usr/local/openresty/site/lualib/resty/authz/...'  # 确认内容
-```
-
-确实要本地构建时：
-
 # AUTHZ_S3_SEND_TIMEOUT_MS=30000
 # AUTHZ_S3_KEEPALIVE_MS=30000
 # AUTHZ_S3_WRITABLE_PATHS=                        # 回落项的可写范围白名单：留空 = 默认 share/<本机 LAN IP>；"/" 或 "*" = 全部可写
@@ -568,14 +613,6 @@ docker run --rm --entrypoint sh ghcr.io/yorkane/authz:latest -c \
 
 # ══════════════ 会话 ══════════════
 AUTHZ_SESSION_TTL=604800                          # 会话有效期秒数，默认 7 天；管理界面修改密码后该用户全部会话失效（管理端需输入两次新密码确认）
-- **不要随手加 `--build-arg`（如 `RESTY_J`）**。该 ARG 参与 openresty-builder 那条巨型 `RUN` 的
-  命令行，任何与上次不同的取值都会让这一层缓存失效，触发 PCRE2 / OpenSSL / OpenResty 全量重编
-  （本机实测十几分钟），且重编可能因环境差异失败——报的是 `openssl/macros.h` 里
-  `OPENSSL_API_COMPAT expresses an impossible API compatibility level` 加一大片 `Error 1`，看起来
-  像代码坏了，其实只是缓存没命中后的重编失败。CI 不传任何 build-arg，本地要复现就用默认构建；
-  确实要调并行度，先确认这一层缓存已经命中再改；
-- 构建耗时较长时用 `setsid nohup docker build ... > /data/tmp/build.log 2>&1 &` 脱离会话，
-  避免会话被打断连带杀掉构建；
 AUTHZ_LOGIN_ATTEMPTS=5                            # 同一账户（账户名+IP）连续失败多少次后锁定（>=1）
 AUTHZ_LOGIN_WINDOW=1800                           # 失败计数窗口 = 锁定时长（秒，>=60，默认 1800=30 分钟）
 AUTHZ_LOGIN_FAIL_DELAY_MS=1000                    # 登录失败后延迟多少毫秒再返回（0-10000，防暴力枚举计时）；按「账户名+IP」锁定，不影响同 IP 其他账户
@@ -589,6 +626,9 @@ AUTHZ_SESSION_REDIS_PASSWORD=                     # 对应 ACL 用户密码
 AUTHZ_SESSION_REDIS_DB=0                          # Redis 逻辑库（0-15）
 AUTHZ_SESSION_REDIS_PREFIX=authz                  # 键前缀，多套集群共用时隔离，如 authz-cluster1；键格式 <prefix>:session:<token>，TTL 与会话有效期一致。
 AUTHZ_SESSION_SIGNING_KEY=                        # 共享记录 HMAC-SHA256 签名密钥（>=32 字符，所有共享实例必须一致）；未签名/签名不符的记录一律拒绝。生成: openssl rand -hex 32
+AUTHZ_SESSION_SHARED_FALLBACK=true                # Redis 网络故障时容错降级：熔断 OPEN 期间会话校验改读本机 SQLite 镜像（该会话在 grace 内经 Redis 确认过才承认），本该写 Redis 的动作进 session_pending 待写队列，恢复后自动重放。false = 严格 fail-closed（清 Cookie、writer 登录 503）；代价是故障期间其他实例的撤销最长一个 grace 后才生效。AUTH/SELECT 失败属配置错误，不降级。
+AUTHZ_SESSION_FALLBACK_GRACE=14400                # 降级宽限期（秒，钳 60..604800）：会话「最近一次经 Redis 确认存在」必须落在窗口内才允许降级服务，也是跨实例撤销延迟的上限。调大 = Redis 长时间不可用更不易掉登录但撤销更晚生效。
+AUTHZ_SESSION_RETRY_INTERVAL_MS=15000              # session_pending 重放定时器周期（毫秒，钳制 1000..600000），owner 锁保证同一时刻只有一条重放链；调小可缩短恢复后的补齐延迟。需重建容器生效。
 
 # ══════════════ 响应改写缓冲（可选）══════════════
 AUTHZ_REWRITE_BUFFER_MB=64                        # 正文改写的 worker 级缓冲预算（MB）。单响应上限固定 1MB 并按此整块预留；预算耗尽的新响应跳过改写、原样流式透传（响应头 X-Authz-Rewrite: skipped=memory）。仅影响 body/rewrites，状态码与响应头改写不占预算。
@@ -696,9 +736,9 @@ curl -skS -o /dev/null -w "%{http_code}" "https://127.0.0.1:${HTTPS_PORT}/_authz
 curl -skS -o /dev/null -w "%{http_code}" "https://127.0.0.1:${HTTPS_PORT}/_authz/apps/"               # 302
 curl -skS -o /dev/null -w "%{http_code}" "https://127.0.0.1:${HTTPS_PORT}/_authz/login"         # 200
 docker exec authz test -s /data/authz/authz.db && echo db-ok                          # db-ok
-```
 # 保留前缀域名默认开启，这三项要与上面的通用检查分开看
 KEY=$(docker exec authz printenv AUTHZ_API_KEY)                                      # 有预置 Key 才跑
 curl -sS -o /dev/null -w "%{http_code}\n" -H 'Host: file-check.example.com' -H "x-api-key: $KEY" "http://127.0.0.1:${HTTP_PORT}/"                    # 200 页面
 curl -sS -o /dev/null -w "%{http_code}\n" -H 'Host: file-check.example.com' -H "x-api-key: $KEY" "http://127.0.0.1:${HTTP_PORT}/no-such-file"             # 404 不回落
 docker exec authz grep -c authz_app_content /usr/local/openresty/nginx/conf/server.conf                                                          # >=1 模板已渲染
+```

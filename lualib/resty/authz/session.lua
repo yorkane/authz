@@ -6,6 +6,8 @@ local remote_users = require "resty.authz.repository.remote_users"
 local sessions = require "resty.authz.repository.sessions"
 local users = require "resty.authz.repository.users"
 local util = require "resty.authz.util"
+local store = require "resty.authz.shared_session_store"
+local pending = require "resty.authz.repository.session_pending"
 
 local _M = {}
 _M.cookie_name = "authz_session"
@@ -14,222 +16,137 @@ _M.secure = false
 _M.cookie_domain = ""
 _M.cookie_domains = {}
 
--- 共享会话 (Redis): 一个明确指定的 writer 创建和撤销共享会话, 其余
--- 实例只读取共享身份。
+-- 共享会话 (Redis) 的容错策略（事故驱动的重写）：
+--   * Redis IO 故障 -> 熔断器 OPEN（跨 worker，见 shared_session_store），窗口内
+--     不再产生任何网络等待；指数退避 5s->60s，窗口到期由单个 worker 半开探测。
+--   * 已登录用户不因 Redis 挂掉被踢：只要该会话在 grace（默认 4 小时，见
+--     AUTHZ_SESSION_FALLBACK_GRACE）内经 Redis
+--     确认过存在，就允许改读本机 SQLite 镜像继续服务（AUTHZ_SESSION_SHARED_FALLBACK
+--     =false 可退回严格 fail-closed）。
+--   * Redis 挂掉期间欠下的写（登录签发 / 撤销）按发生顺序进 SQLite session_pending
+--     队列，由 shared_session_sync 的定时器重放（owner 锁保证单条重放链）。
+--     撤销类永不丢弃；
+--     签发类超上限则登录显式失败（宁可 503 也不静默造出不共享的会话）。
+--   * AUTH / SELECT db 失败算「配置故障」，一律不降级：配置错误必须暴露。
 -- Casbin 策略、绑定与角色仍在各实例本地管理; 读取共享会话时仍会用本地
 -- users / remote_users 校验身份, 本地不存在或已禁用即清除登录信息。
-_M.redis = {
-    configured = false,
-    host = "",
-    port = 6379,
-    db = 0,
-    mode = "read-only",
-    username = "",
-    password = "",
-    prefix = "authz",
-    -- 共享记录 HMAC 签名密钥：公共 Redis 无法用 ACL 限制写入方时，
-    -- 未签名/签名不符的记录一律拒绝，防止其他写方伪造会话。
-    signing_key = "",
-    connect_timeout = 2000,
-    read_timeout = 2000,
-}
-_M.shared_enabled = false
+_M.redis = store            -- 兼容旧字段访问：config 写 store.host/port/mode/...
+_M.max_pending_saves = 2000 -- 待写队列里 save 类上限（撤销类不设限）
 
-local function redis_log(level, ...)
-    ngx.log(level, "authz redis session: ", ...)
+--- 该 token 是否有尚未重放的签发记录（Redis 刚恢复时不能把欠写的会话当失效删掉）。
+function _M.has_pending_save(token)
+    if not store.shared_enabled then return false end
+    return pending.has_save(token)
 end
 
-local function redis_acquire()
-    local redis = require "resty.redis"
-    local red = redis:new()
-    red:set_timeouts(_M.redis.connect_timeout, _M.redis.read_timeout, _M.redis.read_timeout)
-    local ok, err = red:connect(_M.redis.host, _M.redis.port)
+--- 欠写计数快照（给 /_authz/api/session 与运维看）。
+function _M.pending_counts()
+    if not store.shared_enabled then return { total = 0 } end
+    local out = { total = 0 }
+    for _, row in ipairs(sessions.pending_group_counts() or {}) do
+        out[tostring(row.op)] = tonumber(row.n) or 0
+        out.total = out.total + (tonumber(row.n) or 0)
+    end
+    return out
+end
+
+local function queue_write(op, token, record)
+    if op == "save" and pending.count_save() >= _M.max_pending_saves then
+        ngx.log(ngx.ERR, "authz shared session: pending queue full, refusing login")
+        return false, "shared_session_queue_full"
+    end
+    local ok, err = pending.insert(op, token,
+        record and record.username or "", record and record.source or "",
+        record and record.csrf or "", record and record.expires_at or 0, os.time())
     if not ok then
-        return nil, "connect failed: " .. tostring(err)
-    end
-    if _M.redis.username ~= "" or _M.redis.password ~= "" then
-        local auth_ok, auth_err
-        if _M.redis.username ~= "" then
-            auth_ok, auth_err = red:auth(_M.redis.username, _M.redis.password)
-        else
-            auth_ok, auth_err = red:auth(_M.redis.password)
-        end
-        if not auth_ok then
-            red:close()
-            return nil, "auth failed: " .. tostring(auth_err)
-        end
-    end
-    if _M.redis.db ~= 0 then
-        local sel_ok, sel_err = red:select(_M.redis.db)
-        if not sel_ok then
-            red:close()
-            return nil, "select db failed: " .. tostring(sel_err)
-        end
-    end
-    return red
-end
-
-local function redis_release(red)
-    local ok, err = red:set_keepalive(10000, 32)
-    if not ok then redis_log(ngx.DEBUG, "keepalive failed: ", tostring(err)) end
-end
-
-local function redis_key(token)
-    return _M.redis.prefix .. ":session:" .. token
-end
-
--- 签名信封：<json>.<hex(hmac-sha256(signing_key, token .. json))>。
--- 签名覆盖 token，跨键搬运记录同样失效。
-local function pack_shared(token, payload)
-    local mac, err = util.hmac_hex(_M.redis.signing_key, token .. payload)
-    if not mac then return nil, err end
-    return payload .. "." .. mac
-end
-
-local function unpack_shared(token, raw)
-    -- hex HMAC-SHA256 固定 64 字符，分隔点在倒数第 65 位。
-    if #raw <= 65 or raw:byte(#raw - 64) ~= string.byte(".") then return nil end
-    local payload = raw:sub(1, #raw - 65)
-    local mac = raw:sub(#raw - 63)
-    local expected, err = util.hmac_hex(_M.redis.signing_key, token .. payload)
-    if not expected then
-        redis_log(ngx.ERR, "shared session signing unavailable: ", tostring(err))
-        return nil
-    end
-    return util.constant_time_equals(mac, expected) and payload or nil
-end
-
-local function redis_save(token, record)
-    if not _M.shared_enabled then return true end
-    if _M.redis.mode ~= "read-write" then return false, "shared_session_read_only" end
-    local red, err = redis_acquire()
-    if not red then
-        redis_log(ngx.ERR, err)
-        return false, "shared_session_unavailable"
-    end
-    local cjson = require "cjson.safe"
-    -- Redis 只共享用户 ID 与来源; 角色、策略不共享, 由各实例本地管理。
-    -- csrf / expires_at 是会话机制字段, 不属于权限数据。
-    local envelope, pack_err = pack_shared(token, cjson.encode({
-        username = record.username,
-        source = record.source,
-        csrf = record.csrf,
-        expires_at = record.expires_at,
-    }))
-    if not envelope then
-        redis_release(red)
-        redis_log(ngx.ERR, "shared session signing failed: ", tostring(pack_err))
-        return false, "shared_session_unavailable"
-    end
-    local ok, set_err = red:setex(redis_key(token), _M.ttl, envelope)
-    redis_release(red)
-    if not ok then
-        redis_log(ngx.ERR, "setex failed: ", tostring(set_err))
+        ngx.log(ngx.ERR, "authz shared session: cannot queue ", op, ": ", tostring(err))
         return false, "shared_session_unavailable"
     end
     return true
 end
 
--- 返回 record 或 (nil, "redis_unreachable") / (nil, "not_found")
+-- 只有 IO 类故障（含熔断中）才允许降级服务；config 类错误必须显式失败。
+local function degradable(err)
+    local msg = tostring(err or "")
+    return msg == "breaker_open" or msg:find("^io:") ~= nil
+end
+
+local function redis_save(token, record)
+    if not store.shared_enabled then return true end
+    if store.mode ~= "read-write" then return false, "shared_session_read_only" end
+    record.ttl = _M.ttl
+    local ok, err = store.save(token, record)
+    if ok then
+        -- 签发是一次性动作，镜像**无条件**写：verified_at 同时被写上，本机刚登录
+        -- 的会话因此立刻具备降级读资格（否则 Redis 抖动时"登录成功却立刻回登录页"）。
+        -- 节流只用在读取路径（redis_load 每请求都跑），不要照搬到这里。
+        sessions.upsert(token, record.username, record.source, record.csrf, record.expires_at)
+        store.mark_verified(token)
+        return true
+    end
+    if not degradable(err) then
+        ngx.log(ngx.ERR, "authz shared session: save refused (", tostring(err), ")")
+        return false, "shared_session_unavailable"
+    end
+    local queued, qerr = queue_write("save", token, record)
+    if not queued then return false, qerr end
+    -- 欠写期间会话仍在本机 SQLite 生效，避免 Redis 抖动把登录做成 503。
+    sessions.upsert(token, record.username, record.source, record.csrf, record.expires_at)
+    return true
+end
+
+-- 返回 record 或 (nil, "redis_unreachable"|"not_found", detail)
 local function redis_load(token)
-    if not _M.shared_enabled then return nil, "not_found" end
-    local red, err = redis_acquire()
-    if not red then
-        redis_log(ngx.WARN, err)
-        return nil, "redis_unreachable"
+    if not store.shared_enabled then return nil, "not_found" end
+    local record, why, detail = store.load(token)
+    if record then
+        -- reader 也维护本机镜像：Redis 挂掉时才有东西可降级读。
+        -- mark_verified 返回 true 才回写（每个会话每个节流周期最多一次，
+        -- 避免已登录请求变成每请求一次写库）。
+        if store.mark_verified(token) then
+            sessions.upsert(token, record.username, record.source, record.csrf,
+                record.expires_at)
+        end
+        return record, "ok"
     end
-    local raw, get_err = red:get(redis_key(token))
-    if get_err then
-        redis_release(red)
-        redis_log(ngx.WARN, "get failed: ", tostring(get_err))
-        return nil, "redis_unreachable"
-    end
-    redis_release(red)
-    if type(raw) ~= "string" or raw == "" then
-        return nil, "not_found"
-    end
-    -- 公共 Redis 不是可信边界：未签名、伪造或被篡改的记录一律拒绝。
-    local payload = unpack_shared(token, raw)
-    if not payload then
-        redis_log(ngx.WARN, "rejected unsigned or forged shared session record")
-        return nil, "not_found"
-    end
-    local cjson = require "cjson.safe"
-    local record = cjson.decode(payload)
-    if type(record) ~= "table" then return nil, "not_found" end
-    return {
-        username = tostring(record.username or ""),
-        source = tostring(record.source or "local"),
-        csrf = tostring(record.csrf or ""),
-        expires_at = tonumber(record.expires_at) or 0,
-    }
+    return nil, why, detail
 end
 
 local function redis_delete(token)
-    if not _M.shared_enabled or _M.redis.mode ~= "read-write" then return end
-    local red, err = redis_acquire()
-    if not red then
-        redis_log(ngx.WARN, err)
-        return
+    if not store.shared_enabled or store.mode ~= "read-write" then return end
+    local ok, err = store.delete(token)
+    if not ok and degradable(err) then
+        queue_write("delete", token, nil)
+    elseif not ok then
+        ngx.log(ngx.WARN, "authz shared session: delete failed (", tostring(err), ")")
     end
-    local ok, del_err = red:del(redis_key(token))
-    redis_release(red)
-    if not ok then redis_log(ngx.WARN, "del failed: ", tostring(del_err)) end
 end
 
 local function redis_delete_many(tokens)
-    if not _M.shared_enabled or _M.redis.mode ~= "read-write" or #tokens == 0 then return end
-    local red, err = redis_acquire()
-    if not red then
-        redis_log(ngx.WARN, err)
+    if not store.shared_enabled or store.mode ~= "read-write" or not tokens or #tokens == 0 then
         return
     end
-    local keys = {}
-    for _, token in ipairs(tokens) do keys[#keys + 1] = redis_key(token) end
-    local ok, del_err = red:del(unpack(keys))
-    redis_release(red)
-    if not ok then redis_log(ngx.WARN, "del failed: ", tostring(del_err)) end
+    local ok, err = store.delete_many(tokens)
+    if ok then return end
+    if degradable(err) then
+        for _, token in ipairs(tokens) do queue_write("delete", token, nil) end
+    else
+        ngx.log(ngx.WARN, "authz shared session: delete many failed (", tostring(err), ")")
+    end
 end
 
 -- 共享模式下撤销某身份的全部会话: 扫描 Redis 中所有会话键,
 -- 命中相同 username + source 的一并删除 (覆盖其他实例创建的会话)。
+-- 撤销是安全动作：Redis 不可达时入队等重放，绝不静默跳过。
 local function redis_delete_all_for(username, source)
-    if not _M.shared_enabled or _M.redis.mode ~= "read-write" then return end
-    local red, err = redis_acquire()
-    if not red then
-        redis_log(ngx.WARN, err)
-        return
+    if not store.shared_enabled or store.mode ~= "read-write" then return end
+    local ok, err = store.delete_all_for(username, source)
+    if ok then return end
+    if degradable(err) then
+        queue_write("delete_all", nil, { username = username, source = source })
+    else
+        ngx.log(ngx.WARN, "authz shared session: delete all failed (", tostring(err), ")")
     end
-    local cjson = require "cjson.safe"
-    local cursor = "0"
-    local pattern = _M.redis.prefix .. ":session:*"
-    local matched = {}
-    for _ = 1, 100 do
-        local res = red:scan(cursor, "MATCH", pattern, "COUNT", 500)
-        if type(res) ~= "table" or type(res[1]) ~= "string" or type(res[2]) ~= "table" then
-            redis_log(ngx.WARN, "scan failed")
-            break
-        end
-        cursor = res[1]
-        for _, key in ipairs(res[2]) do
-            local raw = red:get(key)
-            if type(raw) == "string" then
-                local token = key:match("[a-f0-9]+$")
-                local payload = token and unpack_shared(token, raw) or nil
-                local record = payload and cjson.decode(payload) or nil
-                if type(record) == "table" and record.username == username and
-                    record.source == source then
-                    matched[#matched + 1] = key
-                end
-            end
-        end
-        if cursor == "0" then break end
-    end
-    if #matched > 0 then
-        local ok, del_err = red:del(unpack(matched))
-        if not ok then redis_log(ngx.WARN, "del failed: ", tostring(del_err)) end
-    end
-    redis_release(red)
 end
 
 local function normalize_domain(value)
@@ -416,7 +333,7 @@ function _M.create(username, source)
         return nil, "invalid session identity"
     end
     source, username = identity.parse(principal)
-    if _M.shared_enabled and _M.redis.mode ~= "read-write" then
+    if store.shared_enabled and store.mode ~= "read-write" then
         return nil, "shared_session_read_only"
     end
     local token = util.random_token(32)
@@ -430,10 +347,11 @@ function _M.create(username, source)
     if not saved then
         return nil, save_err or "shared_session_unavailable"
     end
-    local ok, err = sessions.insert(token, username, source, csrf, os.time() + _M.ttl)
-    if not ok then
-        redis_delete(token)
-        return nil, err
+    -- 共享模式下 redis_save 已经把会话写进本机镜像（upsert），这里不能再
+    -- INSERT：token 已存在会撞主键，等于把刚成功的登录判成失败。
+    if not store.shared_enabled then
+        local ok, err = sessions.insert(token, username, source, csrf, os.time() + _M.ttl)
+        if not ok then return nil, err end
     end
     return token
 end
@@ -442,7 +360,7 @@ end
 function _M.get(token)
     if not token or #token < 16 or #token > 128 then return nil end
     local s
-    if _M.shared_enabled then
+    if store.shared_enabled then
         local load_err
         s, load_err = redis_load(token)
         if s then
@@ -452,10 +370,35 @@ function _M.get(token)
                 return nil
             end
         elseif load_err == "redis_unreachable" then
-            -- 共享会话存储是唯一事实源。故障时失败关闭，绝不从 SQLite
-            -- 复活可能已在其他实例撤销的 bearer token。
-            _M.clear_cookie()
-            return nil
+            -- Redis 不可达：允许在宽限期内改读本机镜像，避免整个实例因为
+            -- 会话存储抖动就把已登录的用户全部踢下线。宽限期从"最近一次经
+            -- Redis 确认存在"起算，超时即强制重新登录（fail-closed 的底线）。
+            if not store.fallback_allowed() then
+                _M.clear_cookie()
+                return nil
+            end
+            -- 单次 raw 查询同时拿行 + 判宽限（verified_recent 内部按 verified_at
+            -- 过滤）。分两次读会让 mlcache 里的旧行和库里的新时间戳拼成一条
+            -- "看起来刚确认过"的会话。
+            s = sessions.verified_recent(token, os.time() - store.grace_seconds())
+            if not s or (tonumber(s.expires_at) or 0) < os.time() then
+                _M.clear_cookie()
+                return nil
+            end
+        elseif _M.has_pending_save(token) then
+            -- Redis 里查不到，但本机还有未重放的签发记录（刚恢复、重放还没跑）：
+            -- 按本机镜像继续服务，等定时器补齐，不能把它当失效删掉。
+            s = sessions.by_token(token)
+            if not s or (tonumber(s.expires_at) or 0) < os.time() then
+                _M.clear_cookie()
+                return nil
+            end
+            -- 撤销也排在队列里时不放过：否则"降级期登录 → 随后撤销"的会话会在
+            -- 重放追上之前复活（by_token 走 mlcache，还可能读到已删除的旧镜像行）。
+            if pending.revoked_after_save(token, s.username, s.source) then
+                _M.clear_cookie()
+                return nil
+            end
         else
             -- Redis 中确实没有该会话: 按约定清除登录信息。
             sessions.delete(token)
@@ -514,8 +457,17 @@ function _M.delete_shared_all_for(username, source)
     redis_delete_all_for(username, identity.source(source) or "local")
 end
 
+--- Redis 健康快照 + 降级状态。仅在共享模式启用时由 /_authz/api/session 输出。
+function _M.shared_status()
+    if not store.shared_enabled then return nil end
+    local status = store.status()
+    status.degraded = store.fallback_allowed() and true or false
+    status.pending = _M.pending_counts()
+    return status
+end
+
 function _M.can_write_shared()
-    return not _M.shared_enabled or _M.redis.mode == "read-write"
+    return not store.shared_enabled or store.mode == "read-write"
 end
 
 -- 从请求头解析 cookie token

@@ -4,6 +4,7 @@
 #   网关地址默认 http://127.0.0.1:6080；key 可省略 -k，改用环境变量 AUTHZ_API_KEY。
 # 命令:
 #   smoke                     读 /session 自检（凭证 + 连通性 + 角色）
+#   sstatus                     读 /session 的 shared_session 健康段（共享会话 Redis 容错状态）
 #   menu                      读 /menu-tree
 #   apps-list                 读 /applications
 #   apps-add  <domain> <port> [menu_name] [target_ip]   新建绑定（domain 只填前缀）
@@ -47,6 +48,7 @@ api() { # method path [json-body]
 cmd="$1"; shift || true
 case "$cmd" in
   smoke)      api GET /session ;;
+  sstatus)    api GET /session | (command -v jq >/dev/null && jq '.data.shared_session // "响应里没有 shared_session 段：本机模式未启用共享会话 / Key 角色非 admin / 实例跑的是无该功能的旧版本（比对 /_authz/api/session 是否含该字段）"' || cat) ;;
   menu)       api GET /menu-tree ;;
   apps-list)  api GET /applications ;;
   apps-add)   # domain port [menu_name] [target_ip]

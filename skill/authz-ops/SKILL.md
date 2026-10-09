@@ -131,12 +131,33 @@ AUTHZ_SESSION_REDIS_MODE=read-only        # 主实例改 read-write
 AUTHZ_SESSION_REDIS_PASSWORD=<pwd>
 AUTHZ_SESSION_REDIS_PREFIX=authz          # 多套集群共用一个 Redis 时隔离
 AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>   # 所有共享实例必须一致
+AUTHZ_SESSION_SHARED_FALLBACK=true             # 默认 true：Redis 网络故障时容错降级；false = 严格 fail-closed
+AUTHZ_SESSION_FALLBACK_GRACE=14400             # 降级宽限期（秒）：也是跨实例撤销生效的最大延迟
+AUTHZ_SESSION_RETRY_INTERVAL_MS=15000           # 待写队列重放周期（毫秒，钳 1000..600000）
 ```
 
-要点：登录、登出、改密、禁用用户必须打到主实例；Redis 不可达时失败关闭
-（不从 SQLite 恢复旧 token）；共享记录带 HMAC 签名，reader 对伪造或篡改记录按未登录
-处理，所以即使 Redis 无 ACL 也难以伪造会话，但签名密钥等同会话密钥，要同等保管。
+要点：登录、登出、改密、禁用用户必须打到主实例；共享记录带 HMAC 签名，reader 对伪造或篡改
+记录按未登录处理，所以即使 Redis 无 ACL 也难以伪造会话，但签名密钥等同会话密钥，要同等保管。
 网络白名单或 TLS 就绪前保持 AUTHZ_SESSION_SHARED=false。
+
+Redis 挂了会怎样（默认配置）：熔断器进入 OPEN（跨 worker，窗口初始 5s、指数退避到 60s），期间
+完全不连 Redis，所以不会把请求拖慢；已登录用户改读本机 SQLite 会话镜像继续可用（该会话须在
+grace 内经 Redis 确认过存在），欠下的写按发生顺序进 session_pending，Redis 恢复后自动重放；
+reader 实例故障期间仍拒绝创建新登录（503，保持单 writer 不变量）。已知限制：故障期间其他实例
+上的撤销（登出/改密/删用户）最长延迟一个 grace（默认 4 小时）才生效，要求撤销即时生效就设
+AUTHZ_SESSION_SHARED_FALLBACK=false（回到严格 fail-closed：清 Cookie、writer 登录 503）。
+
+排障先看状态再决定动作：
+
+```bash
+curl -sS -k -H "x-api-key: $AUTHZ_API_KEY" https://127.0.0.1:6443/_authz/api/session \
+  | jq '.data.shared_session'
+```
+
+`state=down` 且 `degraded=true` 表示正在按预期降级服务（已登录用户不受影响）；`state=config` 是
+AUTH/SELECT db 配错（不降级，核对 REDIS_USERNAME/PASSWORD/DB）；`state=unknown` 或 `pending` 只增不减，通常是宿主机挂载的
+conf 模板没同步（缺 `lua_shared_dict authz_shared_session` 或缺 `shared_session_sync.start()`），
+同步两个 template 后 docker restart，详见 deploy.md §7.1。改这三个新变量要 --force-recreate。
 
 ## 6. 回归与验证（只在 241.t）
 

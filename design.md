@@ -49,6 +49,10 @@ lualib/resty/authz/         ★ Authz Gateway 核心
   db/                       驱动、schema、版本化迁移、seed、查询缓存
   casbin.lua                mini-casbin 执行器 (p/g 行, deny 优先)
   session.lua               服务端会话 CRUD + cookie 读写
+  shared_session_store.lua  ★ 共享会话（Redis）读写 + 熔断 + 降级：跨 worker 熔断器（共享字典）、
+                          网络故障期改读本机 sessions 镜像（grace，默认 4 小时）、故障期动作入待写队列
+  shared_session_sync.lua   ★ 待写队列重放定时器：init_worker 里启动、owner 锁保证单条重放链，每 15s 一轮
+                          按 id 升序重放 session_pending；熔断 OPEN 时本轮直接返回，不做网络尝试
   nocobase.lua              NocoBase signIn/check + 本地角色映射 + 远程身份快照
   oauth.lua                 OAuth2/OIDC + Google 授权码、PKCE、userinfo
   remote.lua                远程身份单向记录与本地角色覆盖
@@ -69,7 +73,7 @@ lualib/resty/authz/         ★ Authz Gateway 核心
                           两张新表的 SQL（META 列集合在 SQL 层就不选明文密钥）
 test/run_tests.sh           基础镜像功能测试(17项断言, 不依赖 authz)
 test/test_authz_gateway.sh  Gateway/API 隔离测试矩阵
-test/test_shared_session.sh 共享会话 (Redis 单写多读) 独立回归
+test/test_shared_session.sh 共享会话 (Redis 单写多读 / 容错降级 / 待写队列) 独立回归
 docs/sso-jwt-auth.md        SSO 集成指南
 ```
 
@@ -79,6 +83,7 @@ docs/sso-jwt-auth.md        SSO 集成指南
 nginx.conf.template
   init_by_lua  → authz.init() → config/provider_config → db.init()
                                   → db/migrations(版本账本) → db/seed → close
+  init_worker   → shared_session_sync.start()（owner 锁抢单，重放 session_pending）
   access_by_lua → authz.access() → gateway/access → resolver → session → casbin → proxy
   content_by_lua(/_authz) → router.lua → ui (login/OAuth) / guard → api/service → api/services
                                                     → repository → db.transaction
@@ -90,7 +95,8 @@ nginx.conf.template
 |----|--------|------|
 | users | username(UNIQUE), password_hash, salt, roles, enabled, created_at, last_login_at, updated_at | 本地用户；认证状态仅启用/未启用，时间为 Unix 秒 |
 | remote_users | provider+subject(PK), UNIQUE(provider,username), roles, remote_roles, roles_overridden, enabled, synced_at, created_at, last_login_at, updated_at | 单向身份记录；`synced_at` 为兼容存储列，API 输出 `recorded_at`；不保存密码/token |
-| sessions | token(PK, 32B随机hex), username, source, csrf, expires_at | 本机服务端会话, TTL 默认7天 |
+| sessions | token(PK, 32B随机hex), username, source, csrf, expires_at, verified_at | 本机服务端会话, TTL 默认7天。共享模式下它同时是 Redis 的**降级镜像**：`verified_at` = 最近一次经 Redis 确认存在的时刻（NULL = 非共享模式本机自签发），熔断 OPEN 期间的降级读以它为判据 |
+| session_pending | id(PK AUTOINCREMENT), op, token, username, source, csrf, expires_at, attempts, created_at | 共享会话待写队列（迁移 v28）：Redis 网络故障期间本该落到 Redis 的动作按发生顺序入队，`op` ∈ save/delete/delete_all；重放成功后删除该行。`session_pending_op_idx(op, id)` 支撑按序取批 |
 | policies | ptype('p'/'g'), v0, v1, v2, UNIQUE(ptype,v0,v1,v2) | casbin 策略行 |
 | bindings | domain(UNIQUE), port, enabled, note | 显式域名绑定 |
 | bindings (代理字段) | upstream_*/forwarded_*/origin_mode/custom_origin/simulate_local/local_ip/menu_name/**request_rewrite**/**response_rewrite** | `request_rewrite`/`response_rewrite` 为改写请求/响应的规范化 JSON（结构同构：headers/append_headers/remove_headers/body/body_base64/content_type/rewrites；append 仅请求侧），空串表示未配置；header_overrides 列已由迁移 17 并入 request_rewrite |
@@ -157,6 +163,9 @@ Python 等价验证: `hmac.new(salt.encode(), prev, hashlib.sha256).digest()`。
 | AUTHZ_HOST_URL | Cookie 域缺省回退来源；公网入口地址 |
 | AUTHZ_SESSION_SHARED + REDIS_* | 共享会话开关与 Redis 连接/ACL/前缀/DB |
 | AUTHZ_SESSION_SIGNING_KEY | 共享会话记录 HMAC 签名（>=32 字符，全组一致；无签名记录一律失效） |
+| AUTHZ_SESSION_SHARED_FALLBACK | 共享会话 Redis 网络故障时是否容错降级（默认 true 降级读 SQLite 镜像 + 待写队列；false = 严格 fail-closed） |
+| AUTHZ_SESSION_RETRY_INTERVAL_MS | `session_pending` 重放定时器周期，默认 15000ms（钳 1000..600000）；owner 锁保证同一时刻只有一条重放链 |
+| AUTHZ_SESSION_FALLBACK_GRACE | 降级宽限期（秒，默认 14400，钳 60..604800）：会话经 Redis 确认存在的可信窗口，同时是跨实例撤销延迟上限 |
 
 **Agent / 机器凭证**
 
@@ -242,15 +251,6 @@ resolver（gateway/resolver.lua）按序命中：
 
 代理循环防护：目标 IP+端口等于网关自身监听地址时返回 508。
 
-## 5.2 上游请求构造（gateway/proxy.lua）
-
-- `authz_session` Cookie 在代理前精确剥离，业务 Cookie 保留
-- 固定头：X-Authz-User / X-Authz-Source / X-Authz-Identity；X-Forwarded-For 追加
-  remote_addr；凭证头（x-api-key/x-role-key）不透传
-- Host/Forwarded 链路头优先级：绑定显式 `upstream_host`/`forwarded_*` 覆盖 →
-  `origin_mode`（auto/preserve/rewrite/remove/custom）→ simulate_local（本机值）→
-  请求 Host
-- 配了正文改写的绑定自动向上游声明 `Accept-Encoding: identity`（绑定显式覆盖
 **保留前缀域名的内容路径分流（直取语义）**：虚拟入口命中后不再只有「渲染页面」一种出口，
 gateway/access.lua 按原始 URI 分流两条路径：
 
@@ -284,24 +284,25 @@ API Key），新放行只对「经保留前缀域名进来且已过 Casbin」的
 开了第二条绕过会话的后门。数据库里存在同名前缀的真实绑定时仍然优先（第 2 步就 return），
 管理员显式接管虚拟入口的能力保留。
 
-**符号链接校验与可信根**：内容根在部署里通常是宿主可写的真实目录树，一条目录级放行策略加上
-树里一个指向 /etc 的链接就是任意文件读，所以 files 端在 internal redirect 之前对每条候选形态
-（归一化 $uri、原始未解码串、逐层 unescape 梯）逐级 realpath，要求落点仍在内容根内；解不出来
-但确实存在（ELOOP/EACCES/悬空）同样拒绝，root 自身解析不出来才退成放行交给 nginx 404。校验比对
-的是 alias 真正 open 的 /files（files.default_root 常量），不是 AUTHZ_FILES_ROOT —— 后者只影响
-控制面浏览与写接口，改它不改 alias，拿它校验会校验到一个不相干的目录。
+**内容出口零符号链接信任**：内容根在部署里通常是宿主真实可写的目录树，而静态 alias 自身不做
+realpath（nginx 只把 URI 剩余段拼到 alias 后 open()，符号链接直接跟随），于是「一条目录级放行
+策略 + 树里一个指向 /etc 的链接」就是任意文件读；何况内容根所在的 /data 正是 authz 自己的
+状态库（用户、API Key、会话都在 SQLite 里），绝不能从内容出口外泄。所以 files 端在 internal
+redirect 之前对每条候选形态（归一化 $uri、原始未解码串、逐层 unescape 梯）逐级 realpath，
+要求解析结果与刚拼接出的路径**逐字相等** —— 父级是上一轮实测过的实体，这一判据恰好等价于
+「该级不是指向别处的符号链接」，即只认实体目录：出根、入根、指向 /etc 或 /data、指向挂载点、
+根内相对链接，一视同仁在该级 400，消息「路径含符号链接，内容出口只信任实体目录」。realpath
+解不出来但对象确实存在（ELOOP/EACCES/悬空链接）同样拒绝，报「无法解析真实路径」；该级不存在
+则交回 nginx 走 404；连 root 自身都解析不出来才退成放行交给 nginx 404。校验比对的是 alias
+真正 open 的 /files（files.default_root 常量），不是 AUTHZ_FILES_ROOT —— 后者只影响控制面
+浏览与写接口，改它不改 alias，拿它校验会校验到一个不相干的目录。
 
-静态 alias 不做 realpath（nginx 只把 URI 剩余段拼到 alias 后 open()，链接直接跟随），这道校验
-是唯一的兜底，因此它的默认口径保持严格。部署里确有**合法**出根链接时（本机 /data/ChatGPT ->
-/home/aigc/ChatGPT/，内容其实已由 compose 以 :ro 挂进容器；以及 compose 的 :ro 挂载被 docker
-跟随既有链接、落点其实在宿主真实路径那一类），用 AUTHZ_APP_TRUSTED_ROOTS 给一条显式白名单：
-逗号分隔的容器内绝对路径，**默认空 = 关闭**。命中可信根只放宽「这一级的落点判定」，其后各级
-继续校验，可信根内部再埋一条指向 /etc 的链接仍然 400 —— 白名单放宽的是落点集合，不是子树免检。
-解析只在 master 的 init_by_lua 做一次并缓存，且只缓存「确定仍在 root 内」的目录：可信根目录进了
-缓存会让「先骗过一级、再把链接改指别处」成为可用逃逸路径。config.load 里做的是字符串级静态校验
-（绝对路径、规范化后非 /、无 . 与 .. 段、无空白控制字符、条数上限），不合规的条目丢弃并 warn，
-不让一条拼错的配置悄悄扩大放行面；realpath 留给 app_content（那里有 fail-closed 的实现），
-解析不出来的可信根自然匹配不上，等于未挂载就不放行。
+这里没有落点豁免：不存在任何形式的符号链接白名单，也没有「碰巧是挂载点就放行」的自动放行。
+一旦允许某条链接被跟随，「逐字相等」这条判据就不再闭合，配置会沿「先放一条、再放一片」漂移，
+最终退化成任意文件读的反面教材。外部目录（NFS、宿主大盘）要经 file 域名放行，唯一正确姿势是
+把它作为**实体 bind** 挂进内容根下的子目录：挂载落点本身是真实目录，realpath 原地不动，照常
+通过，链接本身则应从内容根里去掉。worker 内只缓存「已实测为实体」的中间目录以省去重复 syscall，
+叶子不缓存 —— 链接可以事后被换成指向别处的目标，缓存叶子等于把判据变成 TTL。
 
 
 ## 5.2 上游请求构造（gateway/proxy.lua）
@@ -334,6 +335,11 @@ API Key），新放行只对「经保留前缀域名进来且已过 Casbin」的
 ## 6. 缓存一致性
 
 - `lua_shared_dict authz_cache` 存授权 `rev` 和数据库 `db_rev`
+- `lua_shared_dict authz_shared_session`（1m）存共享会话的跨 worker 熔断状态（OPEN 窗口到期时刻、
+  连续失败次数、故障类别）与 `ss:seen:<token>` 节流键（带 TTL，限制镜像回写频率）；熔断放共享字典
+  而非 worker 局部，是为了让任一 worker 探测到的 Redis 故障立刻对所有 worker 生效，避免每个 worker
+  各自重复付一次 connect/read 超时。降级判据本身是 SQLite `sessions.verified_at`（跨 worker、跨重启
+  的权威凭据），共享字典里的 seen 键只是节流阀。
 - service 的多步骤写操作使用 `db.transaction()`；授权相关写操作使用 `db.authz_transaction()`
 - revision 只在成功提交后由数据库门面自动递增；一次事务只递增一次，回滚不递增
 - 每个 worker 维护 `{rev, enforcer, bindings}` 本地缓存，rev 变化时全量重载
@@ -353,7 +359,7 @@ API Key），新放行只对「经保留前缀域名进来且已过 Casbin」的
 | next 参数 | 仅接受以 `/` 开头且非 `//` 的路径；拒绝反斜杠、控制字符和超长值 |
 | 网关 Cookie 隔离 | `authz_session` 代理前精确剥离，不跨信任边界；403/404/508 页动态内容全部 HTML 转义 |
 | 公网入口 | `AUTHZ_HTTP_MODE` 默认 `redirect`（308 HTTPS）；`disabled` 仅回环；`serve` 仅受控测试；维护期用防火墙白名单限制管理端 |
-| 共享会话 | 单写多读：仅一个实例 `read-write`（登录/登出/改密/撤销），其余 `read-only`；Redis ACL 分层授权；Redis 故障失败关闭，不回退 SQLite |
+| 共享会话 | 单写多读：仅一个实例 `read-write`（登录/登出/改密/撤销），其余 `read-only`；Redis ACL 分层授权。Redis **网络故障**走容错降级：跨 worker 熔断（OPEN 期零网络等待，指数退避 5s→60s）+ 读本机 SQLite 会话镜像（该会话在 grace 内经 Redis 确认过才承认，`AUTHZ_SESSION_FALLBACK_GRACE` 默认 4 小时）+ `session_pending` 待写队列恢复后按序重放；`AUTHZ_SESSION_SHARED_FALLBACK=false` 恢复严格 fail-closed。AUTH/SELECT 失败属配置错误，不降级。已知限制：故障期其他实例的撤销最长延迟一个 grace 才生效 |
 | 远程认证 | 默认关闭；登录时显式选择来源；HTTPS 证书校验；密码/JWT 不落库 |
 | OAuth/OIDC | Authorization Code + PKCE；一次性 state；NocoBase 校验 issuer 并使用 Basic Client 认证；access token 不落库 |
 | 身份隔离 | 用户名与来源组成身份；同名多来源的会话、角色与直授权互不影响 |
@@ -432,7 +438,8 @@ bash test/run_tests.sh authz:latest
 OAuth state/PKCE/callback、同名多来源身份隔离、旧身份策略迁移、远端角色记录与本地覆盖、
 来源级直授权、上游身份头、远程改密拒绝、绑定 CRUD、CSRF、Casbin 多方法授权和缓存失效、
 网关 Cookie 不上游、403 转义与真实状态码、反斜杠开放跳转拒绝、HTTP→HTTPS 308、
-Redis ACL 单写多读与故障失败关闭、Relay 退役 410。
+Redis ACL 单写多读与故障容错降级（熔断 + SQLite 镜像降级读 + 待写队列重放）、严格 fail-closed
+（`AUTHZ_SESSION_SHARED_FALLBACK=false`）、Relay 退役 410。
 
 ## 11. API Key 子系统（api_key.lua）
 

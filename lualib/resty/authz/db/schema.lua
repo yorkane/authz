@@ -17,8 +17,21 @@ CREATE TABLE IF NOT EXISTS sessions(
   username TEXT NOT NULL,
   source TEXT NOT NULL DEFAULT 'local',
   csrf TEXT NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  verified_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS session_pending(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  op TEXT NOT NULL,
+  token TEXT NOT NULL DEFAULT '',
+  username TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  csrf TEXT NOT NULL DEFAULT '',
+  expires_at INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_pending_op_idx ON session_pending(op, id);
 CREATE TABLE IF NOT EXISTS remote_users(
   provider TEXT NOT NULL,
   subject TEXT NOT NULL,

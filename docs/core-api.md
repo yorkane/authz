@@ -319,7 +319,7 @@ Keep-Alive）、网关凭据头（X-Authz-Key、X-API-Key、X-Role-Key）、其�
 
 | Method | Path | 身份 | 用途 |
 |---|---|---|---|
-| `GET` | `/session` | 会话或 Key | 当前身份、来源、角色、admin 与时间信息；用户会话另含 CSRF |
+| `GET` | `/session` | 会话或 Key | 当前身份、来源、角色、admin 与时间信息；用户会话另含 CSRF；共享会话模式启用时含 `shared_session` 健康状态（见 §6.5） |
 | `DELETE` | `/session` | 会话 + CSRF | 退出当前会话 |
 | `GET` | `/users` | admin 用户/Key | 本地与远程身份列表、可分配的人类角色目录 |
 | `POST` | `/users` | admin 用户/Key | 创建本地用户；`username/password/roles` |
@@ -568,6 +568,44 @@ curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/js
 每个文件都写 `.upload-*` 暂存名再原子改名，中断不会留下半截目标文件；超过 6 小时的
 暂存残留由同一个每小时定时器扫掉。
 
+### 6.5 共享会话健康状态（`GET /session` 的 `shared_session` 段）
+
+仅在 `AUTHZ_SESSION_SHARED=true` **且调用者是 admin** 时出现（本机模式、非共享部署、
+或低权限角色调用时该段完全不存在，响应形状与既往一致）。运维与 Agent 用它判断 Redis
+是否健康、网关当前是否在降级服务，不需要翻日志：
+
+浏览器会话与 `x-api-key` 两条路径都带该段。**API Key 路径是刻意保留的**：Redis 的
+AUTH/db 配错时本实例上任何会话都认证不过去，"唯一能读到该状态的接口要求先认证成功"
+等于把最该被看见的 `state=config` 藏起来；机器 Key 不经过会话存储，是唯一还活着的路。
+`last_error` 是上游 Redis 的原始报错文本，因此只回给 admin。
+
+```bash
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" http://127.0.0.1:6080/_authz/api/session \
+  | jq '.data.shared_session'
+```
+
+| 字段 | 说明 |
+|---|---|
+| `enabled` | 共享会话是否启用（该段存在时恒为 `true`） |
+| `mode` | 本实例角色：`read-write`（认证主）或 `read-only` |
+| `state` | `ok` = 正常；`down` = Redis 网络故障（连接失败/读写超时/拒绝连接），熔断 OPEN 中；`config` = AUTH 或 SELECT db 失败，属配置错误，**不参与降级**，必须人工修；`unknown` = 取不到 `authz_shared_session` 共享字典（模板未同步 `lua_shared_dict`，见 `deploy.md` §7.1） |
+| `down` | 布尔，熔断窗口是否打开（`state=down` 时为 `true`） |
+| `down_remaining_ms` | `state=down` 时本熔断窗口的剩余毫秒数；OPEN 期间请求路径完全不连 Redis（零网络等待），到期后半开放行一次探测 |
+| `failures` | 连续失败次数（决定下一次熔断窗口的指数退避长度：初始 5s，上限 60s） |
+| `last_error` | 最近一次故障的简述，用于定位是哪类失败 |
+| `pending` | `session_pending` 待写队列概览：`save`/`delete`/`delete_all` 三类行数与 `total`；非 0 表示仍有动作等 Redis 恢复后重放 |
+| `fallback` | 本实例是否允许降级读（`AUTHZ_SESSION_SHARED_FALLBACK`）；`false` 时故障期间直接按未登录处理 |
+| `degraded` | 当前是否处于降级服务（熔断 OPEN 且 `fallback=true`，会话校验走本机 SQLite 镜像） |
+| `fallback_grace` | 降级宽限期（秒，`AUTHZ_SESSION_FALLBACK_GRACE`，默认 14400）：会话行的 `verified_at` 必须落在窗口内才被承认（也决定跨实例撤销的最大延迟） |
+| `redis_last_ok_at` / `outage_started_at` | 最近一次 Redis 成功 / 本轮故障开始的 Unix 秒，用来判断"挂了多久" |
+
+判读要点：`state=down` 且 `degraded=true` 属预期的容错状态（已登录用户继续可用，writer 登录仍可用，
+reader 实例照旧拒绝创建新登录）；`pending.total` 长时间不下降而 Redis 已恢复，通常是重放定时器没挂上
+（模板未同步 `shared_session_sync.start()`，见 `deploy.md` §7.1）；`state=config` 不降级，
+要核对 `AUTHZ_SESSION_REDIS_USERNAME`/`_PASSWORD`/`_DB`；`state=unknown` 说明共享字典缺失（模板未同步）。
+故障期间 A 实例上的撤销在 B 实例上最长延迟一个 `fallback_grace`（默认 4 小时）才失效，
+需要撤销即时生效就设 `AUTHZ_SESSION_SHARED_FALLBACK=false`（Redis 一不可用就一律按未登录处理）。
+
 ### 6.6 保留前缀域名的文件与对象直取（内容出口，非控制面 API）
 
 这不是控制面 API，而是一条**内容出口**：网关的两个内置应用保留前缀域名（虚拟端口 100/101，
@@ -623,7 +661,7 @@ scheme 与 Cookie 的 `Secure` 用同一判据（`X-Forwarded-Proto` 优先，�
 |---|---|
 | `200` | 命中策略且内容存在，整体返回 |
 | `206` | 带 `Range` 请求头的分段返回 |
-| `400` | JSON 错误：URI 含 `..` 段或控制字符（含 `%2e%2e`/`%2f`/`%5c`/`%00` 等编码形态）；或路径上有指向**内容根与可信根之外**的绝对符号链接（逐级 realpath 校验；可信根白名单 `AUTHZ_APP_TRUSTED_ROOTS` 默认关闭，配了也只放宽那一级的落点，后续各级照旧校验） |
+| `400` | JSON 错误：URI 含 `..` 段或控制字符（含 `%2e%2e`/`%2f`/`%5c`/`%00` 等编码形态）；或路径任一级含符号链接 —— 内容出口只信任实体目录、不跟随符号链接，每级 realpath 必须与拼接串逐字相等，出根、入根、指向 /etc、指向挂载点一律 400（消息「路径含符号链接，内容出口只信任实体目录: <段>」；存在但解析不出（悬空/ELOOP/EACCES）报「无法解析真实路径」） |
 | `403` | 已登录或带合法 Key，但该身份对 `/100<路径>`、`/101<key>` 无策略 |
 | `404` | 本机文件不存在 / S3 对象不存在。**不会**回落成 200 的页面 —— 播放器与外部系统需要明确的「文件不存在」，一条 200 的 HTML 只会把排障引向「格式不支持」 |
 | `405` | 方法不是 GET/HEAD，响应头带 `Allow: GET, HEAD`（写操作只走 §6.1 那组控制面接口） |

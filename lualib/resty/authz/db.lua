@@ -48,6 +48,12 @@ function _M.query(sql, ...)
     return query_cache.get(sql, params, raw_query)
 end
 
+--- 绕过查询缓存直连 driver（params 传数组）。只给确实会被自己的写立刻回读、
+-- 无法容忍缓存滞后的地方用（目前唯一使用者：session_pending 的重放定时器）。
+function _M.raw_query(sql, params)
+    return raw_query(sql, params or {})
+end
+
 -- The callback must return a non-nil first value to commit. Returning nil or
 -- raising rolls back. authz=true publishes the policy/binding revision only
 -- after a successful commit.

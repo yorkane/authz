@@ -25,10 +25,6 @@ env AUTHZ_STORE_DIR;
 env AUTHZ_STORE_DEFAULT_EXPIRY_HOURS;
 env AUTHZ_FILES_ROOT;
 
-# 内容出口符号链接的可信根白名单（gateway/app_content.lua 用，默认空=关闭）。
-# 解析只在 master 的 init_by_lua（config.load）里做一次，master 进程不声明也读得到；# 这里仍列入白名单是与上面几个 AUTHZ_* 保持同一约定：万一以后有代码在 worker 或定时# 器里直接读它，未声明就会静默失效。变量未设置时 nginx 只是不注入，不会报错。
-env AUTHZ_APP_TRUSTED_ROOTS;
-
 events {
     worker_connections 1024;
 }
@@ -89,6 +85,9 @@ http {
     lua_shared_dict authz_db_cache 10m;
     lua_shared_dict authz_login_limit 1m;
     lua_shared_dict authz_oauth_state 5m;
+    # 共享会话（Redis）的熔断器与降级宽限状态，跨 worker 共享。
+    # 键都是短字符串 + 小整数（ss:open / ss:fails / ss:seen:<token> ...），1m 足够。
+    lua_shared_dict authz_shared_session 1m;
     resolver ${DNS_RESOLVER} ipv6=off valid=300s;
     resolver_timeout 5s;
     lua_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
@@ -109,6 +108,10 @@ http {
     init_worker_by_lua_block {
         local ok, m = pcall(require, "resty.authz.maintenance")
         if ok then m.start() end
+        -- 共享会话待写队列的重放循环（同样只由 worker 0 挂链，内部抢 owner 锁）。
+        -- 未启用共享会话时 start() 直接 return false，不产生定时器。
+        local ok2, sync = pcall(require, "resty.authz.shared_session_sync")
+        if ok2 then sync.start() end
     }
 
     map $http_upgrade $connection_upgrade {

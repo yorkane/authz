@@ -639,6 +639,29 @@ _M.list = {
                 WHERE builtin = 's3Configs' AND enabled = 1]], os.time()))
         end,
     },
+    {
+        version = 28,
+        name = "shared_session_resilience",
+        up = function(db)
+            -- 共享会话容错：Redis 不可达期间靠本机 SQLite 镜像继续服务 +
+            -- session_pending 队列补写。verified_at 是"最近一次经 Redis 确认存在"
+            -- 的时刻，降级读的 1 小时宽限期以它为凭据（NULL = 非共享模式本机自签发）。
+            ensure_column(db, "sessions", "verified_at", "verified_at INTEGER")
+            must(db.exec([[CREATE TABLE IF NOT EXISTS session_pending(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              op TEXT NOT NULL,
+              token TEXT NOT NULL DEFAULT '',
+              username TEXT NOT NULL DEFAULT '',
+              source TEXT NOT NULL DEFAULT '',
+              csrf TEXT NOT NULL DEFAULT '',
+              expires_at INTEGER NOT NULL DEFAULT 0,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL
+            )]]))
+            must(db.exec([[CREATE INDEX IF NOT EXISTS session_pending_op_idx
+                ON session_pending(op, id)]]))
+        end,
+    },
 }
 
 function _M.run(db)

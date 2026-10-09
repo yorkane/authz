@@ -1,5 +1,6 @@
 local provider_config = require "resty.authz.provider_config"
 local session = require "resty.authz.session"
+local shared_store = require "resty.authz.shared_session_store"
 local api_key = require "resty.authz.api_key"
 local target = require "resty.authz.target"
 local s3_scope = require "resty.authz.s3_scope"
@@ -55,9 +56,18 @@ end
 local function configure_session(c)
     session.secure = env_bool("AUTHZ_COOKIE_SECURE", false)
     session.configure_cookie_domain(os.getenv("AUTHZ_COOKIE_DOMAIN"), os.getenv("AUTHZ_HOST_URL"))
-    session.shared_enabled = false
-    session.redis.mode = "read-only"
-    session.redis.username = ""
+    shared_store.shared_enabled = false
+    shared_store.fallback_enabled = env_bool("AUTHZ_SESSION_SHARED_FALLBACK", true)
+    -- 重放定时器间隔：钳到 1s..10min（worker 里读不到 env，必须由 master 写进
+    -- shared_session_store，sync 再从 store 取）。
+    shared_store.retry_interval_ms = math.min(600000, math.max(1000,
+        tonumber(os.getenv("AUTHZ_SESSION_RETRY_INTERVAL_MS")) or 15000))
+    shared_store.session_ttl = session.ttl
+    -- 降级宽限期（秒），默认 4 小时；钳到 60s..7天。
+    shared_store.fallback_grace = math.min(604800, math.max(60,
+        tonumber(os.getenv("AUTHZ_SESSION_FALLBACK_GRACE")) or 14400))
+    shared_store.mode = "read-only"
+    shared_store.username = ""
     c.session_shared = env_bool("AUTHZ_SESSION_SHARED", false)
     if c.session_shared then
         local redis_url = tostring(os.getenv("AUTHZ_SESSION_REDIS_URL") or ""):gsub("%s+", "")
@@ -69,41 +79,46 @@ local function configure_session(c)
         if not port or port < 1 or port > 65535 then
             error("AUTHZ_SESSION_REDIS_URL port must be 1-65535")
         end
-        session.redis.host = host
-        session.redis.port = port
-        session.redis.username = tostring(os.getenv("AUTHZ_SESSION_REDIS_USERNAME") or "")
-        session.redis.password = tostring(os.getenv("AUTHZ_SESSION_REDIS_PASSWORD") or "")
-        session.redis.db = tonumber(os.getenv("AUTHZ_SESSION_REDIS_DB")) or 0
-        session.redis.prefix = tostring(os.getenv("AUTHZ_SESSION_REDIS_PREFIX") or "authz")
-        session.redis.mode = tostring(os.getenv("AUTHZ_SESSION_REDIS_MODE") or "read-only"):lower()
-        if session.redis.mode ~= "read-write" and session.redis.mode ~= "read-only" then
+        shared_store.host = host
+        shared_store.port = port
+        shared_store.username = tostring(os.getenv("AUTHZ_SESSION_REDIS_USERNAME") or "")
+        shared_store.password = tostring(os.getenv("AUTHZ_SESSION_REDIS_PASSWORD") or "")
+        shared_store.db = tonumber(os.getenv("AUTHZ_SESSION_REDIS_DB")) or 0
+        shared_store.prefix = tostring(os.getenv("AUTHZ_SESSION_REDIS_PREFIX") or "authz")
+        shared_store.mode = tostring(os.getenv("AUTHZ_SESSION_REDIS_MODE") or "read-only"):lower()
+        if shared_store.mode ~= "read-write" and shared_store.mode ~= "read-only" then
             error("AUTHZ_SESSION_REDIS_MODE must be read-write or read-only")
         end
-        if session.redis.username:find("[%c%s]") or #session.redis.username > 128 then
+        if shared_store.username:find("[%c%s]") or #shared_store.username > 128 then
             error("AUTHZ_SESSION_REDIS_USERNAME is invalid")
         end
-        if session.redis.prefix == "" or #session.redis.prefix > 128 or
-            not session.redis.prefix:match("^[A-Za-z0-9_.:-]+$") then
+        if shared_store.prefix == "" or #shared_store.prefix > 128 or
+            not shared_store.prefix:match("^[A-Za-z0-9_.:-]+$") then
             error("AUTHZ_SESSION_REDIS_PREFIX is invalid")
         end
-       if session.redis.db < 0 or session.redis.db > 15 or session.redis.db % 1 ~= 0 then
+       if shared_store.db < 0 or shared_store.db > 15 or shared_store.db % 1 ~= 0 then
            error("AUTHZ_SESSION_REDIS_DB must be an integer from 0 to 15")
        end
         -- 共享 Redis 常常是多套服务公用的存储：会话记录必须携带 HMAC 签名，
         -- 未签名或签名不符的记录一律失效，防止拥有 Redis 写权限的其他方伪造会话。
-        session.redis.signing_key = tostring(os.getenv("AUTHZ_SESSION_SIGNING_KEY") or "")
-        if #session.redis.signing_key < 32 then
+        shared_store.signing_key = tostring(os.getenv("AUTHZ_SESSION_SIGNING_KEY") or "")
+        if #shared_store.signing_key < 32 then
             error("AUTHZ_SESSION_SHARED requires AUTHZ_SESSION_SIGNING_KEY of at least 32 characters")
         end
-       session.redis.connect_timeout = tonumber(os.getenv("AUTHZ_SESSION_REDIS_CONNECT_TIMEOUT_MS")) or 2000
-        session.redis.read_timeout = tonumber(os.getenv("AUTHZ_SESSION_REDIS_READ_TIMEOUT_MS")) or 2000
-        session.shared_enabled = true
-        c.session_shared_mode = session.redis.mode
-        ngx.log(ngx.NOTICE, "authz: shared session mode enabled (" .. session.redis.mode ..
-            ", redis://" .. host .. ":" .. port .. ")")
+       shared_store.connect_timeout = tonumber(os.getenv("AUTHZ_SESSION_REDIS_CONNECT_TIMEOUT_MS")) or 2000
+        shared_store.read_timeout = tonumber(os.getenv("AUTHZ_SESSION_REDIS_READ_TIMEOUT_MS")) or 2000
+        shared_store.shared_enabled = true
+        c.session_shared_mode = shared_store.mode
+        ngx.log(ngx.NOTICE, "authz: shared session mode enabled (" .. shared_store.mode ..
+            ", redis://" .. host .. ":" .. port
+            .. ", fallback=" .. tostring(shared_store.fallback_enabled) .. ")")
     end
     local ttl = tonumber(os.getenv("AUTHZ_SESSION_TTL"))
-    if ttl then session.ttl = ttl end
+    if ttl then
+        session.ttl = ttl
+        shared_store.session_ttl = ttl
+    end
+    c.session_shared_fallback = shared_store.fallback_enabled
 end
 
 -- ── 运行期 env 取值：只在 master 阶段读一次并记忆 ───────────────────────────
@@ -380,63 +395,6 @@ function _M.load()
     if c.port_max < c.port_min then c.port_max = c.port_min end
     c.http_port = tonumber(os.getenv("AUTHZ_HTTP_PORT")) or 6080
     c.https_port = tonumber(os.getenv("AUTHZ_HTTPS_PORT")) or 6443
-    -- ── 内容出口的符号链接可信根（gateway/app_content.lua 用）─────────────
-    -- 直取通道要求 <前缀>-<域>/<路径> 每一级 realpath 后仍落在内容根 /files 内，
-    -- 用来挡「根里放一个指向 /etc 的链接 = 任意文件读」。但部署里常有**合法**的
-    -- 出根链接（本机 /data/ChatGPT -> /home/aigc/ChatGPT/，内容其实已由 compose
-    -- 以 :ro 挂进容器），一律拒绝会让这类目录在 file-<域> 下整体 400。
-    -- 这里给运维一条显式白名单：逗号分隔的容器内绝对路径，realpath 后允许落在
-    -- 这些前缀下。**默认空 = 完全关闭，保持严格行为**。校验仍是逐级做，命中可信
-    -- 根只是让那一级的落点判定多一个可接受前缀，后续各级照样校验。
-    -- 安全边界（任一条不满足即丢弃该项并 warn，绝不让白名单悄悄扩大）：
-    --   * 必须是绝对路径，且规范化后不是 "/"（整盘白名单等于关掉防护）；
-    --   * 段里不允许 . 与 ..（否则 "/a/../b" 能绕成任意前缀）；
-    --   * 不允许空白与控制字符；
-    --   * 条数上限 16。
-    -- 本层只做字符串规范化与静态校验，**不**在这里 realpath：config.load() 跑在
-    -- master 的 init_by_lua，而 ffi/realpath 归 app_content 所有（它已有那份带
-    -- fail-closed 的实现）。可信根是否真实存在由 app_content 匹配时判定——解析不
-    -- 出来的可信根自然匹配不上，等于未挂载就不放行，不需要两处各实现一遍。
-    c.content_trusted_roots = {}
-    do
-        local raw = tostring(os.getenv("AUTHZ_APP_TRUSTED_ROOTS") or "")
-        local seen = {}
-        local count = 0
-        for item in raw:gmatch("[^,]+") do
-            local path = item:gsub("^%s+", ""):gsub("%s+$", "")
-            if path ~= "" then
-                local norm = path:gsub("/+", "/"):gsub("/+$", "")
-                local reason
-                if norm:sub(1, 1) ~= "/" then
-                    reason = "not an absolute path"
-                elseif norm == "/" then
-                    reason = "the whole filesystem is never trusted"
-                elseif #norm > 512 then
-                    reason = "too long"
-                elseif norm:find("%c", 1) or norm:find("%s", 1) then
-                    reason = "contains whitespace or control characters"
-                else
-                    for seg in norm:gmatch("[^/]+") do
-                        if seg == "." or seg == ".." then
-                            reason = "dot segments are not allowed"
-                            break
-                        end
-                    end
-                end
-                if reason then
-                    ngx.log(ngx.WARN, "authz: AUTHZ_APP_TRUSTED_ROOTS entry ignored (",
-                        reason, "): ", item)
-                elseif count >= 16 then
-                    ngx.log(ngx.WARN, "authz: AUTHZ_APP_TRUSTED_ROOTS entry ignored ",
-                        "(more than 16 entries): ", item)
-                elseif not seen[norm] then
-                    seen[norm] = true
-                    count = count + 1
-                    c.content_trusted_roots[count] = norm
-                end
-            end
-        end
-    end
     -- ── 内置应用保留前缀域名入口（files / s3）─────────────────────────────
     -- <前缀>-<节点>.<任意域>（或裸 <前缀>.<任意域>）不查数据库，直接映射到
     -- 本机管理页面（虚拟绑定）。绑定值与端口可在策略里单独授权（对象 /<端口>/*，

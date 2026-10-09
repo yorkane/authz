@@ -79,13 +79,20 @@ local function session_create_error(context, err)
             "<h1>此实例仅提供共享会话读取</h1><p>请在认证主实例完成登录。</p>",
             ngx.HTTP_SERVICE_UNAVAILABLE)
     end
+    if err == "shared_session_queue_full" then
+        return html_response(
+            "<h1>共享会话暂存队列已满</h1><p>会话服务（Redis）长时间不可用，" ..
+            "为避免产生无法共享的会话，已暂停新登录。请恢复 Redis 或排查状态：" ..
+            "<code>GET /_authz/api/session</code> 的 <code>shared_session</code> 字段。</p>",
+            ngx.HTTP_SERVICE_UNAVAILABLE)
+    end
     return html_response("<h1>会话创建失败</h1>", ngx.HTTP_INTERNAL_SERVER_ERROR)
 end
 
 local function login_page(error_message, next_url)
     -- 共享会话只由 writer 实例签发：reader 实例不展示登录表单，
     -- 避免用户提交后才知道这里不签发会话。
-    if session.shared_enabled and session.redis.mode ~= "read-write" then
+    if session.redis.shared_enabled and session.redis.mode ~= "read-write" then
         return [[<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>登录</title>
 <style>body{display:grid;min-height:100vh;margin:0;padding:16px;place-items:center;background:#191b2b;color:#f1f2f8;font:14px Roboto,sans-serif}

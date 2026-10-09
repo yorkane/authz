@@ -58,6 +58,7 @@ scripts/azctl.sh -g http://127.0.0.1:6080 -k "$AUTHZ_API_KEY" smoke
 scripts/azctl.sh ... apps-list | apps-add | apps-patch | apps-del
 scripts/azctl.sh ... pol-list | pol-add | pol-del
 scripts/azctl.sh ... keys-list | keys-add | keys-del
+scripts/azctl.sh ... sstatus          # 共享会话 Redis 健康（判读见 references/api.md 15）
 scripts/azctl.sh ... menu
 ```
 
@@ -130,15 +131,14 @@ scripts/azctl.sh ... menu
   curl -sS -X POST -H "x-api-key: $AUTHZ_API_KEY" -H 'Content-Type: application/json' \
     -d '{}' "$AUTHZ/_authz/api/uploads/cleanup" | jq .data
   ```
+- 确认共享会话实例是否健康（配多实例共享登录、或怀疑"登录莫名失效"时先跑这个）：
+  `GET /session` 的 `shared_session` 段。**只对 admin 输出**，低权限 Key 读不到不等于功能坏了。
+  `state=ok` 正常；`state=down` + `degraded=true` 是预期的容错降级（已登录用户可用、writer 能登录、欠写已入队待重放，
+  跨实例撤销最长延迟一个 `fallback_grace`（默认 4 小时），**要如实告知用户**）；`state=config` 是 Redis 账号/db 配错，
+  不降级、会话全挂 —— 停止写操作并报运维；`state=unknown` 或 `pending.total` 只增不减 = 宿主机挂载的 conf 模板没同步。
+  完整判读表见 references/api.md §15；三个开关变量见 §10。
 
 ## 硬性规则
-
-## 相关 skill（场景分流）
-
-- 部署 / 备份 / 升级 / 排障 / 日志 / 多实例共享会话 → 用 `authz-ops`（运维场景）。
-- 改网关自身代码、模板或测试 → 读 `docs/maintain_skill.md`（维护场景）。
-
-本 skill 只负责"配什么"，不管"实例怎么起、怎么备份、怎么排障"。
 
 1. 变更类操作前先读现状（`GET /applications`、`GET /policies` 等），避免重复绑定
    （409）或误删；操作后必须复核读回结果。
@@ -150,3 +150,10 @@ scripts/azctl.sh ... menu
    明确提出的配置，不做"顺手"的批量修改。
 5. 本 skill 只调 API 做配置；修改网关代码/模板/测试属于维护场景，读
    `docs/maintain_skill.md` 走维护流程。
+
+## 相关 skill（场景分流）
+
+- 部署 / 备份 / 升级 / 排障 / 日志 / 多实例共享会话（含 Redis 容错降级与 `shared_session` 健康状态判读）→ 用 `authz-ops`（运维场景）。
+- 改网关自身代码、模板或测试 → 读 `docs/maintain_skill.md`（维护场景）。
+
+本 skill 只负责"配什么"，不管"实例怎么起、怎么备份、怎么排障"。

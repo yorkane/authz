@@ -8,6 +8,10 @@
 ## 0. 会话与身份
 
 - `GET /session` — 当前身份、角色、来源。先跑它做 smoke。
+- `GET /session`（admin，共享会话模式启用时）额外返回 `shared_session` 健康段：
+  Redis 是否健康、实例是否在降级服务、还欠多少条待补写。配置类任务前先扫一眼（判读见 §15），
+  否则会把"实例正在降级"误判成"我刚配的东西没生效"。非 admin 调用或本机（非共享）模式下该段
+  不存在，响应形状与既往一致。
 
 ## 1. 角色与用户
 
@@ -246,6 +250,7 @@ core-api.md 与代码为准）。
 | 端口发现 | `AUTHZ_DISCOVERY_PORTS`（容器监听表不可见时追加）、`AUTHZ_DISCOVERY_TTL` |
 | HTTP 入口策略 | `AUTHZ_HTTP_MODE`=redirect/disabled/serve |
 | Cookie 安全 | `AUTHZ_COOKIE_SECURE`（HTTPS 入口必须 true；决定 SameSite=None/Lax） |
+| 共享会话容错 | `AUTHZ_SESSION_SHARED_FALLBACK`（默认 true，Redis 网络故障时降级不踢人；false = 严格 fail-closed）、`AUTHZ_SESSION_FALLBACK_GRACE`（默认 14400 秒，同时是跨实例撤销的最大延迟）、`AUTHZ_SESSION_RETRY_INTERVAL_MS`（默认 15000，待写队列重放周期）。见 §15 |
 
 注意：数据库类配置（用户/策略/绑定/菜单/Key）走 API 即时生效，不要改库；
 环境类配置走 .env，两层不要混。
@@ -375,3 +380,157 @@ curl -sS -X DELETE -H "x-api-key: $AUTHZ_API_KEY" \
 注意 `url` 只有路径没有主机名：交付给用户时要拼上实例地址（`AUTHZ_HOST_URL` 或
 `http://127.0.0.1:6080`），并说明打开它需要 **admin** 会话或 admin 角色的 `x-api-key`
 （保存区是 agent 中转区，不对普通登录用户开放）。
+
+
+## 15. 共享会话（Redis）健康判读
+
+配置多实例共享登录（§10 的 `AUTHZ_SESSION_SHARED` / `AUTHZ_SESSION_REDIS_*`）后，
+Redis 是会话的唯一事实源。实例对它做了容错处理，agent 用一条命令就能看清现状：
+
+```bash
+azctl.sh ... sstatus
+# 等价于
+curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/session" | jq ".data.shared_session"
+```
+
+| `state` | 含义 | 你该怎么办 |
+|---|---|---|
+| `ok` | Redis 正常 | 正常配置 |
+| `down` | 网络故障（连不上/超时/拒绝连接），熔断 OPEN 中；`degraded=true` 表示正按预期降级服务（已登录用户继续可用、writer 仍可登录、欠写已入队） | 配置照做，但要告知用户"Redis 恢复前跨实例撤销有延迟"；`pending.total` 应在恢复后归零 |
+| `config` | AUTH / SELECT db 失败，属**配置错误**，不降级 | **停止写操作**并报用户核对 `AUTHZ_SESSION_REDIS_USERNAME`/`_PASSWORD`/`_DB`；此时会话全不可用，只有 `x-api-key` 读得到该状态 |
+| `unknown` | 拿不到 `authz_shared_session` 共享字典 | 宿主机挂载的 conf 模板没同步（缺 `lua_shared_dict` / 重放定时器），让运维按 deploy.md §7.1 同步两个 template 后重启 |
+
+判据要点：
+
+- 该段**只对 admin 输出**（`shared_session` 里含上游 Redis 的原始报错文本），低权限 Key 读不到
+  ≠ 功能坏了，先换 admin Key 再判。读不到该段共有三种成因，按序排除：
+  ① 实例未启用共享会话（本机模式，本来就没有该段）；② Key 角色不是 admin；③ 实例跑的是
+  **不含本功能的旧版本镜像**（旧 lualib 里没有 `shared_session_store.lua`）。区分 ② 与 ③：先
+  `azctl.sh ... smoke` 确认 `admin: true`；仍是 admin 却读不到，就是版本落后 ——
+  `docker exec <容器> ls /usr/local/openresty/site/lualib/resty/authz | grep shared_session` 为空即
+  坐实，让运维重建镜像后再据此判读；**不要**因为读不到就断定 Redis 有问题。
+- `down_remaining_ms` = 本熔断窗口剩余毫秒；`failures` = 连续失败次数（决定退避长度，
+  5s 起、60s 封顶）。
+- `pending`（`save`/`delete`/`delete_all`/`total`）非 0 = 有动作等 Redis 恢复后重放。
+  Redis 已恢复却长期不降，通常是重放定时器没挂上（同样是模板未同步）。
+- 降级读有硬上限：会话须在 `fallback_grace`（默认 4 小时）内经 Redis 确认过存在，超时
+  一律回登录页。所以"Redis 挂了很久之后所有人掉登录"是预期行为，不是回归。
+- 因此**故障期间的撤销类操作（登出/改密/删用户）要如实告知延迟**：本实例立即生效，
+  其他实例最长一个 grace 后才生效。要求撤销即时生效就 `AUTHZ_SESSION_SHARED_FALLBACK=false`
+  （代价：Redis 一不可用就清 Cookie、writer 登录 503）。
+- reader 实例（`read-only`）任何时候都拒绝创建新登录（503），这不是故障。登录/登出/
+  改密/禁用用户一律打到 writer 实例。
+- 这三个变量属环境类，改后要 `docker compose up -d --force-recreate` 才生效。
+
+
+## 16. 文件服务 / 对象存储 / Web 访问的授权配置
+
+三者共用一套模型：**认证**（会话 Cookie 或 `x-api-key`）→ **Casbin 授权**（主体 × 对象 × 方法）→
+**能力门**（写操作固定要 admin；S3 还额外受可写范围白名单约束）。先分清你要放开的是哪一层，
+再决定是加策略、改绑定，还是只换 Key 的角色。
+
+### 16.1 三条入口与各自的判据
+
+| 入口 | 认证 | 授权对象 | 备注 |
+|---|---|---|---|
+| 管理页 `/_authz/files/`、`/_authz/s3/`（裸打） | 会话或任意合法 API Key | 不查 Casbin | guest 会话会被引导到 `/_authz/guest`；这是控制台路径，能力面由 API 的角色门禁决定 |
+| 内置应用域名 `file-<节点>.<域>` / `s3-<节点>.<域>` | 会话或 API Key | `/100<完整路径>`、`/101<完整路径>`（虚拟端口 100/101） | 走网关 + Casbin，**路径进对象**，因此能做目录级分级；只放行静态扩展名白名单 |
+| 用户自建 Web 服务（域名绑定） | 会话或 API Key | `/<port>/*`（`POST /applications` 里的 port） | 前缀只填最后一级，网关按当前 Host 拼 `<前缀>-<节点>.<域>` |
+
+- 全新实例只 seed 了两条策略：`role:admin → /* → *` 与 `role:api → /* → *`。**其他角色一律默认拒绝**，
+  包括 guest。所以"给某角色开文件浏览"= 给它加一条 allow 策略，不是开总开关。
+- `role:guest` 就是**匿名主体**：无凭证请求以它参与授权。给 `role:guest` 放行即对公网匿名开放，
+  这是唯一"无需凭证"的口子，放开前确认用户真的要匿名可见。
+
+### 16.2 给某角色开放文件浏览（Web）
+
+```bash
+# 整个文件浏览应用（内置入口，虚拟端口 100）
+azctl.sh ... pol-add role:staff /100/* "*"
+# 只放开某个目录：对象带上路径，并**显式**以 /* 收尾（匹配语义见下）
+azctl.sh ... pol-add role:staff "/100/reports/*" "*"
+# 对象存储页同理：端口 101
+azctl.sh ... pol-add role:staff /101/* "*"
+```
+
+- **对象匹配是锚定正则，不做隐式前缀**：`keyMatch` 把策略对象里的 `*` 换成 `.*` 后整串锚定比较，所以 `/100/reports/` 只等于「恰好是 /reports/ 这一个请求」，**放不开整个目录**；要放开目录必须写 `/100/reports/*`。
+  代理绑定同理：`/2077/api/*` 而不是 `/2077/api/`。`/*`（seed 给 admin 的那条）匹配所有以 / 开头的对象。
+
+- 100/101 是**保留端口，不能再拿去绑域名**；用户说"把文件浏览开放给 X"就走这里，不要新建绑定。
+- 收紧用 deny（deny 优先于 allow）：`azctl.sh ... pol-add role:staff /100/secret/* "*" deny`。
+- 只读浏览/预览/下载 = 放开上面的 GET；**上传/改名/建目录/删除永远是 admin 专属**，
+  没有"给 staff 开上传"的配法（写端点硬门 `admin = true`，见 §16.4）。
+- 用浏览器测：让被授权用户正常登录访问 `file-<节点>.<域>`；用 `x-api-key` 测则需 Key 角色达标。
+  403 页会回显 `无权访问 <object>`，照它补策略即可（说明认证过了、只是缺授权）。
+
+### 16.3 给用户自建 Web 服务配域名 + 授权（一次完整配置）
+
+```bash
+# 1) 前缀只填最后一级；target_ip 指内网真实地址（可省略 = 本机 127.0.0.1）
+azctl.sh ... apps-add n8n 2077 "n8n 自动化"
+# 2) 放行角色（对象 = /<port>/*）
+azctl.sh ... pol-add role:staff /2077/* "*"
+# 3) 复核读回
+azctl.sh ... apps-list | jq ".data.applications[] | select(.port==2077)"
+```
+
+- 域名唯一，重复 409；`menu_name` 决定左侧「域名服务」组里显示什么。
+- 匿名开放就 `pol-add role:guest /2077/* "*"`；只想给某个用户，主体写 `user:local:alice`。
+- 用户说完整域名时先确认他指哪个入口域（`a-235.ai-t.wtvdev.com` 还是 `a-235.ws.gatepro.cn`），再决定填前缀还是精确域名。
+- 应用自检 iframe 被嵌检测：给该绑定设 `"open_in_new": true`（只影响菜单点击方式，不参与代理与授权）。
+
+### 16.4 写操作的真实边界
+
+| 能力 | 端点 | 门禁 |
+|---|---|---|
+| 本地文件浏览 | `GET /api/files?path=` | 任意已认证**非 guest** 身份 |
+| 本地文件上传/改名/移动/建目录/删除 | `POST /api/files/upload`、`PUT /api/files/rename`、`POST /api/files/mkdir`、`DELETE /api/files/remove` | **admin**（浏览器会话另需 CSRF；机器 Key 免 CSRF） |
+| 对象存储浏览 | `GET /api/s3?bucket=&path=` | 任意已认证**非 guest** 身份；未配置时 200 + `enabled=false`（不是报错） |
+| 对象存储写 | `POST /api/s3/upload`、`PUT /api/s3/rename`、`POST /api/s3/mkdir`、`DELETE /api/s3/remove` | **admin** + 必须落在可写范围内（§16.5） |
+| 存储配置增删改 | `/api/s3-configs*` | **admin**；改表即生效，**不需要 reload** |
+| 本机保存区 | `PUT /api/store?path=`、`GET /api/store`、`DELETE /api/store` | **admin**（Agent 落盘换链接用，见 §14） |
+
+- 所以"第三方只想上传文件"的正确解法是给它一把 **admin 角色的 Key 并限定来源 IP**
+  （`AUTHZ_API_KEY_ALLOWED_IPS` 约束实例级 Key；数据库 Key 靠角色），不是放开策略。
+- 符号链接一律不可读写、路径不得含 `..`，目录逐级要求真实目录；上传先写 `.upload-*` 再原子改名。
+
+### 16.5 S3 可写范围（最容易配错的一层）
+
+即便身份是 admin，**范围外一律只读**（可浏览/预览/下载，禁上传/删除/改名/建目录）。
+范围来源：配置行的 `writable_paths`（推荐，页面/API 可改，即时生效）；未填则回落
+实例级 `AUTHZ_S3_WRITABLE_PATHS`（env，改后要 --force-recreate）。
+
+| 写法 | 含义 |
+|---|---|
+| 空 / 未设 | 默认只允许 `share/<LAN IP>`（`AUTHZ_S3_SHARE_ROOT` 改根名，`AUTHZ_HOST_LAN_IP` 固定 IP） |
+| `/` 或 `*` | 所有桶所有路径可写（谨慎，等于关掉这层保护） |
+| `reports, docs/x, */media` | 多范围，逗号分隔 |
+| `<桶名>` | 整个桶 |
+| `<桶名>/<前缀>` | 仅该桶内该前缀 |
+| `*/<前缀>` | 任意桶内该前缀 |
+
+- 条目对 key 是**整段前缀**匹配（`rpa` 不匹配 `rpa2`）；`key == 前缀` 本身也算命中，便于对单文件改名/删除。
+- 明文 http 的内网 MinIO 必须显式 `"allow_http": true`，否则该配置报错不可用（见 §12）。
+- 页面提示「只读目录：不在允许写入/删除的范围内（AUTHZ_S3_WRITABLE_PATHS）」放在页面底部；
+  用户报"我删不掉文件"时，先看这条是不是范围问题，再看是不是角色问题。
+
+```bash
+# 放开某套配置的可写范围（改表即生效）
+curl -sS -X PATCH -H "x-api-key: $AUTHZ_API_KEY" -H "Content-Type: application/json" \
+  -d "{\"writable_paths\":\"reports,*/media\"}" "$AUTHZ/_authz/api/s3-configs/3" | jq .data.item
+```
+
+### 16.6 配置前必做的三步自检
+
+```bash
+azctl.sh ... smoke                 # Key 有效？角色对不对？
+azctl.sh ... pol-list              # 现有 allow/deny 全貌，避免与 deny 打架
+azctl.sh ... sstatus               # 共享会话实例是否正在降级（见 §15）
+```
+
+- 授权类改动走 `/policies`（数据库，即时生效，无需 reload）；环境类（`AUTHZ_S3_WRITABLE_PATHS`、
+  `AUTHZ_FILES_ROOT`、`AUTHZ_APP_*`）走 .env + `docker compose up -d --force-recreate`。两层不要混。
+- 内置应用入口开关：`AUTHZ_APP_DOMAINS`（总开关，默认开）、`AUTHZ_APP_PREFIX_FILES=file`/`AUTHZ_APP_PORT_FILES=100`、
+  `AUTHZ_APP_PREFIX_S3=s3`/`AUTHZ_APP_PORT_S3=101`。改了入口前缀，策略对象里的端口不变（仍是 100/101）。
+- 配完必须**用被授权身份实际访问一次**验证，不要只看策略写进去了：200 才算通过；
+  403 看回显对象补策略，302 到登录页是认证没通过（Key 无效/来源不在白名单）。
