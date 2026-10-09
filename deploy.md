@@ -289,11 +289,47 @@ compose 里把它原样 bind 进内容根下的子目录：
 # docker-compose.yml（volumes）
       - /data:/files                # 内容根（宿主 /data）
       - /nas2/:/files/nas2data:ro   # 目标树实体 bind 进内容根下的子目录
+      - /home/aigc/ChatGPT:/files/chatgpt:ro   # 第二路外部树，同一姿势
 ```
 
 两个要点：容器内的 `/files/nas2data` 必须是**真实目录**（bind 的落点天然是实体，不能是软链接），
 所以内容根 `/data` 里**不要**预先放 `nas2 -> /nas2/` 这类链接 —— 它既会被 docker 解析成宿主路径去挂，
 内容出口也拒绝跟随任何链接；放行的目录只以实体 bind 的形式出现在 `/files` 下。
+
+**本机实况（235.t）**：现网 /data/app/docker-compose.yml 的 volumes 共三行 ——
+`- ${FILES_DIR:-./files}:/files`（`.env` 里 `FILES_DIR=/data/`，即内容根是宿主 `/data`）、
+`- /nas2/:/files/nas2`（**当前为 rw 直挂**的 NFS 大盘，建议评估加 `:ro`，见本段末运维提醒）、
+`- /home/aigc/ChatGPT:/files/chatgpt:ro`。与上面通用示例的出入有两处：NFS 卷的容器内目录名
+就叫 `nas2`（不是 nas2data），且没挂 `:ro`。容器 mountinfo 证实 `/files/nas2` 是实体 NFS bind
+（kernel 视角 `nfs4 10.251.14.57:/ptjszx_ai01 rw`）。file 域名
+（file-235.ai-t.wtvdev.com；本机探针用 Host 头打 `127.0.0.1:6080`，不依赖 DNS）的实测入口：
+
+| URL 前缀 | 对应卷 / 内容根里的形状 | 实测 |
+|----------|--------------------------|------|
+| `/nas2/...` | `/nas2/ -> /files/nas2`（rw 直挂的实体 NFS bind） | 200 / 206 |
+| `/chatgpt/...` | `/home/aigc/ChatGPT -> /files/chatgpt:ro` | 200 / 206 |
+| `/nas2data/...` | 无对应卷；内容根里只剩 04:08 重建留下的**空目录残留**（历史实验产物） | 404 |
+| `/ChatGPT/...`（旧写法） | 宿主 `/data/ChatGPT -> /home/aigc/ChatGPT/` 同名软链接未删 | 400（预期） |
+
+`/nas2data` 是 06:0x 版记录的旧入口：当时 NFS 卷挂在 `/files/nas2data:ro`，后来换绑成
+`/files/nas2` 直挂，`/data/nas2data` 这个空目录没人清理，纯残留——请求它只会 404。
+
+旧前缀 400 的根因就是那条内容出口判据：路径任一级是链接即拒，与卷配没配无关。
+还有一个和它咬合的 docker 坑：compose 的 bind 如果源或目标父路径上有软链接（本机当时宿主
+`/data/nas2 -> /nas2/` 存在），docker 会解析链接、把卷实际挂到链接落点（容器 `/nas2`），
+`/files/nas2` 仍是出根软链接 —— 这就是「配了卷却仍 400」的典型根因。所以内容根里不要预放
+软链接、卷目标用不与任何链接同名的新目录（通用示例里 nas2data/chatgpt 两个名字即由此而来），
+新增 bind 前后都跑一次上面的体检命令 `find "$FILES_DIR" -maxdepth 2 -type l -ls`：
+与卷目标同名的残留链接出现在清单里，就先把链接删掉再重建容器。
+点题一句：`/files` 下的名字可以随便叫（`nas2`、`nas2data` 皆可），判据只有一条——该级
+realpath 与拼接串**逐字相等**（即实体目录）。当年 `/files/nas2` 是宿主软链接所以 400，
+今天同名路径是实体 bind 所以 200：换名字不改变结果，实体与否才决定结果。
+
+运维提醒：`/nas2/:/files/nas2` 目前是 rw 直挂。file 域名内容出口只做 GET/HEAD 读，不受影响；
+但管理界面的文件写接口（上传/重命名/删除，仅 admin；对象存储侧写范围另由
+`AUTHZ_S3_WRITABLE_PATHS` 约束）理论上能沿这条 rw 卷写进 NFS 大盘。若不需要经 authz 写
+`/nas2`，建议在该行末尾加 `:ro` 后 `docker compose up -d --force-recreate` 收紧（仅为建议，
+本文档未对容器做任何操作）。
 
 改过 `.env` 或 compose 后 `docker compose up -d --force-recreate` 才生效，再用 file 域名直取该子目录下
 的一个真实文件核验应回 200（目录本身无 autoindex，回 403 属正常）。若同名路径上旧的链接还留着，
@@ -361,6 +397,8 @@ curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
 curl -sS -o /dev/null -w "%{http_code}\n" -H "$H" -H "x-api-key: $KEY" \
   "http://127.0.0.1:${HTTP_PORT}/definitely-missing.mp4"              # 404：不存在不回落到页面
 docker exec authz grep -c authz_app_content /usr/local/openresty/nginx/conf/server.conf  # >=1：模板已渲染
+curl -sS -o /dev/null -w "%{http_code} %{content_type}\n" -H "$H" -H "x-api-key: $KEY" \
+  "http://127.0.0.1:${HTTP_PORT}/<实体bind子目录>/<一个真实文件>"                # 200：实体 bind 入口（本机 235.t 即 /nas2/...、/chatgpt/...，见 3.6）
 ```
 
 临时维护提示：若必须短暂开放 HTTP 或限制管理端来源，用防火墙白名单（例如 `ufw allow from 203.0.113.5 to any port 6080` 或 `iptables -A INPUT -p tcp --dport 6080 -s 203.0.113.5 -j ACCEPT`），完成后恢复默认；不要在生产长期保留明文入口。
@@ -477,6 +515,11 @@ docker restart authz
 rsync -a conf/ 241.t:/data/app/authz-test/conf/
 ssh 241.t 'cd /data/app/authz-test && docker restart authz-test'
 ```
+
+`/data/app/data/authz/conf/` 里不止两个 template：该目录还有用户自维护的本机定制 `http_inc.conf`
+（本机它承载着自定义的 21.k upstream，`listen 2001`）。同步模板只像上面那样逐个 `cp` 两个
+`*.template`，**勿整目录 rsync 覆盖 `conf/`** —— 整目录覆盖会连带抹掉本机定制，症状是 2001 入口
+直接消失而不是网关报错，很容易被误判成代码回归。
 
 同一台机器还要顺带核对 `docker-compose.yml`：241.t 那份是仓库根 compose 的手工副本且已漂移（缺
 `AUTHZ_APP_*` 五行），只同步 `conf/` 不会把新变量带进容器，原因见 3.5 节末尾的提示。

@@ -87,10 +87,21 @@ playwright-cli run-code "async page => {
 1. `git diff --check` + 本机全量严格回归通过（见上）；
 2. `git push origin main` → GitHub Actions 自动构建并推送 `ghcr.io/yorkane/authz`（查看该 workflow 状态确认 success）；
 3. 本机实例升级（仅用户要求时）：`cd /home/aigc/ChatGPT/authz && docker build -t authz:latest .`（复用缓存，秒级）→ `cd /data/app && docker compose up -d --force-recreate gateway`；
-4. 模板变更注意本机挂载了 `/data/app/data/authz/conf` 作模板目录，必须同步该目录再重建，否则新镜像配旧模板静默缺项；
+4. 模板变更注意本机挂载了 `/data/app/data/authz/conf` 作模板目录，必须同步该目录再重建，否则新镜像配旧模板静默缺项；同步时只逐个覆盖 `nginx.conf.template` 与 `server.conf.template`，绝不整目录 rsync `conf/`——该目录里的 `http_inc.conf` 是本机定制（含 21.k upstream `listen 2001`），整目录覆盖会丢配置；
 5. 发布后验证：登录页 200、session API、受保护代理、（若涉及）x-api-key 免登录三个入口；
 6. 本地构建细节与排障见 deploy.md §8.1（builder 代理坑、多核参数在 Dockerfile `RESTY_J`）。
 
 ## 部署
 本机 235.t 是生产环境
 生产环境的部署要求脚本一次性部署完, 在部署过程中 agent 会被中断要考虑无法后继操作的风险
+
+## 本机实例与内容出口（2026-10-09 交接）
+
+- 内容出口严格模型（commit e9249d8）：`file-<节点>.<域>/<路径>` 直取时，`lualib/resty/authz/gateway/app_content.lua` 的 `confined_to_root` 不跟随任何符号链接——每一级的 realpath 必须与拼接串逐字相等，只信任实体目录。400 有两种文案（JSON `error.message`，前缀「路径非法：」）：该级是链接报「路径含符号链接，内容出口只信任实体目录: <段>」；该级存在但解不出来（悬空/ELOOP/EACCES）报「无法解析真实路径: <段>」。该级不存在交回 nginx 404。
+- `AUTHZ_APP_TRUSTED_ROOTS` 手工白名单与 mountinfo 挂载点自动可信两套机制已删除，不要实现回来（用户裁决：信任只以实体目录为主）。管理 UI `/_authz/files/` 走静态 alias（`conf/server.conf.template` 的 `alias /files/`）、不 realpath、会跟随软链接——与内容出口不对称是刻意设计。
+- 外部目录经 file 域名放行的唯一姿势：实体 bind 挂进 `/files` 下。compose 的 bind 目标路径不得借道软链接——docker 会解析链接把卷实际挂到链接落点，造成「配了卷仍 400」假象。
+- 本机 235.t 生产现状（2026-10-09 06:17 实测）：compose 在 `/data/app/docker-compose.yml`（显式 environment 清单），镜像 `authz:latest` 本机 `docker build`（当前 image id 前缀 09b1149d5343）。volumes 关键三行：`/data:/files`（来自 `/data/app/.env` 的 `FILES_DIR=/data/`）、`/nas2/:/files/nas2`、`/home/aigc/ChatGPT:/files/chatgpt:ro`。
+- file 域名入口状态：`/chatgpt/...`、`/nas2/...` 直取实体文件 200（`/nas2` 是当前实挂的 bind 落点，未加 `:ro`）；`/nas2data/...` 404——deploy.md 写的目标形态 `/nas2/:/files/nas2data:ro` 尚未在本机落地，`/data/nas2data` 只是早期实验留下的空实体目录；`/ChatGPT/...` 400「无法解析真实路径: ChatGPT」属预期，宿主 `/data/ChatGPT` 遗留同名软链接未删。
+- 本机探针（KEY 从 `/data/app/.env` 的 `AUTHZ_API_KEY` 取，绝不回显值；含中文/空格的路径先做 URL 编码）：
+  `KEY=$(awk -F= '/^AUTHZ_API_KEY=/{print substr($0,index($0,"=")+1)}' /data/app/.env); curl -sS --max-time 8 -H 'Host: file-235.ai-t.wtvdev.com' -H "x-api-key: $KEY" -o /dev/null -w '%{http_code}\n' http://127.0.0.1:6080/chatgpt/qwen3-asr/README.md`（200）
+- strict 回归入口：21 条 strict 断言在 `test/test_authz_gateway.sh` 的 strict 段（约 L4737 起，`section app-domains` 内）。fixture 姿势：实体子挂载进 `/files/realmount` 期望 200；一切 `ln -s`（指向 /etc、/data、挂载点、根内相对、悬空）期望 400，该级不存在期望 404。反向对照已做：旧实现在 4 条语义断言 FAIL。
