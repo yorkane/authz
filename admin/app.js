@@ -176,7 +176,6 @@ const app = createApp({
         username.value = session.username || 'Signed in'
         source.value = session.source || 'local'
         csrf.value = session.csrf || ''
-        await loadTree()
       } catch (error) {
         if (error?.status === 401) {
           window.location.replace('/_authz/login?next=%2F_authz%2Fapps%2F')
@@ -204,8 +203,9 @@ const app = createApp({
         locale.value = nextLocale
         Quasar.Lang.set(nextLocale === 'zh-CN' ? Quasar.Lang.zhCN : Quasar.Lang.enUS)
       })
-      loadSession().then(() => {
-        // 树就绪后再解析锚点（内置页简写需要对照树节点补齐 ?v= 版本位）。
+      // session 与菜单树互不等待、并行发起；树先到先渲染，不再多等一个 session RTT。
+      // 锚点解析仍要等两者都就绪（内置页简写需要对照树节点补齐 ?v= 版本位）。
+      Promise.all([loadTree(), loadSession()]).then(() => {
         applyHashTarget(true)
         refreshTimer = window.setInterval(loadTree, 30000)
       })

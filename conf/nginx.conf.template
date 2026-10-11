@@ -112,6 +112,12 @@ http {
         -- 未启用共享会话时 start() 直接 return false，不产生定时器。
         local ok2, sync = pcall(require, "resty.authz.shared_session_sync")
         if ok2 then sync.start() end
+        -- 本机服务发现预热：抢 authz:discovery:warm 锁的那个 worker 挂一次延时全量扫描，
+        -- 把首轮探测成本挪出请求路径（menu-tree 过期时永远先吃共享字典里的旧值，
+        -- 后台重扫，见 lualib/resty/authz/discovery.lua 头部说明）。
+        local ok3, discovery = pcall(require, "resty.authz.discovery")
+        -- 方法存在性也要判：老镜像里没有 warm_start 时不能让 init_worker 抛错。
+        if ok3 and discovery.warm_start then discovery.warm_start() end
     }
 
     map $http_upgrade $connection_upgrade {

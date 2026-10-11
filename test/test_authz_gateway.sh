@@ -816,7 +816,7 @@ assert_contains "admin static asset permanent cache" \
     "$(awk 'BEGIN { IGNORECASE=1 } /^Cache-Control:/ { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$TMP_DIR/static-headers")" "max-age=315360000"
 assert_contains "admin static asset expires max" \
     "$(awk 'BEGIN { IGNORECASE=1 } /^Expires:/ { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$TMP_DIR/static-headers")" "2037"
-request GET "$ADMIN_HOST" '/_authz/apps/app.js?v=9' "$ADMIN_COOKIE"
+request GET "$ADMIN_HOST" '/_authz/apps/app.js?v=32' "$ADMIN_COOKIE"
 assert_contains_all "app.js renders the stored menu tree" "$BODY" \
     "error?.status === 401" \
     "isAdmin.value = Boolean(session.admin)" \
