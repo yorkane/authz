@@ -91,8 +91,8 @@ label `local:<port>`）。
 | `target_ip` | 默认 `127.0.0.1`，只接受 IP 字面量。指向内网 = 内网访问能力，高危 |
 | `menu_name` / `note` | 菜单显示名 / 悬浮备注 |
 | `enabled` | 默认 true |
-| `simulate_local` | 默认 false；true 时 Host/Origin/来源头模拟本机（数字前缀免配置入口恒为 true） |
-| `local_ip` | 模拟来源 IP，默认 127.0.0.1 |
+| `simulate_local` | 默认 false；true 时上游看到纯本机 loopback 请求：Host=`127.0.0.1:<端口>`，`X-Forwarded-*`/`X-Real-IP`/`Forwarded` 全部不发送，带 Origin 时重写为目标 Origin（数字前缀免配置入口恒为 true；绑定显式 `forwarded_*` 与 request_rewrite 同名头优先） |
+| `local_ip` | 已废弃：API 仍接受并存储，但不再影响转发头（模拟模式统一 loopback） |
 | `upstream_scheme` | `http`(默认)/`https` |
 | `upstream_ssl_verify` | 默认 true；false 仅用于自签名/受控内网 |
 | `upstream_path` | 固定上游路径改写，空=保留原路径；只接受纯 path |
@@ -103,7 +103,7 @@ label `local:<port>`）。
 
 `PATCH /applications/:id` 可改全部字段（仅 admin）。`DELETE /applications/:id` 删绑定。
 
-注意：未绑定域名的 `<port>-任意域名` 动态入口永远可用且指向本机，默认模拟本机访问；
+注意：未绑定域名的 `<port>-任意域名` 动态入口永远可用且指向本机，默认模拟本机访问（纯 loopback，转发头不发送）；
 显式绑定只用于自定义菜单名、转发头、改写或指向非本机 IP。
 
 ## 4. Casbin 策略（配权限）

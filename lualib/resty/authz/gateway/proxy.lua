@@ -152,9 +152,24 @@ local function apply_headers(binding, target_ip, port)
     -- preserved for applications that maintain their own sessions.
     ngx.var.authz_upstream_cookie = upstream_cookie()
     if simulate_local then
-        ngx.var.authz_real_ip = binding.local_ip or "127.0.0.1"
-        ngx.var.authz_forwarded_for = binding.local_ip or "127.0.0.1"
+        -- 模拟本机访问：上游必须看到与本机 loopback 直连完全一致的请求，
+        -- 默认不发送任何代理转发头（nginx 对 proxy_set_header 空值不发送该头）：
+        -- X-Real-IP / X-Forwarded-For / Forwarded 一律置空，X-Forwarded-Host/Proto/Port
+        -- 只在绑定显式配置时保留。local_ip 字段已废弃：真实 TCP 来源本就无法改变，
+        -- HTTP 来源头也不再伪造。「改写请求」(request_rewrite) 在本段之后应用，
+        -- 显式设置随时可以把某个头加回；X-Authz-* 身份断言头不属于转发字段。
+        ngx.var.authz_real_ip = ""
+        ngx.var.authz_forwarded_for = ""
         ngx.var.authz_forwarded = ""
+        if (binding.forwarded_host or "") == "" then
+            ngx.var.authz_proxy_forwarded_host = ""
+        end
+        if (binding.forwarded_proto or "") == "" then
+            ngx.var.authz_forwarded_proto = ""
+        end
+        if (tonumber(binding.forwarded_port) or 0) < 1 then
+            ngx.var.authz_forwarded_port = ""
+        end
     else
         ngx.var.authz_real_ip = tostring(ngx.var.remote_addr or "")
         ngx.var.authz_forwarded_for = forwarded_for()

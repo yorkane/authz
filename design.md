@@ -245,8 +245,8 @@ resolver（gateway/resolver.lua）按序命中：
    `/_authz/s3/`，复用既有 location 与其流式代理。该端口不允许被域名绑定
    占用（applications 服务拒绝 422）。
 4. 数字前缀：`^(\d{1,5})-` 且端口在 PORT_MIN~MAX → 端口，且默认
-   `simulate_local=true`（目标固定 127.0.0.1：上游 Host/Forwarded 头按本机访问
-   构造，兼容只认本地来源的本地应用）
+   `simulate_local=true`（纯本机 loopback：上游 Host 为 `127.0.0.1:<端口>`，
+   代理转发头全部不发送，Origin 重写为目标地址，兼容只认本地来源的本地应用）
 5. 全部未命中 → 404 页面（host 已 HTML 转义）
 
 代理循环防护：目标 IP+端口等于网关自身监听地址时返回 508。
@@ -343,9 +343,11 @@ redirect 之前对每条候选形态（归一化 $uri、原始未解码串、逐
 - `authz_session` Cookie 在代理前精确剥离，业务 Cookie 保留
 - 固定头：X-Authz-User / X-Authz-Source / X-Authz-Identity；X-Forwarded-For 追加
   remote_addr；凭证头（x-api-key/x-role-key）不透传
-- Host/Forwarded 链路头优先级：绑定显式 `upstream_host`/`forwarded_*` 覆盖 →
-  `origin_mode`（auto/preserve/rewrite/remove/custom）→ simulate_local（本机值）→
-  请求 Host
+- Host/Forwarded 链路头优先级：绑定显式 `upstream_host`/`forwarded_*` 覆盖（含 request_rewrite
+  显式设置/追加的同名头，在模拟之后生效）→ `origin_mode`（auto/preserve/rewrite/remove/custom）→
+  simulate_local（纯 loopback：Host=`127.0.0.1:<端口>`，X-Forwarded-For/X-Real-IP/
+  X-Forwarded-Proto/Port/Host/Forwarded 全部移除，带 Origin 时重写为目标 Origin；
+  显式配置的 forwarded_* 优先，模拟只移除未显式配置的默认转发头）→ 请求 Host
 - 配了正文改写的绑定自动向上游声明 `Accept-Encoding: identity`（绑定显式覆盖
   Accept-Encoding 时以用户为准，改写随之失效）
 - **改写优先于 proxy_set_header**：nginx 语义里 proxy_set_header 会覆盖 access 阶段

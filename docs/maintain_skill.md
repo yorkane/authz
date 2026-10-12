@@ -75,7 +75,7 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
 - 菜单编辑器只编辑系统应用与域名服务两个分组（分组卡片两列平铺）；`builtin='local'`（本地服务）完全移出编辑器。凡 `builtin` 非空的分组/条目（system/domains/local 分组与内置页面）不可删除：API 返回 `409`，UI 隐藏删除按钮，两侧保护不得移除。
 - Dockerfile 必须保留 `--with-http_ssi_module` 和 `ngx_brotli`；Brotli 动态等级 5，静态资源构建时生成等级 11 的 `.br`，由 `brotli_static` 提供。
 - `conf/nginx.conf.template` 只维护全局配置、HTTP/HTTPS listener 和 TLS；两个 server 必须共同 include 入口脚本生成的 `server.conf`，控制面 location 与代理参数只在 `conf/server.conf.template` 维护。
-- 显式绑定默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名；未绑定域名的 `<port>-任意域名` 动态入口固定指向本机 `127.0.0.1:<port>`，默认启用模拟本机访问（Host/Forwarded-Host 为目标地址，来源头为 `127.0.0.1`）。显式 binding 可按记录选择 HTTP/HTTPS 上游、关闭 HTTPS 证书校验、改写上游路径，或覆盖 Host、Forwarded、Origin、模拟本机 HTTP 请求头。不能恢复为 `$proxy_host` 全局默认。外层代理改写端口时，只能在 Origin 与请求 Host 的主机名相同后采用 Origin authority，不能信任异域 Origin；所有绑定级 authority/origin 必须拒绝 CR/LF 和 path/query，上游改写路径也必须拒绝 query/fragment、连续斜杠和 `..`。
+- 显式绑定默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名；未绑定域名的 `<port>-任意域名` 动态入口固定指向本机 `127.0.0.1:<port>`，默认启用模拟本机访问（上游 Host 为目标 loopback 地址，`X-Forwarded-*`/`X-Real-IP`/`Forwarded` 等代理转发头一律不发送，带 `Origin` 时重写为目标 Origin；绑定级显式 `forwarded_*` 与「改写请求」同名头优先于模拟）。`local_ip` 字段已废弃（API 接受并存储但不再影响转发头）。显式 binding 可按记录选择 HTTP/HTTPS 上游、关闭 HTTPS 证书校验、改写上游路径，或覆盖 Host、Forwarded、Origin、模拟本机 HTTP 请求头。不能恢复为 `$proxy_host` 全局默认。外层代理改写端口时，只能在 Origin 与请求 Host 的主机名相同后采用 Origin authority，不能信任异域 Origin；所有绑定级 authority/origin 必须拒绝 CR/LF 和 path/query，上游改写路径也必须拒绝 query/fragment、连续斜杠和 `..`。
 - 策略新增和编辑表单只管理 `p` 访问策略，不提供 `g` 角色分配切换；历史 `g` 规则仅列出和删除。
 - 绑定级 header 覆盖（多行 `Header-Name: value`）只允许覆盖透传类请求头；Host、Cookie、Origin、X-Authz-*、X-Forwarded-*、X-Real-IP、hop-by-hop 与分帧头必须在 validation 层拒绝，cache 层二次过滤，不得扩大可覆盖范围。
   表单按 binding ID 选择目标并由服务端统一校验 binding 与 Casbin 对象端口一致；

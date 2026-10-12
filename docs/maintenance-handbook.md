@@ -53,7 +53,7 @@ Browser
 - HTTPS 入口默认 6443，在网关终止客户端 TLS 后，仍按绑定记录选择 HTTP/HTTPS 上游；HTTPS 上游默认校验证书，可按绑定关闭校验；
 - 目标优先取启用的精确域名绑定，否则按请求首级标签查裸前缀索引（`<前缀>` 或 `<前缀>-<节点>` 命中即接管，见下），遗留物化域名再按 `前缀|节点` 精确回退，最后解析 `<port>-任意域名` 到 `127.0.0.1:<port>`；显式绑定还可保存绑定级 Host、Forwarded、Origin 和模拟本机访问配置；未绑定域名的动态端口入口默认启用模拟本机访问；
 - 可代理端口下限强制不小于 2000；目标为网关自身端口时返回 508；
-- 上游收到 `X-Authz-User`、`X-Authz-Source`、`X-Authz-Identity`；显式绑定默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名，`<port>-任意域名` 动态入口默认模拟本机访问（Host/`X-Forwarded-Host` 为 `127.0.0.1:<port>`，`X-Real-IP`/`X-Forwarded-For` 为 `127.0.0.1`）。若最外层代理替换了端口，只在 Origin 与请求 Host 的主机名相同时恢复 Origin 中的公网端口。显式绑定可安全覆盖 `Host`、`X-Forwarded-Host/Proto/Port` 和 `Origin`，但不能改变真实 TCP peer。
+- 上游收到 `X-Authz-User`、`X-Authz-Source`、`X-Authz-Identity`；显式绑定默认 `Host` 与 `X-Forwarded-Host` 保留外部请求主机名，`<port>-任意域名` 动态入口默认模拟本机访问（上游 Host 为 `127.0.0.1:<port>`，`X-Forwarded-*`/`X-Real-IP`/`Forwarded` 等代理转发头一律不发送）。若最外层代理替换了端口，只在 Origin 与请求 Host 的主机名相同时恢复 Origin 中的公网端口。显式绑定可安全覆盖 `Host`、`X-Forwarded-Host/Proto/Port` 和 `Origin`（绑定级显式 `forwarded_*` 优先于模拟），但不能改变真实 TCP peer。
 - 只要请求带有 `Upgrade: websocket`，所有已解析的动态代理目标都会转发升级头，并关闭缓冲、延长读写超时。`bindings.websocket` 保留为历史兼容字段，不再阻断升级请求。
 
 Admin 菜单应用列表不依赖 `bindings` 表：`/_authz/api/applications` 读取 `/proc/net/tcp` 和
@@ -271,8 +271,9 @@ API Key 安全约束：
 - 代理前必须通过 `proxy_set_header X-Authz-Key ""` 清除凭据；
 - `target_ip` 允许可信 admin/api 主体连接其他机器，应将其视为内网访问能力；Casbin 对象仍按
   `/<port><path>` 授权，同端口的不同目标 IP 共享策略；
-- 绑定级 Host/Forwarded/Origin 字段必须经过 authority/origin 白名单校验并拒绝 CR/LF；模拟本机访问只重写
-  `Host`、`Origin`、`X-Real-IP`、`X-Forwarded-For` 等 HTTP 头，不应被描述成 TCP 来源伪造；
+- 绑定级 Host/Forwarded/Origin 字段必须经过 authority/origin 白名单校验并拒绝 CR/LF；模拟本机访问只影响
+  HTTP 请求头（重写 `Host`、带 `Origin` 时重写为目标 Origin，并移除未显式配置的 `X-Forwarded-*`/`X-Real-IP`/
+  `Forwarded` 转发头），不应被描述成 TCP 来源伪造；
   request_rewrite 覆盖发往上游的请求头，格式、控制字符、长度和白名单（仅禁分帧/hop-by-hop 与
   网关凭据头 X-Authz-Key/X-API-Key/X-Role-Key，其余 X-Authz-*/Proxy-* 前缀）在 validation 层校验，
   cache 层防御性二次过滤；proxy 层普通头用 ngx.req.set_header 注入，网关托管头（Host/Cookie/
@@ -630,7 +631,7 @@ bash scripts/restart_gateway.sh --build  # 按当前 Docker 架构重建镜像�
 4. WebSocket 默认全局开启；不同前缀可以共用同一端口，但同一最终域名重复创建返回 `409`。验证时只需携带 `Upgrade: websocket`，不依赖绑定记录中的旧 `websocket` 值。
 5. 管理菜单优先使用已配置绑定的 `menu-name`，其次是绑定域名；绑定备注只在菜单名称下方显示，鼠标悬浮菜单时显示该菜单实际打开的完整域名地址；没有绑定时才使用自动发现的 `local:<port>`，且不显示绑定备注。普通点击在右侧 iframe 打开，Ctrl/Command + 点击在新窗口打开菜单地址。
 6. pi-web 会校验 API 请求的 Host 与 Origin；网关必须保留外部 Host，pi-web 启动环境需设置精确域名白名单，例如 `PI_WEB_ALLOWED_HOSTS=pi-m.ws.example.com`。公网端口被外层代理改写时，网关只对同主机名 Origin 恢复公网端口，异域 Origin 继续由上游拒绝。
-7. 若应用只接受目标地址 Host 或本地来源头，优先在单条绑定上覆盖 Host/Forwarded/Origin，或启用“模拟本机访问”并填写 `127.0.0.1`/网关局域网 IP；不要放宽所有绑定的全局默认策略。
+7. 若应用只接受目标地址 Host 或本地来源头，优先在单条绑定上覆盖 Host/Forwarded/Origin，或启用“模拟本机访问”（上游 Host 为 `127.0.0.1:<端口>`，代理转发头全部不发送，与本机直连一致）；不要放宽所有绑定的全局默认策略。
 8. 外层入口是两套、端口约定不同（2026-09-07 实测）：内网 APISIX（10.252.25.252）只监听 **443**，服务 `*-235/*-241.ai-t.wtvdev.com`；公网企业边缘（218.108.76.10）只监听 **ws.gatepro.cn 的 :99**（443 不通），且转发时**把 Host 的 zone 改写成 ai-t.wtvdev.com**（首标签保留，LAN APISIX 根本不服务 ws 域）。因此经 `ws.gatepro.cn:99` 浏览时菜单域名总是物化成 ai-t，菜单链接不能照抄浏览器端口——`admin/app.js` 的 `nodeUrl` 只在目标与当前页同 zone 时继承端口，跨 zone 用默认 443，否则拼出 `*-235.ai-t.wtvdev.com:99` 这类死链。`server.conf.template` 必须保持 `absolute_redirect off`，否则访问 `/_authz/apps` 时生成的尾斜杠跳转会泄露不可达的 `:6443`，造成 Admin 入口无法访问。
 9. 绑定的“上游路径改写”会把请求统一转发到填写的目标路径，不改变 Casbin 对象；例如填写 `/backend/index.html` 会把 `/path?a=1` 转发为 `/backend/index.html?a=1`。改写路径必须是安全路径，不能带 query、fragment、连续斜杠或 `..`。
 

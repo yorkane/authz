@@ -22,7 +22,8 @@
 
 1. **数字前缀子域名**（免配置）：`3000-任意域名` → 本机 `3000` 端口，
    支持多级子域名（`3000-a.b.c.example.com`），端口范围默认 `2000-20000`；
-   该免配置入口默认按“模拟本机访问”处理（上游 Host 为 `127.0.0.1:<port>`，来源头为 `127.0.0.1`）
+   该免配置入口默认按“模拟本机访问”处理（上游看到纯本机 loopback 请求：Host 为
+   `127.0.0.1:<port>`，且不发送任何代理转发头）
 2. **显式绑定**：管理界面配置固定域名到目标 IP + 端口的映射（存 SQLite，目标 IP 默认 `127.0.0.1`）
 3. **内置应用保留前缀**（虚拟绑定，不在数据库中）：`file-任意域名` → 文件浏览、
    `s3-任意域名` → 对象存储（默认端口 100/101，可用 `AUTHZ_APP_*` 调整或整体关闭）。
@@ -54,7 +55,7 @@
 - “改写请求”（绑定行工具栏）按绑定改写发往上游的请求，参考 APISIX 支持三种操作：替换（覆盖当前值）、追加（托管头按分隔符并入现值，普通头多出一行）、删除；也可整体替换或按规则过滤文本正文。Host、Cookie、Origin、X-Forwarded-*、X-Authz-User/Source/Identity 等网关托管头同样可改写，改写值优先于网关默认值（删除则不发送该头）；只有分帧与 hop-by-hop 头（Content-Length、Transfer-Encoding、Connection、Upgrade 等）和网关凭据头（X-Authz-Key、X-API-Key、X-Role-Key）不可改写。编辑器支持表单与 JSON 双视图。
 - “域名与端口绑定”每行提供 **改写响应** 按钮，可按绑定改写返回给浏览器的上游响应（语义参考 APISIX `response-rewrite`）：覆盖状态码、覆盖/删除响应头、整体替换正文（文本 / JSON / Base64）或按规则过滤正文（字面量与 PCRE 替换）。编辑器支持表单与 JSON 双视图互转，也可一键清除。
   正文改写只作用于上游 200 的 GET 响应，Range 分片、二进制和超过 1MB 的响应自动跳过（响应头 `X-Authz-Rewrite: skipped=<原因>` 会标明原因）。为了让改写对压缩型上游也生效，配置了正文改写的绑定会自动向上游声明 `Accept-Encoding: identity`（该链路不再压缩）；在「改写请求」里显式写 `Accept-Encoding` 时以其为准，此时上游返回压缩正文，正文改写按设计跳过并标记 `skipped=encoded`。`Set-Cookie`、`Content-Length`/`Transfer-Encoding` 等分帧头、`X-Authz-*` 以及 `X-Frame-Options`、`CSP`、`HSTS` 等安全头在保存与运行期两层都会被拒绝改写。
-- “模拟本机访问”默认把 `Host`/`Origin` 改为目标 HTTP 地址，并将 `X-Real-IP`、`X-Forwarded-For` 设置为 `127.0.0.1`；也可填写网关的局域网 IP。该选项只模拟 HTTP 请求头，不能改变真实 TCP 来源地址。
+- “模拟本机访问”让上游收到纯本机 loopback 请求：`Host` 改为 `127.0.0.1:<端口>`；`X-Forwarded-For`、`X-Real-IP`、`X-Forwarded-Proto`、`X-Forwarded-Port`、`X-Forwarded-Host`、`Forwarded` 一律不发送（代理转发字段完全移除，与浏览器本机直连一致）；请求带 `Origin` 时重写为目标 Origin（`http://127.0.0.1:<端口>`）。绑定级显式配置的 `forwarded_host`/`forwarded_proto`/`forwarded_port` 优先，「改写请求」里显式设置/追加的同名头同样在模拟之后生效，可用来重新加回某个头。`X-Authz-User`/`X-Authz-Source`/`X-Authz-Identity` 身份断言头不受影响，照常发送。该选项只影响 HTTP 请求头，不能改变真实 TCP 来源地址；`local_ip` 已废弃（UI 移除输入框，API 仍接受并存储，但不再影响转发头）。
 
 ### 文件浏览（Web 文件管理器）
 
@@ -161,7 +162,7 @@ docker exec <container_name> admin_password_reset
 - 修改已挂载的 `admin/` 或 `lualib/` 通常无需重建镜像，但应执行 `openresty -t`；修改挂载、网络或环境变量必须重建容器。
 - `6443` 是网关的 HTTPS 入口，TLS 在网关终止；上游协议由域名绑定单独选择，HTTPS 上游可按需关闭证书校验。
 - 网关向上游保留外部 `Host`；带严格 Host/Origin 校验的应用还需把绑定域名加入自身可信列表，例如 pi-web 设置 `PI_WEB_ALLOWED_HOSTS=pi-m.ws.example.com`。
-- 若上游只接受内部 Host 或本地来源，可在该绑定的“高级代理配置”中精确覆盖相关头，或启用“模拟本机访问”；不要为解决单个应用兼容问题修改全局代理默认值。
+- 若上游只接受内部 Host 或本地来源，可在该绑定的“高级代理配置”中精确覆盖相关头，或启用“模拟本机访问”（上游 Host 改为目标 loopback 地址并移除全部代理转发头）；不要为解决单个应用兼容问题修改全局代理默认值。
 - 测试本机 code-server 时先运行 `curl -i http://127.0.0.1:2077/`，返回 `200` 才说明后端 HTTP 正常；直接访问本机 `https://127.0.0.1:2077/` 失败是正常的协议不匹配。
 - 未带会话访问已解析的绑定域名时返回 `302` 到 `/_authz/login` 是预期认证结果，不能用未登录 curl 判断 iframe 或 WebSocket 是否正常。
 - `scripts/restart_gateway.sh` 会检查 Compose 配置、host 网络、OpenResty 配置、登录页、session API 和 Admin 入口。

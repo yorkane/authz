@@ -247,8 +247,8 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 | `forwarded_port` | 否 | `0`/留空表示自动，否则为 1-65535 |
 | `origin_mode` | 否 | `auto`（默认）、`preserve`、`rewrite`、`remove` 或 `custom` |
 | `custom_origin` | 否 | `origin_mode=custom` 时必填，只接受无 path/query 的 `http(s)://authority` |
-| `simulate_local` | 否 | 默认 `false`；启用本机 HTTP 请求头模拟 |
-| `local_ip` | 否 | 模拟来源 IP，默认 `127.0.0.1`，也可使用网关局域网 IPv4/IPv6 |
+| `simulate_local` | 否 | 默认 `false`；true 时上游看到纯本机 loopback 请求（Host=`127.0.0.1:<端口>`，代理转发头全部不发送，带 Origin 时重写为目标 Origin） |
+| `local_ip` | 否 | 已废弃：仍接受并存储，但不再影响转发头（模拟模式统一 loopback） |
 | `open_in_new` | 否 | 默认 `false`；仅影响管理端左侧菜单：点击该绑定直接新标签页打开（应用自检 iframe 嵌入时规避检测），不参与代理与授权 |
 | `request_rewrite` | 否 | 请求改写配置（对象或 JSON 字符串）：`enabled`、`headers`、`remove_headers`、`body`、`body_base64`、`content_type`、`rewrites`；可改写上表各代理字段默认算出的请求头（Host/Cookie/Origin/X-Forwarded-* 等同样可改写，改写值即上游看到的最终值）；留空或 `null` 表示不改写，保存后返回规范化 JSON |
 | `upstream_scheme` | 否 | 上游协议，`http`（默认）或 `https` |
@@ -274,10 +274,11 @@ curl -sS -X POST "${GATEWAY}/_authz/api/applications" \
 
 上游路径改写只改变发往上游的 URI，不改变 Casbin 授权对象；权限仍按客户端请求的原始路径检查。改写路径为空时保留原路径；填写后使用固定目标路径，查询参数仍原样保留。
 
-代理头字段拒绝 CR/LF、URL path 和非法 authority，避免 Header 注入。`simulate_local` 会把默认 Host/Origin
-指向 `http://<target_ip>:<port>`，把 `X-Real-IP` 与 `X-Forwarded-For` 改为 `local_ip`，并移除客户端
-`Forwarded`；显式填写的 Host/Forwarded/Origin 配置优先。它不会伪造 TCP peer，远端上游实际看到的
-TCP 来源仍是网关主机地址。
+代理头字段拒绝 CR/LF、URL path 和非法 authority，避免 Header 注入。`simulate_local` 会把上游 Host
+改为 `127.0.0.1:<port>`，请求带 `Origin` 时重写为目标 Origin（`http://127.0.0.1:<port>`），并完全移除
+`X-Forwarded-For`、`X-Real-IP`、`X-Forwarded-Proto`、`X-Forwarded-Port`、`X-Forwarded-Host`、`Forwarded`
+等代理转发头（未显式配置时）；绑定级显式填写的 Host/forwarded_* 配置与 request_rewrite 同名头优先于模拟。
+它不会伪造 TCP peer，远端上游实际看到的 TCP 来源仍是网关主机地址。
 `request_rewrite` 改写发往上游的请求：`headers`（对象，值 `null` = 删除）与 `remove_headers`
 覆盖/删除请求头，`body`/`body_base64`/`content_type` 整体替换正文，`rewrites` 做正文过滤
 （格式同 `response_rewrite`，两者互斥；仅文本类、Content-Length 明确的非 GET/HEAD 请求生效）。

@@ -824,7 +824,7 @@ assert_contains_all "app.js renders the stored menu tree" "$BODY" \
     "setInterval(loadTree, 30000)" \
     'event?.ctrlKey || event?.metaKey || Number(node.open_in_new) === 1' \
     "window.open(url, '_blank', 'noopener,noreferrer')" \
-    "authorization.html?v=17" \
+    "authorization.html?v=18" \
     "menuEditor: 'menu-editor.html" \
     "function nodeUrl (node)" \
     "groupOpen[group.id]"
@@ -1742,10 +1742,10 @@ assert_json "upstream receives raw username" '.user' "bob"
 assert_json "upstream receives identity source" '.source' "local"
 assert_json "upstream receives canonical identity" '.identity' "user:local:bob"
 assert_json "dynamic port access defaults to simulate-local Host" '.host' "127.0.0.1:$UPSTREAM_PORT"
-assert_json "dynamic port access defaults to simulate-local forwarded host" '.forwarded_host' "127.0.0.1:$UPSTREAM_PORT"
-assert_json "dynamic port access defaults to http forwarded proto" '.forwarded_proto' "http"
-assert_json "dynamic port access defaults to local real IP" '.real_ip' "127.0.0.1"
-assert_json "dynamic port access defaults to local forwarded-for" '.forwarded_for' "127.0.0.1"
+assert_json "dynamic port access omits forwarded host" '.forwarded_host | tostring' "null"
+assert_json "dynamic port access omits forwarded proto" '.forwarded_proto | tostring' "null"
+assert_json "dynamic port access omits real IP" '.real_ip | tostring' "null"
+assert_json "dynamic port access omits forwarded-for" '.forwarded_for | tostring' "null"
 assert_json "dynamic port access drops client Forwarded header" '.forwarded | tostring' "null"
 AUTHZ_COOKIE_HEADER=$(cookie_header "$DYNAMIC_COOKIE")
 STATUS=$(curl -sS --max-time 5 --resolve "$DYNAMIC_HOST:$HTTP_PORT:127.0.0.1" \
@@ -1905,12 +1905,12 @@ STATUS=$(curl -sS --max-time 5 --resolve "fixed.test.example:$HTTP_PORT:127.0.0.
     -o "$TMP_DIR/body" -w '%{http_code}' "http://fixed.test.example:$HTTP_PORT/identity")
 assert_eq "local simulation request reaches upstream" "$STATUS" "200"
 assert_json "local simulation uses target Host" '.host' "127.0.0.1:$UPSTREAM_PORT"
-assert_json "local simulation uses target forwarded Host" '.forwarded_host' "127.0.0.1:$UPSTREAM_PORT"
-assert_json "local simulation reports HTTP upstream protocol" '.forwarded_proto' "http"
-assert_json "local simulation reports target port" '.forwarded_port' "$UPSTREAM_PORT"
+assert_json "local simulation omits forwarded Host" '.forwarded_host | tostring' "null"
+assert_json "local simulation omits forwarded protocol" '.forwarded_proto | tostring' "null"
+assert_json "local simulation omits forwarded port" '.forwarded_port | tostring' "null"
 assert_json "local simulation rewrites Origin" '.origin' "http://127.0.0.1:$UPSTREAM_PORT"
-assert_json "local simulation replaces real IP" '.real_ip' "192.168.50.10"
-assert_json "local simulation replaces forwarded chain" '.forwarded_for' "192.168.50.10"
+assert_json "local simulation omits real IP" '.real_ip | tostring' "null"
+assert_json "local simulation omits forwarded chain" '.forwarded_for | tostring' "null"
 assert_json "local simulation removes standard Forwarded" '.forwarded == null | tostring' "true"
 
 request PATCH "$ADMIN_HOST" "/_authz/api/applications/$APP_ID" "$ADMIN_COOKIE" "$CSRF" '{"upstream_host":"","forwarded_host":"","forwarded_proto":"","forwarded_port":0,"origin_mode":"auto","custom_origin":"","simulate_local":false,"local_ip":"127.0.0.1"}'
