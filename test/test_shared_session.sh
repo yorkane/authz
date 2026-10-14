@@ -8,6 +8,8 @@ SHARED_REDIS_CONTAINER=""
 SHARED_FIRST_CONTAINER=""
 SHARED_SECOND_CONTAINER=""
 SHARED_STRICT_CONTAINER=""
+SHARED_WB_CONTAINER=""
+SHARED_WB_B_CONTAINER=""
 TMP_DIR=$(mktemp -d)
 PASS=0
 
@@ -41,6 +43,14 @@ SHARED_TEST_API_KEY="shared-session-test-api-key-0123456789abcdef"
 # iptables 黑洞规则的标记，cleanup 里按它精确删除。
 SHARED_IPT_COMMENT="authz-shared-session-test"
 SHARED_OUTAGE_BLOCKED=0
+# 写熔断回归的 ACL 故障注入标记：非 0 = wb-writer 用户当前被收紧成只读。
+# cleanup 无条件恢复可写，否则 redis 容器被复用期间的后续检查会连环失败。
+SHARED_WB_DENY=0
+# wb 用例专用写用户：用户名刻意不含 "auth" 子串——NOPERM 原文
+# ("NOPERM User wb-writer has no permissions to run the 'setex' command")
+# 会被 classify() 的 auth 子串判成 config 类，写熔断就归不进可降级故障。
+SHARED_WB_WRITER_USER="wb-writer"
+SHARED_WB_WRITER_PASS="wb-writer-test-secret"
 # 重放定时器间隔：默认 15s 会把降级回归拖成分钟级，测试统一压到 1s（env 钳位下限）。
 SHARED_RETRY_INTERVAL_MS=${SHARED_RETRY_INTERVAL_MS:-1000}
 
@@ -54,6 +64,13 @@ cleanup() {
         docker rm -f "$SHARED_SECOND_CONTAINER" >/dev/null 2>&1 || true
     fi
     if [[ -n "$SHARED_REDIS_CONTAINER" ]]; then
+        if [[ "$SHARED_WB_DENY" == "1" ]]; then
+            docker exec "$SHARED_REDIS_CONTAINER" redis-cli -p "$SHARED_REDIS_PORT" \
+                --user "$SHARED_REDIS_ADMIN_USER" -a "$SHARED_REDIS_ADMIN_PASS" --no-auth-warning \
+                ACL SETUSER "$SHARED_WB_WRITER_USER" -@all +get +setex +del +scan +exists +ping +ttl +auth \
+                >/dev/null 2>&1 || true
+            SHARED_WB_DENY=0
+        fi
         # 故障注入用的黑洞规则必须无条件撤掉，否则本机同端口的其它服务会被牵连。
         sudo -n iptables -w -D INPUT -p tcp -s 127.0.0.1 --dport "$SHARED_REDIS_PORT" \
             -m comment --comment "$SHARED_IPT_COMMENT" -j DROP >/dev/null 2>&1 || true
@@ -63,6 +80,12 @@ cleanup() {
         docker exec "$SHARED_STRICT_CONTAINER" chmod -R a+rwx /data >/dev/null 2>&1 || true
         docker rm -f "$SHARED_STRICT_CONTAINER" >/dev/null 2>&1 || true
     fi
+    for wb_name in "$SHARED_WB_CONTAINER" "$SHARED_WB_B_CONTAINER"; do
+        if [[ -n "$wb_name" ]]; then
+            docker exec "$wb_name" chmod -R a+rwx /data >/dev/null 2>&1 || true
+            docker rm -f "$wb_name" >/dev/null 2>&1 || true
+        fi
+    done
     rm -rf "$TMP_DIR" || true
 }
 trap cleanup EXIT
@@ -154,6 +177,8 @@ docker run -d --name "$SHARED_REDIS_CONTAINER" --network host \
         +get +setex +del +scan +exists +ping \
     --user "$SHARED_READER_USER" on ">$SHARED_READER_PASS" "~authz-test:*" \
         +get +ping \
+    --user "$SHARED_WB_WRITER_USER" on ">$SHARED_WB_WRITER_PASS" "~authz-test:*" \
+        +get +setex +del +scan +exists +ping +ttl +auth \
     --user "$SHARED_REDIS_ADMIN_USER" on ">$SHARED_REDIS_ADMIN_PASS" "~*" \
         +@all >/dev/null
 
@@ -778,6 +803,224 @@ for _ in $(seq 1 240); do
 done
 assert_eq "writer serves again once the AUTH config is corrected" "$RECOVERED" "200"
 assert_json "health snapshot returns to ok" '.data.shared_session.state | tostring' "ok"
+
+# ══ 写熔断（AUTHZ_SESSION_WRITE_BREAKER）：写坏读好时不得清 cookie ════════
+# 事故现场（241.t kvrocks）：SETEX 返回 "ERR Corruption: WriteBatch has wrong
+# count"，读一切正常。这里用 Redis ACL 把写用户收紧成只读来复刻：SETEX/DEL
+# 直接 NOPERM，读命令照常，比停容器更贴近「读好写坏」。
+# 本段独立起一对 wb 实例并先停掉前面的共享会话容器：它们的定时器也会继续
+# 续写信标 <prefix>:health:shared，reader 的「writer 不可写」判据就不干净了。
+SHARED_WB_HOST="shared-wb.test.example"
+SHARED_WB_B_HOST="shared-wb-reader.test.example"
+SHARED_WB_CONTAINER="authz-shared-wb-writer-test-$$"
+SHARED_WB_B_CONTAINER="authz-shared-wb-reader-test-$$"
+SHARED_WB_HTTP_PORT=$(free_port)
+SHARED_WB_HTTPS_PORT=$(free_port)
+SHARED_WB_B_HTTP_PORT=$(free_port)
+SHARED_WB_B_HTTPS_PORT=$(free_port)
+SHARED_WB_BEACON="authz-test:health:shared"
+
+wb_deny_writer_writes() {
+    redis_admin ACL SETUSER "$SHARED_WB_WRITER_USER" -@all \
+        +get +scan +ping +exists +ttl +auth >/dev/null
+    SHARED_WB_DENY=1
+}
+
+wb_restore_writer_writes() {
+    redis_admin ACL SETUSER "$SHARED_WB_WRITER_USER" -@all \
+        +get +setex +del +scan +exists +ping +ttl +auth >/dev/null
+    SHARED_WB_DENY=0
+}
+
+# SETEX 被 ACL 拒绝的累计次数：熔断短路生效时，请求数与它的增量必须脱钩。
+wb_setex_rejects() {
+    local n
+    n=$(redis_admin info commandstats | tr -d '\r' \
+        | sed -n 's/^cmdstat_setex:.*rejected_calls=\([0-9]*\).*/\1/p' | head -1)
+    printf '%s\n' "${n:-0}"
+}
+
+wb_login() {
+    local host=$1 port=$2 username=$3 password=$4
+    curl -sS --max-time 15 --resolve "$host:$port:127.0.0.1" \
+        -o /dev/null -w '%{http_code}' -X POST "http://$host:$port/_authz/login" \
+        --data-urlencode "username=$username" --data-urlencode "password=$password"
+}
+
+wb_create_person() {
+    local host=$1 port=$2 username=$3 password=$4
+    curl -sS --max-time 15 --resolve "$host:$port:127.0.0.1" \
+        -H "Cookie: $(cookie_header "$SHARED_WB_COOKIE")" \
+        -H "X-CSRF-Token: $SHARED_WB_CSRF" -H 'Content-Type: application/json' \
+        -o "$TMP_DIR/body" -w '%{http_code}' \
+        -X POST "http://$host:$port/_authz/api/users" \
+        -d "{\"username\":\"$username\",\"password\":\"$password\",\"roles\":[\"guest\"]}"
+}
+
+docker stop "$SHARED_FIRST_CONTAINER" "$SHARED_SECOND_CONTAINER" \
+    "$SHARED_STRICT_CONTAINER" >/dev/null
+
+SHARED_EXTRA_ENVS=("AUTHZ_SESSION_WRITE_PROBE_INTERVAL=2")
+start_shared_gateway "$SHARED_WB_CONTAINER" "$SHARED_WB_HTTP_PORT" "$SHARED_WB_HTTPS_PORT" \
+    read-write "$SHARED_WB_WRITER_USER" "$SHARED_WB_WRITER_PASS"
+start_shared_gateway "$SHARED_WB_B_CONTAINER" "$SHARED_WB_B_HTTP_PORT" "$SHARED_WB_B_HTTPS_PORT" \
+    read-only "$SHARED_READER_USER" "$SHARED_READER_PASS"
+wait_shared_gateway "$SHARED_WB_HOST:$SHARED_WB_HTTP_PORT"
+wait_shared_gateway "$SHARED_WB_B_HOST:$SHARED_WB_B_HTTP_PORT"
+pass "write-breaker writer and reader gateways are ready"
+
+SHARED_WB_COOKIE="$TMP_DIR/wb-admin.cookie"
+shared_login "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" admin admin123 "$SHARED_WB_COOKIE"
+SHARED_WB_TOKEN=$(cookie_header "$SHARED_WB_COOKIE" | sed 's/^authz_session=//')
+STATUS=$(shared_session "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" "$SHARED_WB_COOKIE")
+assert_eq "wb writer session works while redis writes are healthy" "$STATUS" "200"
+SHARED_WB_CSRF=$(jq -er '.data.csrf' "$TMP_DIR/body")
+assert_json "healthy writer reports write_state ok" \
+    '.data.shared_session.write_state' "ok"
+assert_eq "wb writer session lands in redis" \
+    "$(redis_writer exists "authz-test:session:$SHARED_WB_TOKEN")" "1"
+
+STATUS=$(wb_create_person "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" wberin erin-secret-1)
+assert_eq "wb writer has the queued-login identity" "$STATUS" "201"
+STATUS=$(wb_create_person "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" wbghost ghost-secret-1)
+assert_eq "wb writer has the ghost identity" "$STATUS" "201"
+STATUS=$(wb_create_person "$SHARED_WB_B_HOST" "$SHARED_WB_B_HTTP_PORT" wbghost ghost-secret-1)
+assert_eq "wb reader has the ghost identity" "$STATUS" "201"
+
+SHARED_WB_GHOST_COOKIE="$TMP_DIR/wb-ghost.cookie"
+shared_login "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" wbghost ghost-secret-1 "$SHARED_WB_GHOST_COOKIE"
+SHARED_WB_GHOST_TOKEN=$(cookie_header "$SHARED_WB_GHOST_COOKIE" | sed 's/^authz_session=//')
+assert_eq "the ghost session is shared in redis before the write fault" \
+    "$(redis_writer exists "authz-test:session:$SHARED_WB_GHOST_TOKEN")" "1"
+assert_eq "reader serves the ghost session before the write fault" \
+    "$(shared_session "$SHARED_WB_B_HOST" "$SHARED_WB_B_HTTP_PORT" "$SHARED_WB_GHOST_COOKIE")" "200"
+wb_deny_writer_writes
+redis_admin del "$SHARED_WB_BEACON" >/dev/null
+pass "writer redis writes denied by ACL while the writer beacon is cleared"
+
+# (1) 写失败开闸：登录这条写路径第一次撞 NOPERM 后，write_state 必须翻 down，
+#     并把上游原始报错记进 last_write_error（运维据此区分写坏与配置错）。
+SHARED_WB_ERIN_COOKIE="$TMP_DIR/wb-erin.cookie"
+rm -f "$SHARED_WB_ERIN_COOKIE"
+ERIN_LOGIN=$(curl -sS --max-time 20 --resolve "$SHARED_WB_HOST:$SHARED_WB_HTTP_PORT:127.0.0.1" \
+    -D "$TMP_DIR/wb-erin-login-headers" -o "$TMP_DIR/body" -w '%{http_code}' \
+    -X POST "http://$SHARED_WB_HOST:$SHARED_WB_HTTP_PORT/_authz/login" \
+    --data-urlencode 'username=wberin' --data-urlencode 'password=erin-secret-1')
+assert_eq "login succeeds while redis writes are denied" "$ERIN_LOGIN" "302"
+assert_contains "the write-fault login lands on the app instead of the login page" \
+    "$(cat "$TMP_DIR/wb-erin-login-headers")" "Location: /_authz/apps/"
+save_session_cookie "$TMP_DIR/wb-erin-login-headers" "$SHARED_WB_ERIN_COOKIE"
+SHARED_WB_ERIN_TOKEN=$(cookie_header "$SHARED_WB_ERIN_COOKIE" | sed 's/^authz_session=//')
+assert_eq "the session issued during the write fault works on its writer" \
+    "$(shared_session "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" "$SHARED_WB_ERIN_COOKIE")" "200"
+assert_eq "the faulted write never reached redis" \
+    "$(redis_writer exists "authz-test:session:$SHARED_WB_ERIN_TOKEN")" "0"
+assert_eq "the admin key can read the health snapshot during the write fault" \
+    "$(admin_health "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT")" "200"
+assert_json "shared write failure opens the write breaker" \
+    '.data.shared_session.write_state' "down"
+assert_json "the read path stays healthy while writes are broken" \
+    '.data.shared_session.state | tostring' "ok"
+assert_contains "the write breaker records the upstream write error" \
+    "$(jq -er '.data.shared_session.last_write_error' "$TMP_DIR/body" | tr 'A-Z' 'a-z')" "noperm"
+
+# (1b) 短路：连续 10 次登录（每次都含一次签发写）产生的 SETEX 尝试次数必须远小于
+#      请求数——探测节奏被压到 2s 一次，短路实现下整个突发窗口只该有个位数尝试。
+WB_REJECTS_BEFORE_BURST=$(wb_setex_rejects)
+for _ in $(seq 1 10); do
+    wb_login "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" wberin erin-secret-1 >/dev/null
+done
+WB_REJECTS_AFTER_BURST=$(wb_setex_rejects)
+WB_BURST_DELTA=$((WB_REJECTS_AFTER_BURST - WB_REJECTS_BEFORE_BURST))
+printf 'INFO: wb burst: 10 logins caused %s redis SETEX attempts\n' "$WB_BURST_DELTA"
+assert_below "write attempts short-circuit while the breaker is down" "$WB_BURST_DELTA" "6"
+
+# (2) 读不受影响：已登录会话照常 200，且绝不带全族清理头。判据沿用文件开头的
+#     约定——set_cookie 本来就带 host-only/历史子域的 Max-Age=0 清理行，能区分
+#     「重新签发」与「fail-closed 清理」的是 Domain=<生效域> 那条。
+STATUS=$(shared_session "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" "$SHARED_WB_COOKIE")
+WB_HEADERS=$(cat "$TMP_DIR/shared-headers")
+assert_eq "writer keeps serving sessions while redis writes are down" "$STATUS" "200"
+assert_json "identity still resolves while writes are down" '.data.identity' "user:local:admin"
+assert_contains "the write outage re-issues the live session cookie" "$WB_HEADERS" \
+    "authz_session=$SHARED_WB_TOKEN; Path=/; HttpOnly"
+assert_not_contains "the write outage never zeroes the session for the cookie domain" "$WB_HEADERS" \
+    "Max-Age=0; Domain=$SHARED_COOKIE_DOMAIN"
+
+# (3) reader：写熔断期间（信标缺失）遇到 not_found 只回 401，一个清理头都不发。
+redis_admin del "authz-test:session:$SHARED_WB_GHOST_TOKEN" >/dev/null
+STATUS=$(shared_session "$SHARED_WB_B_HOST" "$SHARED_WB_B_HTTP_PORT" "$SHARED_WB_GHOST_COOKIE")
+WB_GHOST_HEADERS=$(cat "$TMP_DIR/shared-headers")
+assert_eq "reader keeps the browser cookie while the writer beacon is missing" "$STATUS" "401"
+assert_not_contains "the reader sends no cookie cleanup while the writer is write-blocked" \
+    "$WB_GHOST_HEADERS" "Max-Age=0"
+
+# (4) 自愈：恢复写权限后，探测写成功 → write_state 回 ok，欠写队列重放落 Redis。
+wb_restore_writer_writes
+WB_STATE=""
+WB_STATUS=000
+WB_ERIN=0
+WB_PENDING=-1
+for _ in $(seq 1 90); do
+    # 半开探测只由写入口触发（store.load 这条读路径没有探测副作用），纯轮询
+    # GET /api/session 永远等不到 write_state 回 ok：每轮先用一次登录驱动
+    # 签发写 → 抢到 ss:wprobe 的调用先 SETEX <prefix>:health:probe → 关闸。
+    wb_login "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" wberin erin-secret-1 >/dev/null
+    WB_STATUS=$(shared_session "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" "$SHARED_WB_COOKIE")
+    WB_STATE=$(jq -er '.data.shared_session.write_state' "$TMP_DIR/body" 2>/dev/null || echo unknown)
+    WB_PENDING=$(jq -er '.data.shared_session.pending.total' "$TMP_DIR/body" 2>/dev/null || echo -1)
+    WB_ERIN=$(redis_writer exists "authz-test:session:$SHARED_WB_ERIN_TOKEN")
+    [[ "$WB_STATE" == "ok" && "$WB_ERIN" == "1" && "$WB_PENDING" == "0" ]] && break
+    sleep 1
+done
+printf 'INFO: wb recovery: write_state=%s admin-status=%s pending=%s erin=%s\n' "$WB_STATE" "$WB_STATUS" "$WB_PENDING" "$WB_ERIN"
+assert_eq "the wb writer serves sessions through recovery" "$WB_STATUS" "200"
+assert_json "write breaker recovers on a successful probe" \
+    '.data.shared_session.write_state' "ok"
+assert_eq "the queued login is replayed into redis" "$WB_ERIN" "1"
+assert_eq "the pending queue drains after recovery" "$WB_PENDING" "0"
+# write_recovered_at 只由探测写成功（write_breaker_close）写下：证明恢复真由探测驱动。
+assert_json "the recovery is stamped by a successful probe write" \
+    '.data.shared_session | has("write_recovered_at") | tostring' "true"
+
+# (5) 状态可见 + 旧语义回归：信标恢复后，reader 的 not_found 重新走全族清理。
+assert_eq "session api exposes the shared write state" "$WB_STATUS" "200"
+assert_json "the session api payload carries the write state field" \
+    '.data.shared_session | has("write_state") | tostring' "true"
+redis_admin del "authz-test:session:$SHARED_WB_GHOST_TOKEN" >/dev/null
+WB_RESTORED=000
+WB_RESTORED_HEADERS=""
+for _ in $(seq 1 90); do
+    WB_RESTORED=$(shared_session "$SHARED_WB_B_HOST" "$SHARED_WB_B_HTTP_PORT" "$SHARED_WB_GHOST_COOKIE")
+    WB_RESTORED_HEADERS=$(cat "$TMP_DIR/shared-headers")
+    [[ "$WB_RESTORED" == "401" && "$WB_RESTORED_HEADERS" == *"Max-Age=0"* ]] && break
+    sleep 1
+done
+assert_eq "reader 401s the missing session after the writer beacon returns" "$WB_RESTORED" "401"
+assert_contains "reader restores the full-family cookie cleanup" "$WB_RESTORED_HEADERS" \
+    "Max-Age=0; Domain=$SHARED_COOKIE_DOMAIN"
+
+# 收尾：writer 用户必须恢复可写（cleanup 里还有同一份兜底）。
+assert_eq "the wb writer user can write redis again" \
+    "$(redis_admin setex authz-test:session:wb-final-probe 30 ok)" "OK"
+# 信标只由 writer 的成功共享写续期（TTL 30s），且写恢复后没有请求会主动打写路径。
+# 用一次 admin 登录制造一次成功签发，再查信标，避免踩在 30s 边界的假阴性上。
+shared_login "$SHARED_WB_HOST" "$SHARED_WB_HTTP_PORT" admin admin123 "$SHARED_WB_COOKIE"
+SHARED_WB_TOKEN2=$(cookie_header "$SHARED_WB_COOKIE" | sed 's/^authz_session=//')
+assert_eq "post-recovery login lands in redis as a shared session" \
+    "$(redis_writer exists "authz-test:session:$SHARED_WB_TOKEN2")" "1"
+WB_BEACON=0
+for _ in $(seq 1 30); do
+    WB_BEACON=$(redis_admin exists "$SHARED_WB_BEACON")
+    [[ "$WB_BEACON" == "1" ]] && break
+    sleep 1
+done
+assert_eq "the writer beacon is present again once writes recover" "$WB_BEACON" "1"
+assert_eq "the reader serves the restored session again" \
+    "$(shared_session "$SHARED_WB_B_HOST" "$SHARED_WB_B_HTTP_PORT" "$SHARED_WB_COOKIE")" "200"
+
+docker start "$SHARED_FIRST_CONTAINER" "$SHARED_SECOND_CONTAINER" \
+    "$SHARED_STRICT_CONTAINER" >/dev/null
 
 if [[ "$KEEP_GOING" == "1" ]]; then
     printf '\nTriage run: %d passed, %d failed\n' "$PASS" "$FAILS"

@@ -50,7 +50,9 @@ lualib/resty/authz/         ★ Authz Gateway 核心
   casbin.lua                mini-casbin 执行器 (p/g 行, deny 优先)
   session.lua               服务端会话 CRUD + cookie 读写
   shared_session_store.lua  ★ 共享会话（Redis）读写 + 熔断 + 降级：跨 worker 熔断器（共享字典）、
-                          网络故障期改读本机 sessions 镜像（grace，默认 4 小时）、故障期动作入待写队列
+                          网络故障期改读本机 sessions 镜像（grace，默认 4 小时）、故障期动作入待写队列；
+                          另有写路径熔断（write_state，共享写失败即短路 + 半开探测自愈）与 not_found
+                          分级清理（read-only / 写故障期不清 Cookie），见 §18
   shared_session_sync.lua   ★ 待写队列重放定时器：init_worker 里启动、owner 锁保证单条重放链，每 15s 一轮
                           按 id 升序重放 session_pending；熔断 OPEN 时本轮直接返回，不做网络尝试
   nocobase.lua              NocoBase signIn/check + 本地角色映射 + 远程身份快照
@@ -166,6 +168,9 @@ Python 等价验证: `hmac.new(salt.encode(), prev, hashlib.sha256).digest()`。
 | AUTHZ_SESSION_SHARED_FALLBACK | 共享会话 Redis 网络故障时是否容错降级（默认 true 降级读 SQLite 镜像 + 待写队列；false = 严格 fail-closed） |
 | AUTHZ_SESSION_RETRY_INTERVAL_MS | `session_pending` 重放定时器周期，默认 15000ms（钳 1000..600000）；owner 锁保证同一时刻只有一条重放链 |
 | AUTHZ_SESSION_FALLBACK_GRACE | 降级宽限期（秒，默认 14400，钳 60..604800）：会话经 Redis 确认存在的可信窗口，同时是跨实例撤销延迟上限 |
+| AUTHZ_SESSION_WRITE_BREAKER | 写路径熔断总开关（bool，默认 true）：共享写命令失败后 read-write 实例停止访问 Redis，读不受影响且不下发清理头（见 §18） |
+| AUTHZ_SESSION_WRITE_PROBE_INTERVAL | 熔断期半开探测间隔（秒，默认 5，钳位 1..60）：每轮放一个 worker 做一次探测写，成功即恢复 ok 并立刻重放待写队列 |
+| AUTHZ_SESSION_WRITER_BEACON | 写入方存活信标（bool，默认 true）：成功共享写后 SETEX 30s 刷新 `<prefix>:health:shared`，供 read-only 判断 not_found 缺席是否可信 |
 
 **Agent / 机器凭证**
 
@@ -375,6 +380,9 @@ redirect 之前对每条候选形态（归一化 $uri、原始未解码串、逐
   而非 worker 局部，是为了让任一 worker 探测到的 Redis 故障立刻对所有 worker 生效，避免每个 worker
   各自重复付一次 connect/read 超时。降级判据本身是 SQLite `sessions.verified_at`（跨 worker、跨重启
   的权威凭据），共享字典里的 seen 键只是节流阀。
+  同一份共享字典也承载**写路径**熔断状态（`write_state` = `off`/`ok`/`down` 与 `last_write_error`）：
+  读路径熔断按故障类别指数退避（5s→60s），写路径熔断只看「共享写命令是否成功过」，两者独立判定、
+  独立恢复，状态机见 §18。
 - service 的多步骤写操作使用 `db.transaction()`；授权相关写操作使用 `db.authz_transaction()`
 - revision 只在成功提交后由数据库门面自动递增；一次事务只递增一次，回滚不递增
 - 每个 worker 维护 `{rev, enforcer, bindings}` 本地缓存，rev 变化时全量重载
@@ -395,6 +403,7 @@ redirect 之前对每条候选形态（归一化 $uri、原始未解码串、逐
 | 网关 Cookie 隔离 | `authz_session` 代理前精确剥离，不跨信任边界；403/404/508 页动态内容全部 HTML 转义 |
 | 公网入口 | `AUTHZ_HTTP_MODE` 默认 `redirect`（308 HTTPS）；`disabled` 仅回环；`serve` 仅受控测试；维护期用防火墙白名单限制管理端 |
 | 共享会话 | 单写多读：仅一个实例 `read-write`（登录/登出/改密/撤销），其余 `read-only`；Redis ACL 分层授权。Redis **网络故障**走容错降级：跨 worker 熔断（OPEN 期零网络等待，指数退避 5s→60s）+ 读本机 SQLite 会话镜像（该会话在 grace 内经 Redis 确认过才承认，`AUTHZ_SESSION_FALLBACK_GRACE` 默认 4 小时）+ `session_pending` 待写队列恢复后按序重放；`AUTHZ_SESSION_SHARED_FALLBACK=false` 恢复严格 fail-closed。AUTH/SELECT 失败属配置错误，不降级。已知限制：故障期其他实例的撤销最长延迟一个 grace 才生效 |
+| 共享会话写路径 | 共享**写**命令失败（任何原因，含「读正常、写全报错」的存储层损坏）后，read-write 实例熔断写路径：`write_state=down` + 记录 `last_write_error`，停止继续访问 Redis（零网络）；读路径照常，已登录会话走本机镜像且**不下发清理 Cookie 头**。down 期间每 `AUTHZ_SESSION_WRITE_PROBE_INTERVAL` 秒半开放一次探测写，成功即恢复并立刻重放待写队列。只读实例在 not_found 时不清 Cookie、不删本机镜像，只回 401。开关 `AUTHZ_SESSION_WRITE_BREAKER` / `AUTHZ_SESSION_WRITER_BEACON`，取舍与判定矩阵见 §18 |
 | 远程认证 | 默认关闭；登录时显式选择来源；HTTPS 证书校验；密码/JWT 不落库 |
 | OAuth/OIDC | Authorization Code + PKCE；一次性 state；NocoBase 校验 issuer 并使用 Basic Client 认证；access token 不落库 |
 | 身份隔离 | 用户名与来源组成身份；同名多来源的会话、角色与直授权互不影响 |
@@ -664,3 +673,73 @@ S3 官方 bucket lifecycle 只到**天**粒度且异步执行，满足不了小�
 
 可写范围（`writable_paths` → `share/<本机 LAN IP>` 默认条目）的语义**照旧**，
 只是现在每套配置各自一份、各自探测/派生，互不影响。
+
+
+## 18. 2026-10-13 共享会话写路径熔断与分级清理（决策记录）
+
+**现象**。235.t（`read-write`）上登录成功、cookie 正常下发，管理壳每隔约 30 秒被弹回登录页，
+表现为间歇性掉线。浏览器侧 cookie 在跳登录瞬间从 1 条变 0 条。
+现场取证（`doc/2026-10-13-login-bounce-forensics.md`）排除了 cookie 域属性、第三方 cookie/iframe、
+空闲过期与凭据吊销：同一个 token 直连 235.t 恒 200，直连 241.t 恒 401，经 APISIX 边缘恒 401。
+
+**根因**。共享存储 kvrocks（10.252.25.241:6379）RocksDB WAL 损坏，**写命令全部返回**
+`ERR Corruption: WriteBatch has wrong count`，**读命令全部正常**。于是 writer 每次登录只落本机
+SQLite 镜像 + `session_pending` 待写队列，永远进不了 Redis；边缘在 235.t(read-write) 与
+241.t(read-only，无本机镜像) 之间轮询，241.t 判 not_found 后 401 并下发全族 `Max-Age=0`
+清理 Set-Cookie，浏览器会话被删除。既有健康探测只覆盖**读**路径（成功的 GET 会刷新
+`redis_last_ok_at`），所以 `shared_session.state=ok` 把写故障完全掩盖了 —— 这是本次最难发现的一环：
+一条只探读的探针，对「写全挂」的存储层天然失明。
+
+**决策**。四条，互相咬合，缺一即复发：
+
+1. **写路径熔断**。共享写命令失败（**任何原因**：连不上、超时、被拒、存储层返回 Corruption）后，
+   read-write 实例停止继续访问 Redis（短路、零网络），置 `write_state=down` 并记录
+   `last_write_error`。读路径不受影响：本机会话镜像继续服务已登录用户，且**不下发清理头**。
+   开关 `AUTHZ_SESSION_WRITE_BREAKER`（bool，默认 true）。
+2. **半开探测与自愈**。`down` 期间每 `AUTHZ_SESSION_WRITE_PROBE_INTERVAL` 秒（默认 5，钳位 1..60）
+   放**一个** worker 做一次探测写；写成功即恢复 `ok`，并立刻触发 `session_pending` 队列重放，
+   把故障期欠下的写全部补齐。
+3. **写入方存活信标**。read-write 实例在每次成功共享写后顺带 `SETEX <prefix>:health:shared 30`
+   刷新信标；read-only 实例在 not_found 时读它，判断「这次共享存储里没有该会话」是否可信
+   （信标新鲜 = writer 活着、它没写进去，缺席不可信）。开关 `AUTHZ_SESSION_WRITER_BEACON`（bool，默认 true）。
+4. **分级清理收窄**。read-only 实例（或本机 `write_state=down` 时）遇到 not_found **不再清浏览器
+   cookie、不删本机镜像**，只回 401 并记一条 WARN；写状态恢复后旧的全族清理行为回来。
+   显式撤销（登出/改密/删用户）、config 故障（AUTH/SELECT 失败）触发的全族清理**保持不变**。
+
+熔断状态机（写路径，与 §6 的读路径熔断器同挂 `authz_shared_session` 共享字典、跨 worker 生效）：
+
+```
+  ok ──共享写失败(任何原因)──▶ down（记 last_write_error，写请求短路、零网络）
+   ▲                                    │
+   └────探测写成功(触发待写重放)──── 每 PROBE_INTERVAL 秒放一个 worker 探测写
+```
+`AUTHZ_SESSION_WRITE_BREAKER=false` 时不进入 down，写失败按旧行为逐请求暴露（每请求付一次写超时）。
+`write_state` 取值 `off`（熔断关闭或未启用共享会话）/ `ok` / `down`。
+
+not_found 清理判定矩阵（清理 = 下发全族 `Max-Age=0` Set-Cookie + 删本机镜像行）：
+
+| 实例角色 | 写状态 | 信标 | 响应 | 清 cookie | 删本机镜像 |
+|---|---|---|---|---|---|
+| read-write | ok | —（自身即写入方） | 401 | 是（旧行为） | 是 |
+| read-write | down | 新鲜（= 本实例刚写失败） | 401 + WARN | **否** | **否** |
+| read-only | ok | 新鲜（writer 活着却没这条会话） | 401 | 是（真撤销/真过期） | 是 |
+| read-only | ok | 缺席/过期（writer 不在，缺席不可信） | 401 + WARN | **否** | **否** |
+| read-only | down | 任意 | 401 + WARN | **否** | **否** |
+| 任意 | config（AUTH/SELECT 失败） | — | 401 | 是 | 是 |
+
+矩阵的两处留白按同一方向收敛：信标**读取失败**（连不上/超时/命令报错，实现里是 `nil` 而非
+`false`）不算「缺席」，不进保守分支——那种情况由读路径熔断的 grace 降级负责，不在清理语义上再放宽；
+`write_state=off`（熔断关闭或未启用共享会话）时整张矩阵塌回旧行为（not_found 一律全族清理）。
+
+**边界**。这套机制只改「缺席时是否销毁客户端凭据」的判据，不改任何认证结论：not_found 一律 401，
+不存在「写故障期间放行未认证请求」。清理收窄的代价是**撤销的可见延迟变长** —— 共享存储确认没有该
+会话时，read-only 实例不再替 writer 执行清理，浏览器 cookie 留到下次写路径健康时再被判定；
+显式撤销（登出/改密/删用户）仍由 writer 立即写 Redis + 全族清理，不受本机制影响。
+信标是 30 秒 TTL 的辅助判据、不是权威事实：writer 空闲超过 30 秒时信标自然过期，此时 read-only
+按「缺席不可信」保守处理（不清 cookie），这是有意的安全方向 —— 宁可晚清，不可错清。
+清掉本条机制（`AUTHZ_SESSION_WRITE_BREAKER=false` + `AUTHZ_SESSION_WRITER_BEACON=false`）即回到
+2026-10-13 之前的行为，也就是本条事故里被证伪的那套判据，不要把它当排障手段。
+
+**运维可观测面**。`GET /_authz/api/session` 的 `.data.shared_session.write_state`（`off`/`ok`/`down`），
+`down` 时带 `last_write_error` 原文。它与读路径的 `state` 是两条独立探针：`state=ok` 只说明读得通，
+写路径损坏必须看 `write_state`（现场排障口径见 `docs/maintenance-handbook.md` §11）。

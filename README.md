@@ -45,7 +45,7 @@
   一套绑定在所有 / 多级泛域入口下都能代理与显示菜单，永不因入口域名不同而各建一份；
   历史遗留的完整域名（非泛域精确入口）仍原样精确匹配；
 - 公网入口默认把 HTTP 永久重定向到 HTTPS（`AUTHZ_HTTP_MODE=redirect`）；需要临时暴露管理端时用防火墙白名单限制来源；
-- 多实例可启用共享会话模式（Redis），但只允许一个实例 `read-write`，其余实例 `read-only`；角色/策略仍各自本地管理。Redis 网络故障时默认容错降级（熔断 + 读本机会话镜像 + 待写队列恢复后重放），不会整体掉登录，`AUTHZ_SESSION_SHARED_FALLBACK=false` 可恢复严格 fail-closed；详见 `docs/maintenance-handbook.md` 6.2；
+- 多实例可启用共享会话模式（Redis），但只允许一个实例 `read-write`，其余实例 `read-only`；角色/策略仍各自本地管理。Redis 网络故障时默认容错降级（熔断 + 读本机会话镜像 + 待写队列恢复后重放），不会整体掉登录，`AUTHZ_SESSION_SHARED_FALLBACK=false` 可恢复严格 fail-closed；共享**写**命令失败（含 kvrocks 这类「读正常、写全报错」的存储层损坏）另有**写路径熔断**：`read-write` 实例停止访问 Redis 并置 `write_state=down`，按 `AUTHZ_SESSION_WRITE_PROBE_INTERVAL`（默认 5 秒）半开探测自愈；写侧不可用时（`write_state=down`，或只读实例读到 writer 存活信标缺席）遇到会话查不到**不再清浏览器 Cookie**，只回 401，避免存储层写故障被放大成全员掉登录（`AUTHZ_SESSION_WRITE_BREAKER` / `AUTHZ_SESSION_WRITER_BEACON` 控制，判定矩阵见 `design.md` §18）；详见 `docs/maintenance-handbook.md` 6.2；
 - 目标 IP 默认 `127.0.0.1`，也可填写其他机器的 IPv4 或 IPv6 地址；上游协议可选择 HTTP 或 HTTPS，HTTPS 可选择是否忽略 SSL 证书校验；
 - 不同前缀可以绑定同一个端口，最终域名必须唯一，重复提交返回 `409`；
 - 可填写 `menu-name` 覆盖左侧菜单名称；配置绑定后，该端口不再依赖主动探测的菜单名称；

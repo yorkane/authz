@@ -9,7 +9,8 @@
 
 - `GET /session` — 当前身份、角色、来源。先跑它做 smoke。
 - `GET /session`（admin，共享会话模式启用时）额外返回 `shared_session` 健康段：
-  Redis 是否健康、实例是否在降级服务、还欠多少条待补写。配置类任务前先扫一眼（判读见 §15），
+  Redis 是否健康（读路径 `state` 与写路径 `write_state` 各一条探针）、实例是否在降级服务、
+  还欠多少条待补写。配置类任务前先扫一眼（判读见 §15），
   否则会把"实例正在降级"误判成"我刚配的东西没生效"。非 admin 调用或本机（非共享）模式下该段
   不存在，响应形状与既往一致。
 
@@ -251,6 +252,7 @@ core-api.md 与代码为准）。
 | HTTP 入口策略 | `AUTHZ_HTTP_MODE`=redirect/disabled/serve |
 | Cookie 安全 | `AUTHZ_COOKIE_SECURE`（HTTPS 入口必须 true；决定 SameSite=None/Lax） |
 | 共享会话容错 | `AUTHZ_SESSION_SHARED_FALLBACK`（默认 true，Redis 网络故障时降级不踢人；false = 严格 fail-closed）、`AUTHZ_SESSION_FALLBACK_GRACE`（默认 14400 秒，同时是跨实例撤销的最大延迟）、`AUTHZ_SESSION_RETRY_INTERVAL_MS`（默认 15000，待写队列重放周期）。见 §15 |
+| 共享会话写路径熔断 | `AUTHZ_SESSION_WRITE_BREAKER`（默认 true，共享写命令失败后 writer 停止访问 Redis、置 `write_state=down`）、`AUTHZ_SESSION_WRITE_PROBE_INTERVAL`（默认 5 秒，钳位 1..60，半开探测写间隔）、`AUTHZ_SESSION_WRITER_BEACON`（默认 true，成功共享写后 SETEX 30s 刷新 `<prefix>:health:shared` 存活信标）。见 §15 |
 
 注意：数据库类配置（用户/策略/绑定/菜单/Key）走 API 即时生效，不要改库；
 环境类配置走 .env，两层不要混。
@@ -400,6 +402,32 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/session" | jq ".data.
 | `config` | AUTH / SELECT db 失败，属**配置错误**，不降级 | **停止写操作**并报用户核对 `AUTHZ_SESSION_REDIS_USERNAME`/`_PASSWORD`/`_DB`；此时会话全不可用，只有 `x-api-key` 读得到该状态 |
 | `unknown` | 拿不到 `authz_shared_session` 共享字典 | 宿主机挂载的 conf 模板没同步（缺 `lua_shared_dict` / 重放定时器），让运维按 deploy.md §7.1 同步两个 template 后重启 |
 
+判读 `.data.shared_session` 时把**两条独立探针**分开看：读路径 `state`（上表）与写路径
+`write_state`，二者可以一个 ok 一个 down。
+
+| 字段 | 取值 | 含义与你要做什么 |
+|---|---|---|
+| `write_state` | `off` | 写路径熔断未启用（`AUTHZ_SESSION_WRITE_BREAKER=false` 或未启用共享会话）：写失败按旧行为逐请求暴露，清理头照常下发 |
+| `write_state` | `ok` | 共享写命令正常（writer 侧最近一次写成功） |
+| `write_state` | `down` | 共享写命令连续失败，writer 已熔断 Redis（零网络）。**读路径不受影响**，已登录会话继续可用、不下发清理 Cookie 头。伴 `last_write_error`（Redis 原始报错文本） |
+| `last_write_error` | 字符串 | 字段恒在，非空只在 `write_state=down` 时（值为 Redis 原始报错，截断 200 字符）。按关键字定性：`Corruption` 属存储层损坏（运维修 kvrocks/RocksDB），`NOPERM` 属 ACL 配错（writer 账号没有 SETEX 权限），`timeout`/`refused` 属网络 |
+
+`down` 会在 `AUTHZ_SESSION_WRITE_PROBE_INTERVAL`（默认 5 秒）后由一个 worker 做一次探测写自动恢复，
+恢复瞬间触发待写队列重放：`pending.total` 应随之归零，`write_state` 回 `ok`。
+
+**登录掉线 / 管理壳反复弹回登录页**（间歇性 401，浏览器 cookie 数在跳登录瞬间从 1 变 0）按序排查：
+
+1. 先读 `.data.shared_session`：`state=ok` **不能**排除共享存储故障——`state` 只探读，
+   `GET` 成功会刷新"最近正常"时间戳，写全挂时它仍是 `ok`。写故障只看 `write_state` 与 `last_write_error`。
+2. `write_state=down` → 用 `last_write_error` 定性（`Corruption` = 存储层损坏，运维处理；`NOPERM` = ACL 配错）。
+   确认后可用 SETEX 探针直连共享 Redis 复核：`redis-cli -h <host> SETEX <prefix>:health:probe 30 1`
+   连打 20 次统计 OK/FAIL；`GET` 通而 `SETEX` 全挂即坐实"读正常写全挂"。
+3. `write_state=ok` 却仍掉线 → 看边缘是否轮询到 read-only 实例：同一 token 分别直连两个上游
+   （`curl --resolve`，不要改 `Host` 头）比对，writer 200 / read-only 401 即边缘池问题，把只读实例摘出该域轮询池。
+4. 处置纪律：**不要在写故障期间反复清浏览器 cookie 或重启实例**——写路径不通时清 cookie 会把故障
+   转嫁成全员真的掉登录，重启也不会让存储层自愈（`session_pending` 的 `attempts` 持续上涨是判据）。
+   修复顺序：先修共享存储，恢复后欠写自动重放；止血只需把边缘收敛到 writer 单实例。
+
 判据要点：
 
 - 该段**只对 admin 输出**（`shared_session` 里含上游 Redis 的原始报错文本），低权限 Key 读不到
@@ -420,7 +448,8 @@ curl -sS -H "x-api-key: $AUTHZ_API_KEY" "$AUTHZ/_authz/api/session" | jq ".data.
   （代价：Redis 一不可用就清 Cookie、writer 登录 503）。
 - reader 实例（`read-only`）任何时候都拒绝创建新登录（503），这不是故障。登录/登出/
   改密/禁用用户一律打到 writer 实例。
-- 这三个变量属环境类，改后要 `docker compose up -d --force-recreate` 才生效。
+- 上述共享会话变量（含 `AUTHZ_SESSION_WRITE_BREAKER` / `_WRITE_PROBE_INTERVAL` / `_WRITER_BEACON`）
+  属环境类，改后要 `docker compose up -d --force-recreate` 才生效。
 
 
 ## 16. 文件服务 / 对象存储 / Web 访问的授权配置

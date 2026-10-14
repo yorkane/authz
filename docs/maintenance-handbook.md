@@ -359,6 +359,11 @@ NocoBase OAuth 的 `/api/idpOAuth/me` 只提供标准身份 claim，不使用 Ba
 - 会话命中后，实例仍用本地 `users` / `remote_users` 校验该身份存在且启用；
   本地没有或已禁用即清除登录信息（主实例删 Redis 键，只读实例仅清除本机状态）；
 - Redis 中确实没有该会话（登出/过期）时，实例立即清除登录信息；
+  **例外（2026-10-13 起）**：本机写路径已熔断（`write_state=down`），或只读实例读到「writer 存活
+  信标确实不存在」（writer 从没成功写过共享存储，缺席不可信）时，not_found **不清浏览器 Cookie、
+  不删本机镜像**，只回 401 并记 WARN——因为「共享存储里没有」很可能是写不进去而非真被撤销，
+  销毁客户端凭据会把一次存储层写故障伪装成全员掉登录。信标新鲜（writer 最近写成功过）时缺席可信，
+  仍按真撤销清理；判定矩阵见 `design.md` §18；
 - **Redis 网络故障（连接失败/读写超时/拒绝连接）走容错降级，不再拖垮整个网关**：
   熔断器状态放在 `ngx.shared.authz_shared_session` 共享字典（跨 worker 生效，任一 worker
   探测到故障即全体生效），OPEN 窗口初始 5s、按连续失败次数指数退避、上限 60s；
@@ -384,6 +389,12 @@ NocoBase OAuth 的 `/api/idpOAuth/me` 只提供标准身份 claim，不使用 Ba
   本轮直接返回，不做网络尝试；
 - reader 实例在 Redis 故障期间**仍拒绝创建新登录**（保持单 writer 不变量）；writer 实例
   登录可用，会话先在本机生效、Redis 恢复后自动补齐到 Redis；
+  写路径故障后 writer 会熔断 Redis（`write_state=down`、记 `last_write_error`），期间每
+  `AUTHZ_SESSION_WRITE_PROBE_INTERVAL` 秒（默认 5）放一个 worker 做一次探测写，成功即恢复 ok
+  并立刻重放待写队列；总开关 `AUTHZ_SESSION_WRITE_BREAKER`（默认 true）。
+  writer 每次成功共享写后顺带 `SETEX <prefix>:health:shared 30` 刷新存活信标
+  （`AUTHZ_SESSION_WRITER_BEACON`，默认 true），只读实例据此判断「缺席是否可信」。
+  事故背景、状态机与清理判定矩阵见 `design.md` §18；
 - **已知限制（必须告知使用方）**：Redis 故障期间 A 实例上的撤销（登出、改密、删用户）
   在 B 实例上不会即时生效，最长受 grace（默认 4 小时）约束；本地禁用用户/角色仍立即生效
   （共享会话命中后仍查本地 `users` / `remote_users`）。安全边界要求更高的部署应设
@@ -412,6 +423,9 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>  # >=32 字符，所有共享�
 AUTHZ_SESSION_SHARED_FALLBACK=true              # 默认 true：网络故障时熔断 + 降级读本机镜像 + 待写队列
 AUTHZ_SESSION_RETRY_INTERVAL_MS=15000            # 待写队列重放周期（毫秒，钳制 1000..600000），owner 锁串行
 AUTHZ_SESSION_FALLBACK_GRACE=14400              # 降级宽限期（秒，钳 60..604800）：撤销跨实例生效的最大延迟
+AUTHZ_SESSION_WRITE_BREAKER=true                # 写路径熔断总开关：共享写失败后 writer 停止访问 Redis（write_state=down）
+AUTHZ_SESSION_WRITE_PROBE_INTERVAL=5            # 熔断期半开探测间隔（秒，钳位 1..60）：探测写成功即恢复并重放待写队列
+AUTHZ_SESSION_WRITER_BEACON=true                # 写入方存活信标：成功共享写后 SETEX 30s 刷新 <prefix>:health:shared
 ```
 
 Redis 键格式：`<prefix>:session:<64位hex token>`，值为 JSON，TTL 与会话有效期
@@ -420,7 +434,10 @@ Redis 键格式：`<prefix>:session:<64位hex token>`，值为 JSON，TTL 与会
 清单**（目前只列了 REDIS_* 那 7 项），要让这三个新变量可配，需要在它的 `environment:` 里补
 `AUTHZ_SESSION_SHARED_FALLBACK` / `AUTHZ_SESSION_FALLBACK_GRACE` / `AUTHZ_SESSION_RETRY_INTERVAL_MS`
 三行（仓库根 docker-compose.yml 的 environment: 清单已带上，默认 true / 14400 / 15000；
-部署若用自制清单，这三个键要一起加，否则容器恒用默认值）。
+写路径熔断新增的 `AUTHZ_SESSION_WRITE_BREAKER` / `AUTHZ_SESSION_WRITE_PROBE_INTERVAL` /
+`AUTHZ_SESSION_WRITER_BEACON` 同理，默认 true / 5 / true，不加则容器恒用代码默认值，
+行为与新代码一致，但要能按实例关掉就必须显式列出）；
+部署若用自制清单，这些键要一起加，否则容器恒用默认值）。
 
 > 键值实际存储为签名信封 `<JSON>.<64位hex HMAC>`，人工用 `redis-cli GET` 排查时
 > 看到的即为此格式，属正常现象。
@@ -637,6 +654,24 @@ bash scripts/restart_gateway.sh --build  # 按当前 Docker 架构重建镜像�
 
 ## 11. 已解决故障与防回归点
 
+- **登录反复掉线 / 管理壳弹回登录页（间歇性 401）**：先查 `.env` 与实例角色，别先动 cookie。
+  1. `GET /_authz/api/session`（admin Key）看 `.data.shared_session`：读路径 `state` 与写路径
+     `write_state` 是**两条独立探针**。`state=ok` 只证明读得通；写路径损坏（kvrocks RocksDB WAL
+     损坏即此类：写命令全部返回 `ERR Corruption: WriteBatch has wrong count`，读命令正常）只在
+     `write_state=down` + `last_write_error` 显形。
+  2. 直接探存储层写健康，别信网关的读探针：`redis-cli -h <共享Redis> -a <pwd> SETEX <prefix>:health:probe 30 1`
+     连打 20 次统计 OK/FAIL（写全挂时 `GET` 依然正常，看日志猜不出来）；`SETEX` 通、`GET` 通才算健康。
+  3. 写故障确认后再看边缘：APISIX 在 read-write 与 read-only 之间轮询时，症状必然间歇——
+     打到 writer 200、打到只读实例 401。用同一 token 分别直连两个上游（`curl --resolve`）即可定位。
+  处置纪律：**不要在写故障期间反复清浏览器 cookie、重启实例或重建会话**——写路径不通时，
+  清 cookie 只是把故障转嫁成全员真的掉登录，重启也不会让存储层自愈，且每次重启后待写队列
+  仍在（`session_pending` 的 `attempts` 会一直涨，这是判据之一）。正确顺序是先修共享存储
+  （清理损坏 WAL 或从快照重建），恢复后 `session_pending` 由重放定时器自动补齐；止血只需把边缘
+  上游收敛到 writer 单实例，或把只读实例从该域轮询池摘掉。
+  防回归点：`write_state=down` 期间、以及只读实例读到「writer 信标不存在」时的 not_found **不得**
+  下发全族 `Max-Age=0` 清理头，也**不得**删本机镜像（信标新鲜时缺席可信，仍按真撤销清理；
+  完整判定矩阵见 `design.md` §18）；健康探针必须覆盖写路径（SETEX 哨兵键），只探读的探针会把
+  写故障伪装成「Redis 正常」。
 - Admin UI 统一使用 `/_authz/apps/`，不要恢复 `/admin/`；旧路径曾与认证跳转和 Cookie 问题混杂。
 - 登录错误 query 必须通过 `ngx.req.get_uri_args()` 解码，不能直接渲染 `ngx.var.arg_err` 的百分号编码。
 - 登录页和 OAuth 的 start/callback 响应必须使用 `Cache-Control: no-store`，避免浏览器回退或 302 缓存重现旧错误。

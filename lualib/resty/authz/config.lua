@@ -58,6 +58,15 @@ local function configure_session(c)
     session.configure_cookie_domain(os.getenv("AUTHZ_COOKIE_DOMAIN"), os.getenv("AUTHZ_HOST_URL"))
     shared_store.shared_enabled = false
     shared_store.fallback_enabled = env_bool("AUTHZ_SESSION_SHARED_FALLBACK", true)
+    -- 写路径熔断（2026-10-13 kvrocks WAL 损坏事故驱动）：共享 Redis"读正常、写全坏"
+    -- 时，IO 熔断永远不会开闸（GET 都成功），写侧每请求各吃一次 SETEX 报错，
+    -- reader 因读不到会话把已登录用户的 cookie 清掉。写熔断让写侧失败后窗口内
+    -- 零网络短路，并让 reader 用 writer 存活信标判断 not_found 可不可信。
+    -- 值必须写进 store（worker 里 os.getenv 读不到未声明的 env，见下方注释）。
+    shared_store.write_breaker = env_bool("AUTHZ_SESSION_WRITE_BREAKER", true)
+    shared_store.write_probe_interval = math.min(60, math.max(1,
+        tonumber(os.getenv("AUTHZ_SESSION_WRITE_PROBE_INTERVAL")) or 5))
+    shared_store.writer_beacon_enabled = env_bool("AUTHZ_SESSION_WRITER_BEACON", true)
     -- 重放定时器间隔：钳到 1s..10min（worker 里读不到 env，必须由 master 写进
     -- shared_session_store，sync 再从 store 取）。
     shared_store.retry_interval_ms = math.min(600000, math.max(1000,

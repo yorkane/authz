@@ -68,7 +68,14 @@ end
 -- 只有 IO 类故障（含熔断中）才允许降级服务；config 类错误必须显式失败。
 local function degradable(err)
     local msg = tostring(err or "")
+    -- shared_write_unavailable（共享存储写熔断）同样算可降级：写熔断的语义是
+    -- "共享写能力暂时无了"，241.t kvrocks WAL 损坏事故期间 writer 的正确行为就是
+    -- 签发进本机镜像 + 待写队列（等写恢复由 sync 补交），既不是 503 也不是丢弃。
+    -- 撤销类欠写同理：delete 失败必须入队，否则"改密撤销"会在恢复后漏补。
+    -- 注意这不代表写失败不显式：write_state / last_write_error 会出现在
+    -- /_authz/api/session 的 shared_session 里，运维可见。
     return msg == "breaker_open" or msg:find("^io:") ~= nil
+        or msg:find("^shared_write_unavailable:") ~= nil
 end
 
 local function redis_save(token, record)
@@ -400,6 +407,28 @@ function _M.get(token)
                 return nil
             end
         else
+            -- Redis 报 not_found 有两种截然不同的成因（2026-10-13 kvrocks WAL 损坏事故）：
+            --   a) 会话真的不存在/已撤销 —— 该清 cookie，维持现状；
+            --   b) 共享存储"读好写坏"：writer 签发的会话从来没能写进 Redis（写命令
+            --      全部返回 Corruption），本机 read-only 实例自然读不到。
+            -- 把 b) 当 a) 处理的后果是被清掉浏览器 cookie → 管理壳心跳 401 → 跳登录页，
+            -- 而且永远登录不回来（签发侧写不进去）。因此这里判据只有一条：
+            -- **本次 not_found 是不是发生在一套"写侧已知不可用"的共享存储上**。
+            --   * store.write_state()=="down"：本实例自己观测到写熔断（writer 视角，
+            --     也覆盖 read-write 实例上的 read 正常场景）；
+            --   * 非 read-write 且 writer 存活信标确实不存在（== false，不是 nil）：
+            --     writer 在信标 TTL 内一次都没成功写过共享存储，not_found 不可信。
+            -- 命中判据时不清 cookie、不删本机镜像：上游照旧 401，但用户的会话凭据
+            -- 留在浏览器里，Redis 写恢复后由 sync 重放补齐，用户自动"活过来"。
+            -- beacon() 返回 nil（连不上/超时/命令错）不进这条分支：那种情况由
+            -- redis_unreachable 分支的宽限期降级负责，不在此放宽清理语义。
+            local writes_unavailable = store.write_state() == "down"
+                or (store.mode ~= "read-write" and store.writer_beacon() == false)
+            if writes_unavailable then
+                ngx.log(ngx.WARN, "authz shared session: not_found while writer writes are "
+                    .. "unavailable, keeping cookie")
+                return nil
+            end
             -- Redis 中确实没有该会话: 按约定清除登录信息。
             sessions.delete(token)
             _M.clear_cookie()

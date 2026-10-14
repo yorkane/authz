@@ -457,6 +457,11 @@ AUTHZ_SESSION_SIGNING_KEY=<openssl rand -hex 32>
 AUTHZ_SESSION_SHARED_FALLBACK=true          # false = 严格 fail-closed（Redis 不可用即清 Cookie、writer 登录 503）
 AUTHZ_SESSION_RETRY_INTERVAL_MS=15000       # 待写队列重放定时器周期（毫秒，钳制 1000..600000）
 AUTHZ_SESSION_FALLBACK_GRACE=14400          # 降级宽限期（秒，钳 60..604800）：也是跨实例撤销生效的最大延迟
+# 共享写命令失败（任何原因，含存储层返回 Corruption）后的写路径熔断：writer 停止访问 Redis
+# 并置 write_state=down，读路径不受影响；每 PROBE_INTERVAL 秒半开放一次探测写，写成功即恢复。
+AUTHZ_SESSION_WRITE_BREAKER=true            # 写路径熔断总开关（默认 true）
+AUTHZ_SESSION_WRITE_PROBE_INTERVAL=5        # 半开探测间隔（秒，默认 5，钳位 1..60）
+AUTHZ_SESSION_WRITER_BEACON=true            # 写入方存活信标：成功共享写后 SETEX 30s 刷新 <prefix>:health:shared
 ```
 
 语义：
@@ -483,6 +488,15 @@ AUTHZ_SESSION_FALLBACK_GRACE=14400          # 降级宽限期（秒，钳 60..60
   熔断 OPEN 时本轮直接返回，不做网络尝试；
 - reader（只读）实例在 Redis 故障期间**仍拒绝创建新登录**，保持单 writer 不变量；writer 实例登录可用，
   会话先在本机生效、Redis 恢复后自动补齐到 Redis；
+- **写路径熔断与分级清理**（2026-10-13 事故新增，见 `design.md` §18）：共享**写**命令失败（任何原因，
+  包括 kvrocks 这类「读正常、写全部报错」的存储层损坏）后，read-write 实例停止继续访问 Redis，置
+  `write_state=down` 并记录 `last_write_error`，故障期零网络；半开探测每 `AUTHZ_SESSION_WRITE_PROBE_INTERVAL`
+  秒放一个 worker 做一次探测写，写成功即恢复 ok 并立刻重放待写队列。与此同时 read-only 实例（或本机
+  `write_state=down` 时）遇到共享会话 not_found **不再清浏览器 Cookie、不删本机会话镜像**，只回 401 并记 WARN；
+  （只读实例判「缺席是否可信」用的就是下面那条信标：信标新鲜时缺席可信，按真撤销照常清理）
+  写状态恢复后旧的全族清理行为回来。显式撤销、删号、配置故障（`state=config`）触发的全族清理不变；
+  read-write 实例在每次成功共享写后顺带 SETEX 30s 刷新存活信标 `<prefix>:health:shared`，供只读实例判断
+  「这次缺席是否可信」；
 - **已知限制**：Redis 故障期间 A 实例上的撤销（登出、改密、删用户）在 B 实例上不会即时生效，
   最长受 grace（降级宽限期，`AUTHZ_SESSION_FALLBACK_GRACE`，默认 4 小时）约束；本地禁用用户/角色
   仍立即生效（共享会话命中后仍查本地 `users` / `remote_users`）。
@@ -498,6 +512,8 @@ AUTHZ_SESSION_FALLBACK_GRACE=14400          # 降级宽限期（秒，钳 60..60
 Redis 健康状况不用猜：共享模式启用时 `GET /_authz/api/session` 的响应带 `shared_session` 段，给出
 `state`（`ok`/`down`/`config`，另有 `unknown` = 共享字典缺失）、`down_remaining_ms`、`failures`、`last_error`、
 `fallback` 与 `degraded`（当前是否正在降级服务），字段含义见 `docs/core-api.md` §6.5。
+`state` 只覆盖读路径健康，写路径单独由 `write_state`（`off`/`ok`/`down`）暴露，`down` 时带 `last_write_error`
+原文——kv/存储层损坏类故障只在写路径显形，只看 `state` 会把它误判成「Redis 正常」。
 
 **升级既有实例时必须同步模板**：本能力依赖 `conf/nginx.conf.template` 里新增的
 `lua_shared_dict authz_shared_session 1m`（跨 worker 的熔断状态与降级 grace 键）和
@@ -672,6 +688,9 @@ AUTHZ_SESSION_SIGNING_KEY=                        # 共享记录 HMAC-SHA256 签
 AUTHZ_SESSION_SHARED_FALLBACK=true                # Redis 网络故障时容错降级：熔断 OPEN 期间会话校验改读本机 SQLite 镜像（该会话在 grace 内经 Redis 确认过才承认），本该写 Redis 的动作进 session_pending 待写队列，恢复后自动重放。false = 严格 fail-closed（清 Cookie、writer 登录 503）；代价是故障期间其他实例的撤销最长一个 grace 后才生效。AUTH/SELECT 失败属配置错误，不降级。
 AUTHZ_SESSION_FALLBACK_GRACE=14400                # 降级宽限期（秒，钳 60..604800）：会话「最近一次经 Redis 确认存在」必须落在窗口内才允许降级服务，也是跨实例撤销延迟的上限。调大 = Redis 长时间不可用更不易掉登录但撤销更晚生效。
 AUTHZ_SESSION_RETRY_INTERVAL_MS=15000              # session_pending 重放定时器周期（毫秒，钳制 1000..600000），owner 锁保证同一时刻只有一条重放链；调小可缩短恢复后的补齐延迟。需重建容器生效。
+AUTHZ_SESSION_WRITE_BREAKER=true                  # 共享写命令失败（任何原因，含存储层 Corruption）后的写路径熔断：read-write 实例停止访问 Redis（短路、零网络）并置 write_state=down + 记录 last_write_error；读路径不受影响，仍可走本机镜像服务已登录会话且不下发清理 Cookie 头。false = 写故障期每请求继续付一次写超时。
+AUTHZ_SESSION_WRITE_PROBE_INTERVAL=5              # 熔断期半开探测间隔（秒，默认 5，钳位 1..60）：每轮放一个 worker 做一次探测写，成功即恢复 ok 并立刻触发待写队列重放。
+AUTHZ_SESSION_WRITER_BEACON=true                  # 写入方存活信标：read-write 在每次成功共享写后顺带 SETEX 30s 刷新 <prefix>:health:shared，read-only 在 not_found 时读它判断「缺席是否可信」。需重建容器生效。
 
 # ══════════════ 响应改写缓冲（可选）══════════════
 AUTHZ_REWRITE_BUFFER_MB=64                        # 正文改写的 worker 级缓冲预算（MB）。单响应上限固定 1MB 并按此整块预留；预算耗尽的新响应跳过改写、原样流式透传（响应头 X-Authz-Rewrite: skipped=memory）。仅影响 body/rewrites，状态码与响应头改写不占预算。

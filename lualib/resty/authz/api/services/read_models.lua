@@ -12,6 +12,7 @@ local validation = require "resty.authz.api.validation"
 local menu_overrides = require "resty.authz.repository.menu_overrides"
 local domain = require "resty.authz.domain"
 local session = require "resty.authz.session"
+local shared_store = require "resty.authz.shared_session_store"
 
 --- 共享会话健康快照，只给管理员。
 -- 为什么必须也挂在 API Key 分支：Redis 的 AUTH/db 配错时，本实例上任何会话都
@@ -24,6 +25,19 @@ local function session_status(subject)
     if not common.is_admin(subject) then return nil end
     local ok, status = pcall(function() return session.shared_status() end)
     if not ok then return nil end
+    if type(status) ~= "table" then return status end
+    -- 写侧健康（2026-10-13 kvrocks WAL 损坏事故驱动）：读路径全绿时 status.state
+    -- 是 ok，"写全坏"这件事只有 write_state 能说出来，所以这里显式补齐并保证
+    -- 键恒在（共享未启用 = "off"），不做条件省略，前端与运维脚本可以无脑取字段。
+    -- 直接问 store 而不是信任 status 里的同名值：session.shared_status 是别人的
+    -- 组装层，取一次权威值更稳。
+    local write_ok, write_state = pcall(shared_store.write_state)
+    status.write_state = (write_ok and write_state) or "off"
+    if status.write_state == "down" then
+        local err_ok, last_err = pcall(shared_store.write_last_error)
+        status.last_write_error = (err_ok and last_err)
+            or status.last_write_error or "shared_write_unavailable"
+    end
     return status
 end
 

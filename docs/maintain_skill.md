@@ -52,9 +52,20 @@ description: 维护本仓库的 OpenResty Authz Gateway、klib Router、Vue 3 + 
   `oidcStates:create` 一次性注册，运行时使用 Code + PKCE、`client_secret_basic` 和严格 `iss` 校验；
   禁止恢复 `app:` 静态 Client、NocoBase 本地插件或 `resource` 参数方案。
 - 多实例共享会话只允许一个实例 `read-write`，其余实例必须 `read-only`；reader ACL 只授予 GET/PING；
-  Redis 不可达时共享会话必须失败关闭，禁止回退 SQLite；登录、登出、改密必须走主实例。
+  登录、登出、改密必须走主实例。Redis **网络故障**默认容错降级（`AUTHZ_SESSION_SHARED_FALLBACK=true`：
+  熔断 + 读本机 SQLite 会话镜像 + `session_pending` 待写队列重放），只有明确要求撤销即时生效的部署才设
+  `false` 恢复严格 fail-closed。
   共享记录必须以 `<JSON>.<HMAC hex>` 信封签名（`AUTHZ_SESSION_SIGNING_KEY`，>=32 字符，HMAC 覆盖 token+JSON），
   reader 拒绝未签名/伪造记录——公共 Redis 禁 ACL 时这是唯一防线，不得移除。
+- 共享会话的**写路径**独立熔断（`AUTHZ_SESSION_WRITE_BREAKER=true`，探测间隔
+  `AUTHZ_SESSION_WRITE_PROBE_INTERVAL=5` 秒钳 1..60，存活信标 `AUTHZ_SESSION_WRITER_BEACON=true`）：
+  共享写命令失败（**任何原因**，含 kvrocks「读正常、写全报 Corruption」的存储层损坏）后 writer 停止访问
+  Redis 并置 `write_state=down` + `last_write_error`，半开探测写成功即恢复并立刻重放待写队列。
+  配套的清理判据不得放宽：`write_state=down` 期间、以及只读实例读到「writer 信标不存在」时遇到
+  not_found **不清浏览器 Cookie、不删本机镜像**，只回 401 记 WARN；只读实例在信标新鲜时按真撤销清理，
+  显式撤销/删号/config 故障的全族清理同样保持不变（判定矩阵见 `design.md` §18）。
+  健康探针必须覆盖写路径（SETEX 哨兵键）——只探读的探针会把写故障伪装成 `state=ok`，把存储层故障
+  表现成「间歇性弹回登录页」（`design.md` §18）。
 - `authz_session` Cookie 只用于网关自身；代理上游时必须精确剥离该 Cookie 并保留业务 Cookie。
 - 公网入口默认把 HTTP 永久重定向到 HTTPS（`AUTHZ_HTTP_MODE=redirect`），临时维护只能用防火墙白名单，不得恢复明文登录入口。
 
